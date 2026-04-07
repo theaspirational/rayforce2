@@ -246,6 +246,11 @@ bool     ray_sym_ensure_cap(uint32_t needed);
 ray_err_t ray_sym_save(const char* path);
 ray_err_t ray_sym_load(const char* path);
 
+/* ===== Environment API ===== */
+
+ray_t*    ray_env_get(int64_t sym_id);
+ray_err_t ray_env_set(int64_t sym_id, ray_t* val);
+
 /* ===== Table API ===== */
 
 ray_t*       ray_table_new(int64_t ncols);
