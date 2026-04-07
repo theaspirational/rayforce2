@@ -2423,22 +2423,16 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
     return ray_error("type", "rule/query: unrecognized body clause form");
 }
 
-/* (rule (head-name ?v1 ?v2 ...) clause1 clause2 ...)
- * Special form: args are NOT evaluated.
- * Parses the head and body into a dl_rule_t and stores it globally. */
-ray_t* ray_rule_fn(ray_t** args, int64_t n) {
-    if (n < 2)
-        return ray_error("arity", "rule expects at least a head and one body clause");
-
-    /* First arg: head -- must be a list (head-name ?v1 ?v2 ...) */
-    ray_t* head = args[0];
+/* Parse head + body clauses into out (shared by rule and query inline rules). */
+static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
+                                                ray_t** body_args, int64_t n_body,
+                                                dl_var_map_t* vars) {
     if (!is_list(head) || ray_len(head) < 1)
         return ray_error("type", "rule: head must be (name ?var ...)");
 
     ray_t** hd = (ray_t**)ray_data(head);
     int64_t hlen = ray_len(head);
 
-    /* Head name */
     if (hd[0]->type != -RAY_SYM)
         return ray_error("type", "rule: head name must be a symbol");
 
@@ -2446,53 +2440,72 @@ ray_t* ray_rule_fn(ray_t** args, int64_t n) {
     if (!head_name_str)
         return ray_error("type", "rule: cannot resolve head name");
 
-    /* _ is reserved as wildcard -- cannot be a rule predicate name */
     if (ray_str_len(head_name_str) == 1 && ray_str_ptr(head_name_str)[0] == '_')
         return ray_error("domain", "rule: _ is reserved as wildcard");
 
-    if (g_dl_n_rules >= DL_MAX_RULES)
-        return ray_error("domain", "rule: too many rules (max 128)");
-
-    /* Build variable map */
-    dl_var_map_t vars;
-    memset(&vars, 0, sizeof(vars));
-
     int head_arity = (int)(hlen - 1);
-    dl_rule_t rule;
-    dl_rule_init(&rule, ray_str_ptr(head_name_str), head_arity);
+    dl_rule_init(out, ray_str_ptr(head_name_str), head_arity);
 
-    /* Head variables */
     for (int i = 0; i < head_arity; i++) {
         ray_t* harg = hd[i + 1];
         if (is_dl_var(harg)) {
-            int vi = dl_var_get_or_create(&vars, harg->i64);
-            dl_rule_head_var(&rule, i, vi);
+            int vi = dl_var_get_or_create(vars, harg->i64);
+            dl_rule_head_var(out, i, vi);
         } else if (harg->type == -RAY_I64) {
-            dl_rule_head_const(&rule, i, harg->i64);
+            dl_rule_head_const(out, i, harg->i64);
         } else if (harg->type == -RAY_SYM) {
-            dl_rule_head_const(&rule, i, harg->i64);
+            dl_rule_head_const(out, i, harg->i64);
         } else {
             return ray_error("type", "rule: head arguments must be ?variables or constants");
         }
     }
 
-    /* Body clauses */
-    for (int64_t i = 1; i < n; i++) {
-        ray_t* err = dl_parse_body_clause(&rule, args[i], &vars);
+    for (int64_t i = 0; i < n_body; i++) {
+        ray_t* err = dl_parse_body_clause(out, body_args[i], vars);
         if (err) return err;
     }
 
-    rule.n_vars = vars.n;
+    out->n_vars = vars->n;
+    return NULL;
+}
 
-    /* Store globally */
+/* One inline rule: ((head-name ?a ...) body1 body2 ...) */
+static ray_t* dl_parse_inline_rule(dl_rule_t* out, ray_t* rule_list) {
+    if (!is_list(rule_list) || ray_len(rule_list) < 1)
+        return ray_error("type", "query: each (rules ...) entry must be a non-empty list");
+
+    ray_t** re = (ray_t**)ray_data(rule_list);
+    int64_t rlen = ray_len(rule_list);
+    dl_var_map_t vars;
+    memset(&vars, 0, sizeof(vars));
+    return dl_parse_rule_from_head_and_body(out, re[0], &re[1], rlen - 1, &vars);
+}
+
+/* (rule (head-name ?v1 ?v2 ...) clause1 clause2 ...)
+ * Special form: args are NOT evaluated.
+ * Parses the head and body into a dl_rule_t and stores it globally. */
+ray_t* ray_rule_fn(ray_t** args, int64_t n) {
+    if (n < 2)
+        return ray_error("arity", "rule expects at least a head and one body clause");
+
+    if (g_dl_n_rules >= DL_MAX_RULES)
+        return ray_error("domain", "rule: too many rules (max 128)");
+
+    dl_var_map_t vars;
+    memset(&vars, 0, sizeof(vars));
+    dl_rule_t rule;
+    ray_t* perr = dl_parse_rule_from_head_and_body(&rule, args[0], &args[1], n - 1, &vars);
+    if (perr) return perr;
+
     memcpy(&g_dl_rules[g_dl_n_rules++], &rule, sizeof(dl_rule_t));
     return ray_bool(true);
 }
 
-/* (query db (find ?a ?b ...) (where clause1 clause2 ...))
+/* (query db (find ?a ?b ...) (where clause1 clause2 ...) [(rules ...)])
+ * Optional fourth arg (rules ...) supplies inline rules only (globals ignored).
  * Special form: db is evaluated, find/where are NOT evaluated.
  * Creates a temporary dl_program_t, registers the EAV table,
- * copies global rules, builds a synthetic query rule, and evaluates. */
+ * copies global rules (unless inline rules), builds a synthetic query rule, and evaluates. */
 ray_t* ray_query_fn(ray_t** args, int64_t n) {
     if (n < 3)
         return ray_error("arity", "query expects: db (find ...) (where ...)");
@@ -2553,6 +2566,20 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
         return ray_error("type", "query: expected (where ...) as third argument");
     }
 
+    /* Optional: (rules ((head ...) body ...) ...) — use only these rules, not globals */
+    ray_t* rules_clause = NULL;
+    if (n >= 4) {
+        ray_t* fourth = args[3];
+        if (is_list(fourth) && ray_len(fourth) >= 1) {
+            ray_t** re4 = (ray_t**)ray_data(fourth);
+            if (re4[0]->type == -RAY_SYM) {
+                ray_t* rname = ray_sym_str(re4[0]->i64);
+                if (rname && strcmp(ray_str_ptr(rname), "rules") == 0)
+                    rules_clause = fourth;
+            }
+        }
+    }
+
     /* Build variable map for the query */
     dl_var_map_t vars;
     memset(&vars, 0, sizeof(vars));
@@ -2607,9 +2634,27 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
         ray_release(eav_tbl);
     }
 
-    /* Copy all global rules into the program */
-    for (int i = 0; i < g_dl_n_rules; i++)
-        dl_add_rule(prog, &g_dl_rules[i]);
+    if (rules_clause) {
+        ray_t** re = (ray_t**)ray_data(rules_clause);
+        int64_t rlen = ray_len(rules_clause);
+        for (int64_t i = 1; i < rlen; i++) {
+            dl_rule_t irule;
+            ray_t* rerr = dl_parse_inline_rule(&irule, re[i]);
+            if (rerr) {
+                dl_program_free(prog);
+                ray_release(db);
+                return rerr;
+            }
+            if (dl_add_rule(prog, &irule) < 0) {
+                dl_program_free(prog);
+                ray_release(db);
+                return ray_error("domain", "query: too many rules");
+            }
+        }
+    } else {
+        for (int i = 0; i < g_dl_n_rules; i++)
+            dl_add_rule(prog, &g_dl_rules[i]);
+    }
 
     /* Add the synthetic query rule */
     dl_add_rule(prog, &qrule);
