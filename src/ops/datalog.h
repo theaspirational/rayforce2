@@ -115,6 +115,8 @@ typedef struct {
     bool    is_idb;                 /* true = derived (intensional) */
     int64_t col_names[DL_MAX_ARITY]; /* interned column name symbols */
     ray_t*  prov_col;               /* provenance column (when DL_FLAG_PROVENANCE) */
+    ray_t*  prov_src_offsets;       /* CSR offsets into prov_src_data, length nrows+1 */
+    ray_t*  prov_src_data;          /* packed source refs: (rel_idx << 32) | row_idx */
 } dl_rel_t;
 
 /* ===== Datalog program ===== */
@@ -162,10 +164,23 @@ ray_t* dl_query(dl_program_t* prog, const char* pred_name);
  * of rule indices, or NULL if provenance not enabled/available. */
 ray_t* dl_get_provenance(dl_program_t* prog, const char* pred_name);
 
-/* Stub: deep provenance source offsets (not yet implemented). Returns NULL. */
+/* Retrieve deep provenance source offsets for a derived relation.
+ * Returns an I64 vector of length nrows+1 in CSR format: offsets[i] is the
+ * start index in the source-data vector for derived row i.
+ * Only valid when DL_FLAG_PROVENANCE is set. Returns NULL if unavailable. */
 ray_t* dl_get_provenance_src_offsets(dl_program_t* prog, const char* pred_name);
 
-/* Stub: deep provenance source data (not yet implemented). Returns NULL. */
+/* Retrieve deep provenance source data for a derived relation.
+ * Returns a flat I64 vector of packed source references. Each entry encodes
+ * (relation_index << 32) | row_index, identifying which EDB or IDB relation
+ * and row contributed to deriving a given output tuple.
+ *
+ * For rules with body-only variables (variables appearing in body atoms but
+ * not in the head), source entries include all body rows consistent with
+ * head-visible bindings. Cross-body join constraints are not re-enforced
+ * during source lookup, so entries may be a superset of the true derivation.
+ *
+ * Only valid when DL_FLAG_PROVENANCE is set. Returns NULL if unavailable. */
 ray_t* dl_get_provenance_src_data(dl_program_t* prog, const char* pred_name);
 
 /* ===== Rule builder helpers ===== */

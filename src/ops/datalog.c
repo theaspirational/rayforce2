@@ -38,6 +38,10 @@ void dl_program_free(dl_program_t* prog) {
             ray_release(prog->rels[i].table);
         if (prog->rels[i].prov_col && !RAY_IS_ERR(prog->rels[i].prov_col))
             ray_release(prog->rels[i].prov_col);
+        if (prog->rels[i].prov_src_offsets && !RAY_IS_ERR(prog->rels[i].prov_src_offsets))
+            ray_release(prog->rels[i].prov_src_offsets);
+        if (prog->rels[i].prov_src_data && !RAY_IS_ERR(prog->rels[i].prov_src_data))
+            ray_release(prog->rels[i].prov_src_data);
     }
     ray_free(dl_prog_block(prog));
 }
@@ -1327,8 +1331,112 @@ static bool dl_row_in_table(ray_t* tbl, int64_t row, ray_t* ref) {
     return false;
 }
 
+/* Build source provenance for one IDB relation in CSR format.
+ *
+ * For each derived row, extracts head variable bindings from the firing rule
+ * and scans each positive body atom's relation for rows consistent with those
+ * bindings.  Results are stored as two parallel vectors on the relation:
+ *
+ *   prov_src_offsets — I64[nrows+1]: offsets[i] = start index in prov_src_data
+ *                      for derived row i.  offsets[nrows] = total entry count.
+ *   prov_src_data    — I64[total]: each entry = (rel_idx << 32) | row_idx,
+ *                      packed reference to the contributing source row.
+ *
+ * Body-only variables (not appearing in the head) are unconstrained during
+ * source lookup, so the entry set may be a superset of the true proof. */
+static void dl_build_source_prov(dl_program_t* prog, dl_rel_t* rel,
+                                  int64_t nrows, int64_t* pd) {
+    ray_t* off_vec = ray_vec_new(RAY_I64, nrows + 1);
+    if (!off_vec || RAY_IS_ERR(off_vec)) return;
+    off_vec->len = nrows + 1;
+    int64_t* off = (int64_t*)ray_data(off_vec);
+
+    int64_t buf_cap = (nrows < 16) ? 64 : nrows * 4;
+    ray_t* buf_block = ray_alloc((size_t)buf_cap * sizeof(int64_t));
+    if (!buf_block) { ray_release(off_vec); return; }
+    int64_t* buf = (int64_t*)ray_data(buf_block);
+    int64_t buf_len = 0;
+
+    for (int64_t row = 0; row < nrows; row++) {
+        off[row] = buf_len;
+        if (pd[row] < 0) continue;
+
+        dl_rule_t* rule = &prog->rules[pd[row]];
+
+        int64_t var_vals[DL_MAX_ARITY * DL_MAX_BODY];
+        bool    var_set [DL_MAX_ARITY * DL_MAX_BODY];
+        memset(var_set, 0, sizeof(var_set));
+
+        /* Extract head variable bindings from this derived row */
+        for (int h = 0; h < rule->head_arity; h++) {
+            int v = rule->head_vars[h];
+            if (v == DL_CONST) continue;
+            ray_t* col = ray_table_get_col_idx(rel->table, h);
+            if (!col) continue;
+            var_vals[v] = ((int64_t*)ray_data(col))[row];
+            var_set[v]  = true;
+        }
+
+        /* For each positive body atom, find matching source rows */
+        for (int b = 0; b < rule->n_body; b++) {
+            dl_body_t* body = &rule->body[b];
+            if (body->type != DL_POS) continue;
+
+            int bri = dl_find_rel(prog, body->pred);
+            if (bri < 0) continue;
+            dl_rel_t* brel   = &prog->rels[bri];
+            int64_t   bnrows = ray_table_nrows(brel->table);
+
+            for (int64_t br = 0; br < bnrows; br++) {
+                bool match = true;
+                for (int c = 0; c < body->arity; c++) {
+                    ray_t* bcol = ray_table_get_col_idx(brel->table, c);
+                    if (!bcol) { match = false; break; }
+                    int64_t cell = ((int64_t*)ray_data(bcol))[br];
+                    int     v    = body->vars[c];
+                    if (v == DL_CONST) {
+                        if (cell != body->const_vals[c]) { match = false; break; }
+                    } else if (var_set[v]) {
+                        if (cell != var_vals[v])         { match = false; break; }
+                    }
+                    /* body-only variable: unconstrained, always matches */
+                }
+                if (!match) continue;
+
+                if (buf_len >= buf_cap) {
+                    int64_t   new_cap   = buf_cap * 2;
+                    ray_t*    new_block = ray_alloc((size_t)new_cap * sizeof(int64_t));
+                    if (!new_block) goto done;
+                    memcpy(ray_data(new_block), buf, (size_t)buf_len * sizeof(int64_t));
+                    ray_free(buf_block);
+                    buf_block = new_block;
+                    buf       = (int64_t*)ray_data(new_block);
+                    buf_cap   = new_cap;
+                }
+                buf[buf_len++] = ((int64_t)bri << 32) | (int64_t)(uint32_t)br;
+            }
+        }
+    }
+done:
+    off[nrows] = buf_len;
+
+    ray_t* data_vec = ray_vec_new(RAY_I64, buf_len > 0 ? buf_len : 1);
+    if (data_vec && !RAY_IS_ERR(data_vec)) {
+        data_vec->len = buf_len;
+        if (buf_len > 0)
+            memcpy(ray_data(data_vec), buf, (size_t)buf_len * sizeof(int64_t));
+    }
+    ray_free(buf_block);
+
+    if (rel->prov_src_offsets) ray_release(rel->prov_src_offsets);
+    if (rel->prov_src_data)    ray_release(rel->prov_src_data);
+    rel->prov_src_offsets = off_vec;
+    rel->prov_src_data    = (data_vec && !RAY_IS_ERR(data_vec)) ? data_vec : NULL;
+}
+
 /* Build provenance for all IDB relations.
- * For each rule, compile with final tables and mark matching tuples. */
+ * For each rule, compile with final tables and mark matching tuples.
+ * Then build deep source provenance (CSR offsets + packed source refs). */
 static void dl_build_provenance(dl_program_t* prog) {
     for (int ri = 0; ri < prog->n_rels; ri++) {
         dl_rel_t* rel = &prog->rels[ri];
@@ -1376,6 +1484,8 @@ static void dl_build_provenance(dl_program_t* prog) {
 
         if (rel->prov_col) ray_release(rel->prov_col);
         rel->prov_col = prov;
+
+        dl_build_source_prov(prog, rel, nrows, pd);
     }
 }
 
@@ -1630,18 +1740,20 @@ ray_t* dl_get_provenance(dl_program_t* prog, const char* pred_name) {
     return prog->rels[idx].prov_col;
 }
 
-/* Stub: deep provenance source offsets (not yet implemented in C engine).
- * Returns NULL; Rust side treats this as "no deep provenance available". */
 ray_t* dl_get_provenance_src_offsets(dl_program_t* prog, const char* pred_name) {
-    (void)prog; (void)pred_name;
-    return NULL;
+    if (!prog || !pred_name) return NULL;
+    if (!(prog->flags & DL_FLAG_PROVENANCE)) return NULL;
+    int idx = dl_find_rel(prog, pred_name);
+    if (idx < 0) return NULL;
+    return prog->rels[idx].prov_src_offsets;
 }
 
-/* Stub: deep provenance source data (not yet implemented in C engine).
- * Returns NULL; Rust side treats this as "no deep provenance available". */
 ray_t* dl_get_provenance_src_data(dl_program_t* prog, const char* pred_name) {
-    (void)prog; (void)pred_name;
-    return NULL;
+    if (!prog || !pred_name) return NULL;
+    if (!(prog->flags & DL_FLAG_PROVENANCE)) return NULL;
+    int idx = dl_find_rel(prog, pred_name);
+    if (idx < 0) return NULL;
+    return prog->rels[idx].prov_src_data;
 }
 
 /* ── Builtins ── */
