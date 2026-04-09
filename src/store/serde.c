@@ -220,7 +220,7 @@ int64_t ray_serde_size(ray_t* obj) {
     case RAY_VARY: {
         /* Serialize by name (null-terminated string in nullmap) */
         const char* name = ray_fn_name(obj);
-        size_t nlen = strnlen(name, 15);
+        size_t nlen = strlen(name); if (nlen > 15) nlen = 15;
         return 1 + (int64_t)nlen + 1; /* type + name + null terminator */
     }
     case RAY_ERROR:
@@ -455,7 +455,7 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
     case RAY_VARY: {
         /* Serialize builtin by name (null-terminated) */
         const char* name = ray_fn_name(obj);
-        size_t nlen = strnlen(name, 15);
+        size_t nlen = strlen(name); if (nlen > 15) nlen = 15;
         memcpy(buf, name, nlen);
         buf[nlen] = 0;
         return 1 + (int64_t)nlen + 1;
