@@ -1806,9 +1806,16 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                                     radix_done = (sorted_idx != NULL);
                                     if (radix_done && want_sk && sk_out) {
                                         *sorted_keys_out = sk_out;
-                                        /* sk_out points to ktmp — keep it alive */
-                                        *keys_hdr_out = ktmp_hdr;
-                                        ktmp_hdr = NULL; /* prevent free below */
+                                        if (sk_out == ktmp) {
+                                            *keys_hdr_out = ktmp_hdr;
+                                            ktmp_hdr = NULL;
+                                        } else {
+                                            /* Even number of radix passes:
+                                             * sorted keys ended up in the
+                                             * original keys buffer. */
+                                            *keys_hdr_out = keys_hdr;
+                                            keys_hdr = NULL;
+                                        }
                                     }
                                 }
                                 if (ktmp_hdr) scratch_free(ktmp_hdr);

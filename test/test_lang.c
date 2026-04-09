@@ -1584,6 +1584,60 @@ static MunitResult test_sort_decode_f64_neg(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* ---- Tests: radix sort decode for n > RADIX_SORT_THRESHOLD (4096) ----
+ * Below 4096, key_introsort is used (no radix decode).  These tests
+ * ensure the radix sort double-buffer correctly hands back the sorted
+ * keys for decode — the use-after-free that produced -nan on F64. */
+
+static MunitResult test_sort_decode_radix_f64(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Tile 10 F64 values to 4097 (just past RADIX_SORT_THRESHOLD),
+     * sort ascending, verify ordering and no NaN. */
+    ray_t* s = ray_eval_str("(asc (take [9.9 1.1 5.5 3.3 7.7 2.2 8.8 4.4 6.6 0.0] 4097))");
+    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
+    munit_assert_int(ray_len(s), ==, 4097);
+    double* d = (double*)ray_data(s);
+    for (int64_t i = 0; i < 4097; i++) munit_assert_false(d[i] != d[i]); /* no NaN */
+    for (int64_t i = 0; i < 4096; i++) munit_assert_true(d[i] <= d[i + 1]);
+    munit_assert_double(d[0], ==, 0.0);
+    munit_assert_double(d[4096], ==, 9.9);
+    ray_release(s);
+    return MUNIT_OK;
+}
+
+static MunitResult test_sort_decode_radix_f64_desc(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* s = ray_eval_str("(desc (take [9.9 1.1 5.5 -3.3 7.7 -2.2 8.8 -4.4 6.6 0.0] 5000))");
+    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
+    munit_assert_int(ray_len(s), ==, 5000);
+    double* d = (double*)ray_data(s);
+    for (int64_t i = 0; i < 5000; i++) munit_assert_false(d[i] != d[i]);
+    for (int64_t i = 0; i < 4999; i++) munit_assert_true(d[i] >= d[i + 1]);
+    munit_assert_double(d[0], ==, 9.9);
+    munit_assert_double(d[4999], ==, -4.4);
+    ray_release(s);
+    return MUNIT_OK;
+}
+
+static MunitResult test_sort_decode_radix_i64(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* I64 with large range forces 8-byte radix keys → non-packed radix decode. */
+    ray_t* tmp = ray_eval_str("(set _rv (rand 5000 100000000))");
+    if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
+    ray_t* s = ray_eval_str("(asc _rv)");
+    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
+    ray_t* v = ray_eval_str("_rv");
+    munit_assert_int(ray_len(s), ==, 5000);
+    int64_t* sd = (int64_t*)ray_data(s);
+    for (int64_t i = 0; i < 4999; i++) munit_assert_true(sd[i] <= sd[i + 1]);
+    int64_t sum_orig = 0, sum_sorted = 0;
+    int64_t* vd = (int64_t*)ray_data(v);
+    for (int64_t i = 0; i < 5000; i++) { sum_orig += vd[i]; sum_sorted += sd[i]; }
+    munit_assert_true(sum_orig == sum_sorted);
+    ray_release(s); ray_release(v);
+    return MUNIT_OK;
+}
+
 /* ---- Test: read/write CSV roundtrip ---- */
 static MunitResult test_eval_read_write_csv(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -1986,6 +2040,9 @@ static MunitTest lang_tests[] = {
     { "/sort/decode_f64",      test_sort_decode_f64,      lang_setup, lang_teardown, 0, NULL },
     { "/sort/decode_desc",     test_sort_decode_desc,     lang_setup, lang_teardown, 0, NULL },
     { "/sort/decode_f64_neg",  test_sort_decode_f64_neg,  lang_setup, lang_teardown, 0, NULL },
+    { "/sort/decode_radix_f64",      test_sort_decode_radix_f64,      lang_setup, lang_teardown, 0, NULL },
+    { "/sort/decode_radix_f64_desc", test_sort_decode_radix_f64_desc, lang_setup, lang_teardown, 0, NULL },
+    { "/sort/decode_radix_i64",      test_sort_decode_radix_i64,      lang_setup, lang_teardown, 0, NULL },
     { "/eval/read_write_csv",  test_eval_read_write_csv,  lang_setup, lang_teardown, 0, NULL },
     { "/eval/as_cast",         test_eval_as_cast,         lang_setup, lang_teardown, 0, NULL },
     { "/eval/type",            test_eval_type,            lang_setup, lang_teardown, 0, NULL },
