@@ -1942,6 +1942,55 @@ static MunitResult test_datalog_fixpoint(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+static MunitResult test_datalog_query_inline_rules(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    ray_t* r_inline = ray_eval_str(
+        "(do"
+        "  (set db (datoms))"
+        "  (set db (assert-fact db 1 'edge 2))"
+        "  (set db (assert-fact db 2 'edge 3))"
+        "  (set db (assert-fact db 3 'edge 4))"
+        "  (query db (find ?x ?y) (where (path ?x ?y))"
+        "    (rules"
+        "      ((path ?x ?y) (?x :edge ?y))"
+        "      ((path ?x ?z) (?x :edge ?y) (path ?y ?z)))))"
+    );
+    munit_assert(r_inline != NULL);
+    munit_assert(!RAY_IS_ERR(r_inline));
+    munit_assert_int(r_inline->type, ==, RAY_TABLE);
+    munit_assert_int((int)ray_table_nrows(r_inline), ==, 6);
+    ray_release(r_inline);
+
+    /* Global foo rule — inline rules omit it; foo yields no rows */
+    ray_t* r_foo = ray_eval_str(
+        "(do"
+        "  (set db (datoms))"
+        "  (set db (assert-fact db 1 'edge 2))"
+        "  (rule (foo ?x) (?x :edge 2))"
+        "  (query db (find ?x) (where (foo ?x))"
+        "    (rules ((path ?x ?y) (?x :edge ?y)))))"
+    );
+    munit_assert(r_foo != NULL);
+    munit_assert(!RAY_IS_ERR(r_foo));
+    munit_assert_int((int)ray_table_nrows(r_foo), ==, 0);
+    ray_release(r_foo);
+
+    ray_t* r_global = ray_eval_str(
+        "(do"
+        "  (set db (datoms))"
+        "  (set db (assert-fact db 1 'edge 2))"
+        "  (rule (foo ?x) (?x :edge 2))"
+        "  (query db (find ?x) (where (foo ?x))))"
+    );
+    munit_assert(r_global != NULL);
+    munit_assert(!RAY_IS_ERR(r_global));
+    munit_assert_int((int)ray_table_nrows(r_global), ==, 1);
+    ray_release(r_global);
+
+    return MUNIT_OK;
+}
+
 /* ═══════════════════════════════════════════════════════════════
  * Ported rayforce lang tests (41 functions, ~3800 assertions)
  * ═══════════════════════════════════════════════════════════════ */
@@ -2102,6 +2151,7 @@ static MunitTest lang_tests[] = {
     { "/rf/safety",                test_rf_safety,        lang_setup, lang_teardown, 0, NULL },
     { "/rf/read_csv",              test_rf_read_csv,      lang_setup, lang_teardown, 0, NULL },
     { "/datalog/fixpoint",          test_datalog_fixpoint, lang_setup, lang_teardown, 0, NULL },
+    { "/datalog/query_inline_rules", test_datalog_query_inline_rules, lang_setup, lang_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
