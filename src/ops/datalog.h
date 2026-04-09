@@ -173,7 +173,8 @@ ray_t* dl_get_provenance_src_offsets(dl_program_t* prog, const char* pred_name);
 /* Retrieve deep provenance source data for a derived relation.
  * Returns a flat I64 vector of packed source references. Each entry encodes
  * (relation_index << 32) | row_index, identifying which EDB or IDB relation
- * and row contributed to deriving a given output tuple.
+ * and row contributed to deriving a given output tuple. Row indices are
+ * truncated to 32 bits (max ~4 billion rows per relation).
  *
  * For rules with body-only variables (variables appearing in body atoms but
  * not in the head), source entries include all body rows consistent with

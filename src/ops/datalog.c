@@ -1341,6 +1341,8 @@ static bool dl_row_in_table(ray_t* tbl, int64_t row, ray_t* ref) {
  *                      for derived row i.  offsets[nrows] = total entry count.
  *   prov_src_data    — I64[total]: each entry = (rel_idx << 32) | row_idx,
  *                      packed reference to the contributing source row.
+ *                      Row indices are truncated to 32 bits (max ~4 billion rows
+ *                      per relation).
  *
  * Body-only variables (not appearing in the head) are unconstrained during
  * source lookup, so the entry set may be a superset of the true proof. */
@@ -1406,7 +1408,7 @@ static void dl_build_source_prov(dl_program_t* prog, dl_rel_t* rel,
                 if (buf_len >= buf_cap) {
                     int64_t   new_cap   = buf_cap * 2;
                     ray_t*    new_block = ray_alloc((size_t)new_cap * sizeof(int64_t));
-                    if (!new_block) goto done;
+                    if (!new_block) goto oom;
                     memcpy(ray_data(new_block), buf, (size_t)buf_len * sizeof(int64_t));
                     ray_free(buf_block);
                     buf_block = new_block;
@@ -1417,21 +1419,30 @@ static void dl_build_source_prov(dl_program_t* prog, dl_rel_t* rel,
             }
         }
     }
-done:
-    off[nrows] = buf_len;
 
-    ray_t* data_vec = ray_vec_new(RAY_I64, buf_len > 0 ? buf_len : 1);
-    if (data_vec && !RAY_IS_ERR(data_vec)) {
+    /* Success path: finalize CSR */
+    off[nrows] = buf_len;
+    {
+        ray_t* data_vec = ray_vec_new(RAY_I64, buf_len > 0 ? buf_len : 1);
+        if (!data_vec || RAY_IS_ERR(data_vec)) goto oom;
         data_vec->len = buf_len;
         if (buf_len > 0)
             memcpy(ray_data(data_vec), buf, (size_t)buf_len * sizeof(int64_t));
-    }
-    ray_free(buf_block);
+        ray_free(buf_block);
 
-    if (rel->prov_src_offsets) ray_release(rel->prov_src_offsets);
-    if (rel->prov_src_data)    ray_release(rel->prov_src_data);
-    rel->prov_src_offsets = off_vec;
-    rel->prov_src_data    = (data_vec && !RAY_IS_ERR(data_vec)) ? data_vec : NULL;
+        if (rel->prov_src_offsets) ray_release(rel->prov_src_offsets);
+        if (rel->prov_src_data)    ray_release(rel->prov_src_data);
+        rel->prov_src_offsets = off_vec;
+        rel->prov_src_data    = data_vec;
+        return;
+    }
+
+oom:
+    /* Allocation failed — discard partial results, leave both fields NULL */
+    ray_free(buf_block);
+    ray_release(off_vec);
+    if (rel->prov_src_offsets) { ray_release(rel->prov_src_offsets); rel->prov_src_offsets = NULL; }
+    if (rel->prov_src_data)    { ray_release(rel->prov_src_data);    rel->prov_src_data    = NULL; }
 }
 
 /* Build provenance for all IDB relations.
@@ -2507,8 +2518,8 @@ ray_t* ray_rule_fn(ray_t** args, int64_t n) {
  * Creates a temporary dl_program_t, registers the EAV table,
  * copies global rules (unless inline rules), builds a synthetic query rule, and evaluates. */
 ray_t* ray_query_fn(ray_t** args, int64_t n) {
-    if (n < 3)
-        return ray_error("arity", "query expects: db (find ...) (where ...)");
+    if (n < 3 || n > 4)
+        return ray_error("arity", "query expects: db (find ...) (where ...) [(rules ...)]");
 
     /* Evaluate db (first arg) */
     ray_t* db = ray_eval(args[0]);
@@ -2566,18 +2577,25 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
         return ray_error("type", "query: expected (where ...) as third argument");
     }
 
-    /* Optional: (rules ((head ...) body ...) ...) — use only these rules, not globals */
+    /* Optional 4th arg must be (rules ...) — inline rules override globals */
     ray_t* rules_clause = NULL;
-    if (n >= 4) {
+    if (n == 4) {
         ray_t* fourth = args[3];
-        if (is_list(fourth) && ray_len(fourth) >= 1) {
-            ray_t** re4 = (ray_t**)ray_data(fourth);
-            if (re4[0]->type == -RAY_SYM) {
-                ray_t* rname = ray_sym_str(re4[0]->i64);
-                if (rname && strcmp(ray_str_ptr(rname), "rules") == 0)
-                    rules_clause = fourth;
-            }
+        if (!is_list(fourth) || ray_len(fourth) < 1) {
+            ray_release(db);
+            return ray_error("type", "query: fourth argument must be (rules ...)");
         }
+        ray_t** re4 = (ray_t**)ray_data(fourth);
+        if (re4[0]->type != -RAY_SYM) {
+            ray_release(db);
+            return ray_error("type", "query: fourth argument must be (rules ...)");
+        }
+        ray_t* rname = ray_sym_str(re4[0]->i64);
+        if (!rname || strcmp(ray_str_ptr(rname), "rules") != 0) {
+            ray_release(db);
+            return ray_error("type", "query: fourth argument must be (rules ...)");
+        }
+        rules_clause = fourth;
     }
 
     /* Build variable map for the query */

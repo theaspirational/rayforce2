@@ -246,7 +246,11 @@ bool     ray_sym_ensure_cap(uint32_t needed);
 ray_err_t ray_sym_save(const char* path);
 ray_err_t ray_sym_load(const char* path);
 
-/* ===== Environment API ===== */
+/* ===== Environment API =====
+ *
+ * Thread-safety: the environment is shared global state.  Concurrent calls
+ * to ray_env_get() and ray_env_set() require external synchronization by
+ * the caller. */
 
 ray_t*    ray_env_get(int64_t sym_id);
 ray_err_t ray_env_set(int64_t sym_id, ray_t* val);
