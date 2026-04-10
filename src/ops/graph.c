@@ -215,7 +215,8 @@ void ray_graph_free(ray_graph_t* g) {
     /* M6: Release OP_CONST literal values before freeing ext nodes */
     for (uint32_t i = 0; i < g->ext_count; i++) {
         ray_op_ext_t* ext = g->ext_nodes[i];
-        if (ext && g->nodes[ext->base.id].opcode == OP_CONST && ext->literal) {
+        if (ext && (g->nodes[ext->base.id].opcode == OP_CONST ||
+                    g->nodes[ext->base.id].opcode == OP_TIL) && ext->literal) {
             ray_release(ext->literal);
         }
         /* Release runtime-built SIP bitmaps on graph traversal nodes */
