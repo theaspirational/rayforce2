@@ -921,8 +921,11 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
                 rsrc = (char*)ray_data(vec);
             }
             memcpy(ray_data(result), rsrc + (roff + start) * esz, (size_t)(count * esz));
-            /* Propagate null bitmap (ray_vec_is_null is slice-safe) */
-            if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+            /* Propagate null bitmap — check parent's flag for slices */
+            bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) ||
+                             ((vec->attrs & RAY_ATTR_SLICE) && vec->slice_parent &&
+                              (vec->slice_parent->attrs & RAY_ATTR_HAS_NULLS));
+            if (has_nulls) {
                 for (int64_t i = 0; i < count; i++)
                     if (ray_vec_is_null(vec, start + i))
                         ray_vec_set_null(result, i, true);
@@ -1081,8 +1084,11 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
                 memcpy(dst + i * esz, src + (src_off + si) * esz, esz);
             }
         }
-        /* Propagate null bitmap */
-        if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+        /* Propagate null bitmap — check parent's flag for slices */
+        bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) ||
+                         ((vec->attrs & RAY_ATTR_SLICE) && vec->slice_parent &&
+                          (vec->slice_parent->attrs & RAY_ATTR_HAS_NULLS));
+        if (has_nulls) {
             if (n >= 0) {
                 for (int64_t i = 0; i < abs_n; i++)
                     if (ray_vec_is_null(vec, i % len))
