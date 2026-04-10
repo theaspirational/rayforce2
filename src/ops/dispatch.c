@@ -69,10 +69,8 @@ ray_t* ray_binop_map(ray_binop_partial_fn partial, ray_t* x, ray_t* y) {
         len = x->len < y->len ? x->len : y->len;  /* zip-map: truncate to shorter */
     else
         len = xv ? x->len : y->len;
-    if (len == 0) {
-        int8_t ot = infer_binop_type(x, y);
-        return ray_vec_new(ot ? ot : RAY_I64, 0);
-    }
+    if (len == 0)
+        return NULL;  /* let caller handle — output type may be op-dependent */
 
     /* Reject slices — ray_data() doesn't work on them */
     if (xv && (x->attrs & RAY_ATTR_SLICE)) return NULL;
