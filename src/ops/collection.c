@@ -912,6 +912,12 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
             if (RAY_IS_ERR(result)) return result;
             result->len = count;
             memcpy(ray_data(result), (char*)ray_data(vec) + start * esz, (size_t)(count * esz));
+            /* Propagate null bitmap */
+            if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+                for (int64_t i = 0; i < count; i++)
+                    if (ray_vec_is_null(vec, start + i))
+                        ray_vec_set_null(result, i, true);
+            }
             return result;
         }
 
@@ -1056,6 +1062,21 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
                 int64_t si = len - (abs_n - i) % len;
                 if (si == len) si = 0;
                 memcpy(dst + i * esz, src + si * esz, esz);
+            }
+        }
+        /* Propagate null bitmap */
+        if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+            if (n >= 0) {
+                for (int64_t i = 0; i < abs_n; i++)
+                    if (ray_vec_is_null(vec, i % len))
+                        ray_vec_set_null(result, i, true);
+            } else {
+                for (int64_t i = 0; i < abs_n; i++) {
+                    int64_t si = len - (abs_n - i) % len;
+                    if (si == len) si = 0;
+                    if (ray_vec_is_null(vec, si))
+                        ray_vec_set_null(result, i, true);
+                }
             }
         }
         return result;
