@@ -1085,9 +1085,10 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
             }
         }
         /* Propagate null bitmap — check parent's flag for slices */
-        bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) ||
-                         ((vec->attrs & RAY_ATTR_SLICE) && vec->slice_parent &&
-                          (vec->slice_parent->attrs & RAY_ATTR_HAS_NULLS));
+        bool has_nulls = len > 0 &&
+                         ((vec->attrs & RAY_ATTR_HAS_NULLS) ||
+                          ((vec->attrs & RAY_ATTR_SLICE) && vec->slice_parent &&
+                           (vec->slice_parent->attrs & RAY_ATTR_HAS_NULLS)));
         if (has_nulls) {
             if (n >= 0) {
                 for (int64_t i = 0; i < abs_n; i++)
