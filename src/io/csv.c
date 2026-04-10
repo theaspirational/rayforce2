@@ -543,7 +543,7 @@ RAY_INLINE int32_t fast_date(const char* p, size_t len, bool* is_null) {
     return civil_to_days(y, m, d);
 }
 
-/* TIME → int32_t milliseconds since midnight (kdb+ convention) */
+/* TIME → int32_t milliseconds since midnight */
 RAY_INLINE int32_t fast_time(const char* p, size_t len, bool* is_null) {
     if (RAY_UNLIKELY(len < 8)) { *is_null = true; return 0; }
     *is_null = false;

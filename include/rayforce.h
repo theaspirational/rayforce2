@@ -170,12 +170,12 @@ const char* ray_err_code(ray_t* err);
 extern const uint8_t ray_type_sizes[256];
 
 static inline void* ray_data_fn(ray_t* v) {
-    if (__builtin_expect(!!(v->attrs & RAY_ATTR_SLICE), 0)) {
-        uint8_t esz = ray_type_sizes[(uint8_t)v->type];
-        return (char*)v->slice_parent->data + v->slice_offset * esz;
-    }
+    if (__builtin_expect(!!(v->attrs & RAY_ATTR_SLICE), 0))
+        return (char*)v->slice_parent->data
+               + v->slice_offset * ray_type_sizes[(uint8_t)v->type];
     return (void*)v->data;
 }
+#define ray_slice_data(v) ray_data_fn(v)  /* alias — ray_data is always slice-safe */
 #define ray_data(v)       ray_data_fn(v)
 
 /* ===== Memory Allocator API ===== */

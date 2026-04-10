@@ -26,7 +26,7 @@
 
 #include <rayforce.h>
 
-/* Wire format prefix (same as rayforce1 for compatibility) */
+/* Wire format prefix */
 #define RAY_SERDE_PREFIX 0xcefadefa
 
 /* Wire-only null marker (not a valid ray_t type) */

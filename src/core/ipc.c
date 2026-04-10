@@ -489,7 +489,7 @@ int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port)
 }
 
 /* ======================================================================
- * Legacy server API (kept for tests and backward compatibility)
+ * Server API
  * ====================================================================== */
 
 static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)

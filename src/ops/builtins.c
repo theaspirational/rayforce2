@@ -269,7 +269,7 @@ ray_t* ray_resolve_fn(ray_t** args, int64_t n) {
         tbl = mat;
     }
 
-    /* If not a table, return as-is (backward compat: resolve a variable name) */
+    /* If not a table, return as-is */
     if (tbl->type != RAY_TABLE) {
         if (tbl->type == -RAY_SYM) {
             ray_t* val = ray_env_get(tbl->i64);

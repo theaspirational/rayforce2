@@ -1692,7 +1692,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                                     (size_t)nrows * sizeof(uint64_t));
                 if (keys) {
                     bool desc = descs ? descs[0] : 0;
-                    /* kdb+ semantics: null = minimum value.
+                    /* Null = minimum value.
                      * ASC → nulls first, DESC → nulls last. */
                     bool nf = nulls_first ? nulls_first[0] : !desc;
                     radix_encode_ctx_t enc = {
@@ -2041,7 +2041,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
     if (!radix_done) {
         if (!iota_done)
             for (int64_t i = 0; i < nrows; i++) indices[i] = i;
-        /* kdb+ semantics: null = minimum value.
+        /* Null = minimum value.
          * ASC → nulls first (nf=1), DESC → nulls last (nf=0). */
         uint8_t default_nf[n_cols > 0 ? n_cols : 1];
         if (!nulls_first) {

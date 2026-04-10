@@ -1137,7 +1137,7 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
         int8_t ctype = col->type;
         /* Return typed vectors directly for temporal/GUID types that need
          * to work with arithmetic and other vector operations.
-         * Other types are converted to boxed lists for backward compat. */
+         * Other types are converted to boxed lists. */
         if (ctype == RAY_TIME || ctype == RAY_DATE || ctype == RAY_TIMESTAMP ||
             ctype == RAY_GUID) {
             ray_retain(col);

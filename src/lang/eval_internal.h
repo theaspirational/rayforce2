@@ -229,22 +229,22 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
         return ((ray_t**)ray_data(coll))[i];
     }
     *allocated = 1;
-    /* ray_data() is slice-aware — returns parent data at correct offset */
     if (ray_vec_is_null(coll, i))
         return ray_typed_null(-coll->type);
+    void* d = ray_data(coll);
     switch (coll->type) {
-        case RAY_I64:       return ray_i64(((int64_t*)ray_data(coll))[i]);
-        case RAY_F64:       return ray_f64(((double*)ray_data(coll))[i]);
-        case RAY_I32:       return ray_i32(((int32_t*)ray_data(coll))[i]);
-        case RAY_I16:       return ray_i16(((int16_t*)ray_data(coll))[i]);
-        case RAY_BOOL:      return ray_bool(((bool*)ray_data(coll))[i]);
-        case RAY_SYM:       return ray_sym(((int64_t*)ray_data(coll))[i]);
-        case RAY_U8:        return ray_u8(((uint8_t*)ray_data(coll))[i]);
-        case RAY_DATE:      return ray_date((int64_t)((int32_t*)ray_data(coll))[i]);
-        case RAY_TIME:      return ray_time((int64_t)((int32_t*)ray_data(coll))[i]);
-        case RAY_TIMESTAMP: return ray_timestamp(((int64_t*)ray_data(coll))[i]);
+        case RAY_I64:       return ray_i64(((int64_t*)d)[i]);
+        case RAY_F64:       return ray_f64(((double*)d)[i]);
+        case RAY_I32:       return ray_i32(((int32_t*)d)[i]);
+        case RAY_I16:       return ray_i16(((int16_t*)d)[i]);
+        case RAY_BOOL:      return ray_bool(((bool*)d)[i]);
+        case RAY_SYM:       return ray_sym(((int64_t*)d)[i]);
+        case RAY_U8:        return ray_u8(((uint8_t*)d)[i]);
+        case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
+        case RAY_TIME:      return ray_time((int64_t)((int32_t*)d)[i]);
+        case RAY_TIMESTAMP: return ray_timestamp(((int64_t*)d)[i]);
         case RAY_GUID: {
-            const uint8_t* gd = ((uint8_t*)ray_data(coll)) + i * 16;
+            const uint8_t* gd = ((uint8_t*)d) + i * 16;
             return ray_guid(gd);
         }
         /* RAY_CHAR removed -- char vectors no longer exist */

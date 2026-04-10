@@ -33,7 +33,7 @@
 #include <stdio.h>
 
 /* --------------------------------------------------------------------------
- * Wire format (same as rayforce1, extended for F32 and STR):
+ * Wire format:
  *
  *   byte 0:   type tag (int8_t — negative = atom, positive = vector/compound)
  *
