@@ -38,90 +38,42 @@ ray_t* ray_sum_fn(ray_t* x) {
         ray_retain(x); return x;
     }
     if (ray_is_vec(x)) {
-        /* Direct reduction — hoist null check out of hot loop */
-        bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        if (x->type == RAY_I32) {
-            int64_t n = x->len;
-            int32_t* d = (int32_t*)ray_data(x);
-            int64_t sum = 0;
-            if (has_nulls) {
-                for (int64_t i = 0; i < n; i++)
-                    if (!ray_vec_is_null(x, i)) sum += d[i];
-            } else {
-                for (int64_t i = 0; i < n; i++) sum += d[i];
-            }
-            return make_i32((int32_t)sum);
-        }
-        if (x->type == RAY_I16 || x->type == RAY_U8) {
-            int64_t n = x->len, sum = 0;
-            if (x->type == RAY_I16) {
-                int16_t* d = (int16_t*)ray_data(x);
-                if (has_nulls) {
-                    for (int64_t i = 0; i < n; i++)
-                        if (!ray_vec_is_null(x, i)) sum += d[i];
-                } else {
-                    for (int64_t i = 0; i < n; i++) sum += d[i];
-                }
-            } else {
-                uint8_t* d = (uint8_t*)ray_data(x);
-                if (has_nulls) {
-                    for (int64_t i = 0; i < n; i++)
-                        if (!ray_vec_is_null(x, i)) sum += d[i];
-                } else {
-                    for (int64_t i = 0; i < n; i++) sum += d[i];
-                }
-            }
-            return make_i64(sum);
-        }
-        if (x->type == RAY_I64) {
-            int64_t n = x->len;
-            int64_t* d = (int64_t*)ray_data(x);
-            int64_t sum = 0;
-            if (has_nulls) {
-                for (int64_t i = 0; i < n; i++)
-                    if (!ray_vec_is_null(x, i)) sum += d[i];
-            } else {
-                for (int64_t i = 0; i < n; i++) sum += d[i];
-            }
-            return make_i64(sum);
-        }
-        if (x->type == RAY_F64) {
-            int64_t n = x->len;
-            double* d = (double*)ray_data(x);
-            double sum = 0.0;
-            if (has_nulls) {
-                for (int64_t i = 0; i < n; i++)
-                    if (!ray_vec_is_null(x, i)) sum += d[i];
-            } else {
-                for (int64_t i = 0; i < n; i++) sum += d[i];
-            }
-            return make_f64(sum);
-        }
-        if (x->type == RAY_TIME) {
-            int64_t n = x->len;
-            int32_t* d = (int32_t*)ray_data(x);
-            int64_t sum = 0;
-            if (has_nulls) {
-                for (int64_t i = 0; i < n; i++)
-                    if (!ray_vec_is_null(x, i)) sum += d[i];
-            } else {
-                for (int64_t i = 0; i < n; i++) sum += d[i];
-            }
-            return ray_time(sum);
-        }
-        if (x->type == RAY_TIMESTAMP) {
-            int64_t n = x->len;
-            int64_t* d = (int64_t*)ray_data(x);
-            int64_t sum = 0;
-            if (has_nulls) {
-                for (int64_t i = 0; i < n; i++)
-                    if (!ray_vec_is_null(x, i)) sum += d[i];
-            } else {
-                for (int64_t i = 0; i < n; i++) sum += d[i];
-            }
-            return ray_timestamp(sum);
-        }
         if (x->type == RAY_DATE) return ray_error("type", NULL);
+        /* Narrow/temporal types need specific return constructors that the
+         * DAG executor doesn't provide — use scalar path for these. */
+        if (x->type == RAY_I32 || x->type == RAY_I16 || x->type == RAY_U8 ||
+            x->type == RAY_TIME || x->type == RAY_TIMESTAMP) {
+            int64_t n = x->len;
+            bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
+            int64_t sum = 0;
+            if (x->type == RAY_I32) {
+                int32_t* d = (int32_t*)ray_data(x);
+                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
+                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                return make_i32((int32_t)sum);
+            } else if (x->type == RAY_I16) {
+                int16_t* d = (int16_t*)ray_data(x);
+                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
+                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                return make_i64(sum);
+            } else if (x->type == RAY_U8) {
+                uint8_t* d = (uint8_t*)ray_data(x);
+                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
+                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                return make_i64(sum);
+            } else if (x->type == RAY_TIME) {
+                int32_t* d = (int32_t*)ray_data(x);
+                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
+                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                return ray_time(sum);
+            } else {
+                int64_t* d = (int64_t*)ray_data(x);
+                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
+                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                return ray_timestamp(sum);
+            }
+        }
+        /* I64/F64: parallel morsel-driven reduction via DAG executor */
         ray_graph_t* g = ray_graph_new(NULL);
         if (!g) return ray_error("oom", NULL);
         ray_op_t* in = ray_graph_input_vec(g, x);
@@ -182,66 +134,6 @@ ray_t* ray_avg_fn(ray_t* x) {
         ray_retain(x); return x;
     }
     if (ray_is_vec(x)) {
-        /* Direct avg — hoist null check out of hot loop */
-        int64_t n = x->len;
-        bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        if (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16 || x->type == RAY_U8) {
-            double sum = 0.0;
-            int64_t cnt = 0;
-            if (x->type == RAY_I64) {
-                int64_t* d = (int64_t*)ray_data(x);
-                if (has_nulls) {
-                    for (int64_t i = 0; i < n; i++)
-                        if (!ray_vec_is_null(x, i)) { sum += (double)d[i]; cnt++; }
-                } else {
-                    for (int64_t i = 0; i < n; i++) sum += (double)d[i];
-                    cnt = n;
-                }
-            } else if (x->type == RAY_I32) {
-                int32_t* d = (int32_t*)ray_data(x);
-                if (has_nulls) {
-                    for (int64_t i = 0; i < n; i++)
-                        if (!ray_vec_is_null(x, i)) { sum += (double)d[i]; cnt++; }
-                } else {
-                    for (int64_t i = 0; i < n; i++) sum += (double)d[i];
-                    cnt = n;
-                }
-            } else if (x->type == RAY_I16) {
-                int16_t* d = (int16_t*)ray_data(x);
-                if (has_nulls) {
-                    for (int64_t i = 0; i < n; i++)
-                        if (!ray_vec_is_null(x, i)) { sum += (double)d[i]; cnt++; }
-                } else {
-                    for (int64_t i = 0; i < n; i++) sum += (double)d[i];
-                    cnt = n;
-                }
-            } else {
-                uint8_t* d = (uint8_t*)ray_data(x);
-                if (has_nulls) {
-                    for (int64_t i = 0; i < n; i++)
-                        if (!ray_vec_is_null(x, i)) { sum += (double)d[i]; cnt++; }
-                } else {
-                    for (int64_t i = 0; i < n; i++) sum += (double)d[i];
-                    cnt = n;
-                }
-            }
-            if (cnt == 0) return ray_typed_null(-RAY_F64);
-            return make_f64(sum / (double)cnt);
-        }
-        if (x->type == RAY_F64) {
-            double* d = (double*)ray_data(x);
-            double sum = 0.0;
-            int64_t cnt = 0;
-            if (has_nulls) {
-                for (int64_t i = 0; i < n; i++)
-                    if (!ray_vec_is_null(x, i)) { sum += d[i]; cnt++; }
-            } else {
-                for (int64_t i = 0; i < n; i++) sum += d[i];
-                cnt = n;
-            }
-            if (cnt == 0) return ray_typed_null(-RAY_F64);
-            return make_f64(sum / (double)cnt);
-        }
         ray_graph_t* g = ray_graph_new(NULL);
         if (!g) return ray_error("oom", NULL);
         ray_op_t* in = ray_graph_input_vec(g, x);
@@ -267,66 +159,25 @@ ray_t* ray_min_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_MIN);
     if (ray_is_atom(x)) { ray_retain(x); return x; }
     if (ray_is_vec(x)) {
-        int64_t n = x->len;
-        bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        if (n == 0) return ray_typed_null(-x->type);
-        if (x->type == RAY_I32 || x->type == RAY_DATE || x->type == RAY_TIME) {
-            int32_t* d = (int32_t*)ray_data(x);
-            int32_t m = d[0]; int found = !has_nulls || !ray_vec_is_null(x, 0);
-            for (int64_t i = 1; i < n; i++) {
-                if (has_nulls && ray_vec_is_null(x, i)) continue;
-                if (!found || d[i] < m) { m = d[i]; found = 1; }
-            }
-            if (!found) return ray_typed_null(-x->type);
-            if (x->type == RAY_TIME) return ray_time(m);
-            if (x->type == RAY_DATE) return ray_date(m);
-            return make_i32(m);
-        }
-        if (x->type == RAY_I64 || x->type == RAY_TIMESTAMP) {
-            int64_t* d = (int64_t*)ray_data(x);
-            int64_t m = d[0]; int found = !has_nulls || !ray_vec_is_null(x, 0);
-            for (int64_t i = 1; i < n; i++) {
-                if (has_nulls && ray_vec_is_null(x, i)) continue;
-                if (!found || d[i] < m) { m = d[i]; found = 1; }
-            }
-            if (!found) return ray_typed_null(-x->type);
-            return (x->type == RAY_TIMESTAMP) ? ray_timestamp(m) : make_i64(m);
-        }
-        if (x->type == RAY_F64) {
-            double* d = (double*)ray_data(x);
-            double m = 0; int found = 0;
-            if (has_nulls) {
-                for (int64_t i = 0; i < n; i++)
-                    if (!ray_vec_is_null(x, i)) { if (!found || d[i] < m) m = d[i]; found = 1; }
-            } else {
-                m = d[0]; found = 1;
-                for (int64_t i = 1; i < n; i++) if (d[i] < m) m = d[i];
-            }
-            return found ? make_f64(m) : ray_typed_null(-RAY_F64);
-        }
-        if (x->type == RAY_I16) {
-            int16_t* d = (int16_t*)ray_data(x);
-            int16_t m = d[0]; int found = !has_nulls || !ray_vec_is_null(x, 0);
-            for (int64_t i = 1; i < n; i++) {
-                if (has_nulls && ray_vec_is_null(x, i)) continue;
-                if (!found || d[i] < m) { m = d[i]; found = 1; }
-            }
-            return found ? make_i16(m) : ray_typed_null(-RAY_I16);
-        }
-        if (x->type == RAY_U8) {
-            uint8_t* d = (uint8_t*)ray_data(x);
-            uint8_t m = d[0]; int found = !has_nulls || !ray_vec_is_null(x, 0);
-            for (int64_t i = 1; i < n; i++) {
-                if (has_nulls && ray_vec_is_null(x, i)) continue;
-                if (!found || d[i] < m) { m = d[i]; found = 1; }
-            }
-            return found ? make_u8(m) : ray_typed_null(-RAY_U8);
-        }
+        int8_t orig_type = x->type;
         ray_graph_t* g = ray_graph_new(NULL);
         if (!g) return ray_error("oom", NULL);
         ray_op_t* in = ray_graph_input_vec(g, x);
         ray_op_t* op = ray_min_op(g, in);
-        return ray_lazy_materialize(ray_lazy_wrap(g, op));
+        ray_t* r = ray_lazy_materialize(ray_lazy_wrap(g, op));
+        if (!r || RAY_IS_ERR(r)) return r;
+        /* DAG returns I64 for all integer types — cast back to original */
+        if (ray_is_atom(r) && r->type == -RAY_I64 && orig_type != RAY_I64 && orig_type != RAY_F64) {
+            int64_t v = r->i64;
+            ray_release(r);
+            if (orig_type == RAY_DATE) return ray_date((int32_t)v);
+            if (orig_type == RAY_TIME) return ray_time(v);
+            if (orig_type == RAY_TIMESTAMP) return ray_timestamp(v);
+            if (orig_type == RAY_I32) return make_i32((int32_t)v);
+            if (orig_type == RAY_I16) return make_i16((int16_t)v);
+            if (orig_type == RAY_U8) return make_u8((uint8_t)v);
+        }
+        return r;
     }
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
@@ -349,64 +200,24 @@ ray_t* ray_max_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_MAX);
     if (ray_is_atom(x)) { ray_retain(x); return x; }
     if (ray_is_vec(x)) {
-        int64_t n = x->len;
-        bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        if (n == 0) return ray_typed_null(-x->type);
-        if (x->type == RAY_I32 || x->type == RAY_DATE || x->type == RAY_TIME) {
-            int32_t* d = (int32_t*)ray_data(x);
-            int32_t m = d[0]; int found = !has_nulls || !ray_vec_is_null(x, 0);
-            for (int64_t i = 1; i < n; i++) {
-                if (has_nulls && ray_vec_is_null(x, i)) continue;
-                if (!found || d[i] > m) { m = d[i]; found = 1; }
-            }
-            if (!found) return ray_typed_null(-x->type);
-            if (x->type == RAY_TIME) return ray_time(m);
-            if (x->type == RAY_DATE) return ray_date(m);
-            return make_i32(m);
-        }
-        if (x->type == RAY_I64 || x->type == RAY_TIMESTAMP) {
-            int64_t* d = (int64_t*)ray_data(x);
-            int64_t m = d[0]; int found = !has_nulls || !ray_vec_is_null(x, 0);
-            for (int64_t i = 1; i < n; i++) {
-                if (has_nulls && ray_vec_is_null(x, i)) continue;
-                if (!found || d[i] > m) { m = d[i]; found = 1; }
-            }
-            if (!found) return ray_typed_null(-x->type);
-            return (x->type == RAY_TIMESTAMP) ? ray_timestamp(m) : make_i64(m);
-        }
-        if (x->type == RAY_F64) {
-            double* d = (double*)ray_data(x);
-            double m = 0; int found = 0;
-            if (has_nulls) {
-                for (int64_t i = 0; i < n; i++)
-                    if (!ray_vec_is_null(x, i)) { if (!found || d[i] > m) m = d[i]; found = 1; }
-            } else {
-                m = d[0]; found = 1;
-                for (int64_t i = 1; i < n; i++) if (d[i] > m) m = d[i];
-            }
-            return found ? make_f64(m) : ray_typed_null(-RAY_F64);
-        }
-        if (x->type == RAY_I16) {
-            int16_t* d = (int16_t*)ray_data(x);
-            int16_t m = d[0]; int found = !has_nulls || !ray_vec_is_null(x, 0);
-            for (int64_t i = 1; i < n; i++) {
-                if (has_nulls && ray_vec_is_null(x, i)) continue;
-                if (!found || d[i] > m) { m = d[i]; found = 1; }
-            }
-            return found ? make_i16(m) : ray_typed_null(-RAY_I16);
-        }
-        if (x->type == RAY_U8) {
-            uint8_t* d = (uint8_t*)ray_data(x);
-            uint8_t m = 0; int found = 0;
-            for (int64_t i = 0; i < n; i++)
-                if (!ray_vec_is_null(x, i)) { if (!found || d[i] > m) m = d[i]; found = 1; }
-            return found ? make_u8(m) : ray_typed_null(-RAY_U8);
-        }
+        int8_t orig_type = x->type;
         ray_graph_t* g = ray_graph_new(NULL);
         if (!g) return ray_error("oom", NULL);
         ray_op_t* in = ray_graph_input_vec(g, x);
         ray_op_t* op = ray_max_op(g, in);
-        return ray_lazy_materialize(ray_lazy_wrap(g, op));
+        ray_t* r = ray_lazy_materialize(ray_lazy_wrap(g, op));
+        if (!r || RAY_IS_ERR(r)) return r;
+        if (ray_is_atom(r) && r->type == -RAY_I64 && orig_type != RAY_I64 && orig_type != RAY_F64) {
+            int64_t v = r->i64;
+            ray_release(r);
+            if (orig_type == RAY_DATE) return ray_date((int32_t)v);
+            if (orig_type == RAY_TIME) return ray_time(v);
+            if (orig_type == RAY_TIMESTAMP) return ray_timestamp(v);
+            if (orig_type == RAY_I32) return make_i32((int32_t)v);
+            if (orig_type == RAY_I16) return make_i16((int16_t)v);
+            if (orig_type == RAY_U8) return make_u8((uint8_t)v);
+        }
+        return r;
     }
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
