@@ -621,6 +621,19 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             return ext->literal;
         }
 
+        case OP_TIL: {
+            ray_op_ext_t* ext = find_ext(g, op->id);
+            if (!ext || !ext->literal) return ray_error("nyi", NULL);
+            int64_t n = ext->literal->i64;
+            if (n <= 0) return ray_vec_new(RAY_I64, 0);
+            ray_t* vec = ray_vec_new(RAY_I64, n);
+            if (!vec || RAY_IS_ERR(vec)) return vec;
+            vec->len = n;
+            int64_t* d = (int64_t*)ray_data(vec);
+            for (int64_t i = 0; i < n; i++) d[i] = i;
+            return vec;
+        }
+
         /* Unary element-wise */
         case OP_NEG: case OP_ABS: case OP_NOT: case OP_SQRT:
         case OP_LOG: case OP_EXP: case OP_CEIL: case OP_FLOOR:

@@ -102,6 +102,7 @@ void     ray_cancel(void);
 /* Opcodes — Sources */
 #define OP_SCAN          1
 #define OP_CONST         2
+#define OP_TIL           3   /* generate 0..n-1 sequence (lazy source)  */
 
 /* Opcodes — Unary element-wise (fuseable) */
 #define OP_NEG          10
@@ -509,6 +510,9 @@ ray_op_t* ray_concat(ray_graph_t* g, ray_op_t** args, int n);
 /* Date/time extraction and truncation */
 ray_op_t* ray_extract(ray_graph_t* g, ray_op_t* col, int64_t field);
 ray_op_t* ray_date_trunc(ray_graph_t* g, ray_op_t* col, int64_t field);
+
+/* Source ops */
+ray_op_t* ray_til(ray_graph_t* g, int64_t n);
 
 /* Reduction ops */
 ray_op_t* ray_sum(ray_graph_t* g, ray_op_t* a);

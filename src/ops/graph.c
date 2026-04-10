@@ -354,6 +354,20 @@ ray_op_t* ray_const_str(ray_graph_t* g, const char* s, size_t len) {
     return &g->nodes[ext->base.id];
 }
 
+ray_op_t* ray_til(ray_graph_t* g, int64_t n) {
+    ray_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+
+    ext->base.opcode = OP_TIL;
+    ext->base.arity = 0;
+    ext->base.out_type = RAY_I64;
+    ext->base.est_rows = (uint32_t)(n > UINT32_MAX ? UINT32_MAX : n);
+    ext->literal = ray_i64(n);  /* store n as literal */
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
 ray_op_t* ray_const_vec(ray_graph_t* g, ray_t* vec) {
     ray_op_ext_t* ext = graph_alloc_ext_node(g);
     if (!ext) return NULL;
