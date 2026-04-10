@@ -22,13 +22,268 @@
  */
 
 #include "lang/eval_internal.h"
+#include "core/pool.h"
+#include "mem/heap.h"
+#include "mem/cow.h"
 
 /* ══════════════════════════════════════════
- * Arithmetic builtins
+ * Typed vector arithmetic — rayforce1 pattern
+ *
+ * Each operation dispatches on MTYPE2(left_type, right_type) once,
+ * then runs a tight typed-pointer loop that the compiler vectorizes.
+ * Output buffer reuses input when rc==1 and types match.
  * ══════════════════════════════════════════ */
+
+#define MTYPE2(a, b) (((int)(a) + 128) * 256 + ((int)(b) + 128))
+
+/* Typed loop macros: atom+vec, vec+atom, vec+vec.
+ * lt/rt/ot = element C types, OP = binary expression macro. */
+#define LOOP_A_V(lval, rptr, optr, n, OP)              \
+    for (int64_t _i = 0; _i < (n); _i++)               \
+        (optr)[_i] = OP((lval), (rptr)[_i]);
+
+#define LOOP_V_A(lptr, rval, optr, n, OP)              \
+    for (int64_t _i = 0; _i < (n); _i++)               \
+        (optr)[_i] = OP((lptr)[_i], (rval));
+
+#define LOOP_V_V(lptr, rptr, optr, n, OP)              \
+    for (int64_t _i = 0; _i < (n); _i++)               \
+        (optr)[_i] = OP((lptr)[_i], (rptr)[_i]);
+
+/* Op macros — expand to typed expressions the compiler can vectorize */
+#define OP_ADD_I64(a,b) ((int64_t)((uint64_t)(a)+(uint64_t)(b)))
+#define OP_SUB_I64(a,b) ((int64_t)((uint64_t)(a)-(uint64_t)(b)))
+#define OP_MUL_I64(a,b) ((int64_t)((uint64_t)(a)*(uint64_t)(b)))
+#define OP_ADD_I32(a,b) ((int32_t)((uint32_t)(a)+(uint32_t)(b)))
+#define OP_SUB_I32(a,b) ((int32_t)((uint32_t)(a)-(uint32_t)(b)))
+#define OP_MUL_I32(a,b) ((int32_t)((uint32_t)(a)*(uint32_t)(b)))
+#define OP_ADD_F64(a,b) ((a)+(b))
+#define OP_SUB_F64(a,b) ((a)-(b))
+#define OP_MUL_F64(a,b) ((a)*(b))
+#define OP_EQ_I64(a,b)  ((uint8_t)((a)==(b)))
+#define OP_NE_I64(a,b)  ((uint8_t)((a)!=(b)))
+#define OP_LT_I64(a,b)  ((uint8_t)((a)<(b)))
+#define OP_LE_I64(a,b)  ((uint8_t)((a)<=(b)))
+#define OP_GT_I64(a,b)  ((uint8_t)((a)>(b)))
+#define OP_GE_I64(a,b)  ((uint8_t)((a)>=(b)))
+#define OP_EQ_F64(a,b)  ((uint8_t)((a)==(b)))
+#define OP_NE_F64(a,b)  ((uint8_t)((a)!=(b)))
+#define OP_LT_F64(a,b)  ((uint8_t)((a)<(b)))
+#define OP_LE_F64(a,b)  ((uint8_t)((a)<=(b)))
+#define OP_GT_F64(a,b)  ((uint8_t)((a)>(b)))
+#define OP_GE_F64(a,b)  ((uint8_t)((a)>=(b)))
+/* MIN2/MAX2 */
+#define OP_MIN2_I64(a,b) ((a)<(b)?(a):(b))
+#define OP_MAX2_I64(a,b) ((a)>(b)?(a):(b))
+#define OP_MIN2_F64(a,b) ((a)<(b)?(a):(b))
+#define OP_MAX2_F64(a,b) ((a)>(b)?(a):(b))
+
+/* Context for parallel typed dispatch */
+typedef struct {
+    ray_t* left;
+    ray_t* right;
+    ray_t* out;
+    uint16_t opcode;
+} binop_vec_ctx_t;
+
+/* Emit typed loop for a single type width.
+ * T=C type, W=width tag, SV_EXPR=scalar read expression */
+#define TYPED_LOOP(T, lptr, rptr, lsv, rsv, optr, n, xv, yv, OPNAME)    \
+    do {                                                                  \
+        if (xv && yv)    LOOP_V_V(lptr, rptr, optr, n, OPNAME)           \
+        else if (xv)     LOOP_V_A(lptr, rsv,  optr, n, OPNAME)           \
+        else             LOOP_A_V(lsv,  rptr, optr, n, OPNAME)           \
+    } while(0)
+
+/* Parallel worker: typed dispatch per chunk */
+static void binop_vec_worker(void* ctx_, uint32_t wid, int64_t start, int64_t end) {
+    (void)wid;
+    binop_vec_ctx_t* c = (binop_vec_ctx_t*)ctx_;
+    int64_t n = end - start;
+    ray_t* x = c->left;
+    ray_t* y = c->right;
+    ray_t* out = c->out;
+    int8_t ot = out->type;
+    bool xv = ray_is_vec(x), yv = ray_is_vec(y);
+    uint16_t opc = c->opcode;
+
+    /* For arithmetic: output type matches input type.
+     * For comparisons: inputs are I64/I32/F64, output is BOOL (U8). */
+    bool is_cmp = (opc >= OP_EQ && opc <= OP_GE);
+
+    /* Resolve data pointers once */
+    if (is_cmp) {
+        /* Comparison: read inputs at their type, write BOOL output */
+        uint8_t* restrict od = (uint8_t*)ray_data(out) + start;
+        /* Determine input type from the vector operand */
+        int8_t it = xv ? x->type : yv ? y->type : RAY_I64;
+        if (it == RAY_I64 || it == RAY_TIMESTAMP) {
+            int64_t* ld = xv ? (int64_t*)ray_data(x) + start : NULL;
+            int64_t* rd = yv ? (int64_t*)ray_data(y) + start : NULL;
+            int64_t lsv = xv ? 0 : x->i64;
+            int64_t rsv = yv ? 0 : y->i64;
+            switch (opc) {
+                case OP_EQ: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_EQ_I64); break;
+                case OP_NE: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_NE_I64); break;
+                case OP_LT: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_LT_I64); break;
+                case OP_LE: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_LE_I64); break;
+                case OP_GT: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_GT_I64); break;
+                case OP_GE: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_GE_I64); break;
+                default: break;
+            }
+        } else if (it == RAY_I32 || it == RAY_DATE || it == RAY_TIME) {
+            int32_t* ld = xv ? (int32_t*)ray_data(x) + start : NULL;
+            int32_t* rd = yv ? (int32_t*)ray_data(y) + start : NULL;
+            int32_t lsv = xv ? 0 : (int32_t)x->i32;
+            int32_t rsv = yv ? 0 : (int32_t)y->i32;
+            switch (opc) {
+                case OP_EQ: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_EQ_I64); break;
+                case OP_NE: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_NE_I64); break;
+                case OP_LT: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_LT_I64); break;
+                case OP_LE: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_LE_I64); break;
+                case OP_GT: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_GT_I64); break;
+                case OP_GE: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_GE_I64); break;
+                default: break;
+            }
+        } else if (it == RAY_F64) {
+            double* ld = xv ? (double*)ray_data(x) + start : NULL;
+            double* rd = yv ? (double*)ray_data(y) + start : NULL;
+            double lsv = xv ? 0 : x->f64;
+            double rsv = yv ? 0 : y->f64;
+            switch (opc) {
+                case OP_EQ: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_EQ_F64); break;
+                case OP_NE: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_NE_F64); break;
+                case OP_LT: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_LT_F64); break;
+                case OP_LE: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_LE_F64); break;
+                case OP_GT: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_GT_F64); break;
+                case OP_GE: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_GE_F64); break;
+                default: break;
+            }
+        }
+    } else if (ot == RAY_I64 || ot == RAY_TIMESTAMP) {
+        int64_t* restrict od = (int64_t*)ray_data(out) + start;
+        int64_t* ld = xv ? (int64_t*)ray_data(x) + start : NULL;
+        int64_t* rd = yv ? (int64_t*)ray_data(y) + start : NULL;
+        int64_t lsv = xv ? 0 : x->i64, rsv = yv ? 0 : y->i64;
+        switch (opc) {
+            case OP_ADD: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_ADD_I64); break;
+            case OP_SUB: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_SUB_I64); break;
+            case OP_MUL: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_MUL_I64); break;
+            case OP_MIN2: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_MIN2_I64); break;
+            case OP_MAX2: TYPED_LOOP(int64_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_MAX2_I64); break;
+            default: break;
+        }
+    } else if (ot == RAY_I32 || ot == RAY_DATE || ot == RAY_TIME) {
+        int32_t* restrict od = (int32_t*)ray_data(out) + start;
+        int32_t* ld = xv ? (int32_t*)ray_data(x) + start : NULL;
+        int32_t* rd = yv ? (int32_t*)ray_data(y) + start : NULL;
+        int32_t lsv = xv ? 0 : (int32_t)x->i32, rsv = yv ? 0 : (int32_t)y->i32;
+        switch (opc) {
+            case OP_ADD: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_ADD_I32); break;
+            case OP_SUB: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_SUB_I32); break;
+            case OP_MUL: TYPED_LOOP(int32_t,ld,rd,lsv,rsv,od,n,xv,yv,OP_MUL_I32); break;
+            default: break;
+        }
+    } else if (ot == RAY_F64) {
+        double* restrict od = (double*)ray_data(out) + start;
+        double* ld = xv ? (double*)ray_data(x) + start : NULL;
+        double* rd = yv ? (double*)ray_data(y) + start : NULL;
+        double lsv = xv ? 0 : x->f64, rsv = yv ? 0 : y->f64;
+        switch (opc) {
+            case OP_ADD: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_ADD_F64); break;
+            case OP_SUB: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_SUB_F64); break;
+            case OP_MUL: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_MUL_F64); break;
+            case OP_MIN2: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_MIN2_F64); break;
+            case OP_MAX2: TYPED_LOOP(double,ld,rd,lsv,rsv,od,n,xv,yv,OP_MAX2_F64); break;
+            default: break;
+        }
+    }
+    #undef TYPED_LOOP
+}
+
+/* Infer output type for arithmetic on two operands */
+static int8_t infer_arith_type(ray_t* x, ray_t* y) {
+    int8_t xt = ray_is_atom(x) ? -(x->type) : x->type;
+    int8_t yt = ray_is_atom(y) ? -(y->type) : y->type;
+    if (xt == RAY_F64 || yt == RAY_F64) return RAY_F64;
+    if (xt == RAY_I64 || yt == RAY_I64) return RAY_I64;
+    if (xt == RAY_TIMESTAMP || yt == RAY_TIMESTAMP) return RAY_TIMESTAMP;
+    if (xt == RAY_I32 || yt == RAY_I32) return RAY_I32;
+    if (xt == RAY_DATE || yt == RAY_DATE) return RAY_DATE;
+    if (xt == RAY_TIME || yt == RAY_TIME) return RAY_TIME;
+    if (xt == RAY_I16 || yt == RAY_I16) return RAY_I16;
+    return RAY_I64;
+}
+
+/* Fast vector binary op: typed dispatch + rc==1 reuse + parallel.
+ * Returns NULL when the fast path doesn't apply (caller falls through).
+ * opcode is the DAG opcode (OP_ADD, OP_SUB, OP_MUL, OP_EQ, OP_LT, etc.) */
+ray_t* binop_vec(ray_t* x, ray_t* y, uint16_t opcode) {
+    bool xv = ray_is_vec(x), yv = ray_is_vec(y);
+    bool xa = ray_is_atom(x), ya = ray_is_atom(y);
+    if (!(xv || xa) || !(yv || ya) || (!xv && !yv)) return NULL;
+
+    /* Skip when nulls present — generic path handles null propagation */
+    if (xv && (x->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
+    if (yv && (y->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
+    if (xa && RAY_ATOM_IS_NULL(x)) return NULL;
+    if (ya && RAY_ATOM_IS_NULL(y)) return NULL;
+
+    int64_t len = xv ? x->len : y->len;
+    if (xv && yv && x->len != y->len) return NULL;
+
+    /* Determine input type — both operands must match */
+    int8_t xt = xv ? x->type : -(x->type);
+    int8_t yt = yv ? y->type : -(y->type);
+    /* Skip temporal types — output depends on op (DATE-DATE→I32 etc.) */
+    bool x_temporal = (xt == RAY_DATE || xt == RAY_TIME || xt == RAY_TIMESTAMP);
+    bool y_temporal = (yt == RAY_DATE || yt == RAY_TIME || yt == RAY_TIMESTAMP);
+    if (x_temporal || y_temporal) return NULL;
+    /* Both operands must have the same type */
+    if (xt != yt) return NULL;
+    /* Only handle I64, I32, F64 */
+    if (xt != RAY_I64 && xt != RAY_I32 && xt != RAY_F64) return NULL;
+    /* Only handle opcodes with typed loop implementations */
+    if (opcode != OP_ADD && opcode != OP_SUB && opcode != OP_MUL &&
+        opcode != OP_MIN2 && opcode != OP_MAX2 &&
+        opcode != OP_EQ && opcode != OP_NE && opcode != OP_LT &&
+        opcode != OP_LE && opcode != OP_GT && opcode != OP_GE)
+        return NULL;
+
+    /* Output type: BOOL for comparisons, same as input for arithmetic */
+    bool is_cmp = (opcode >= OP_EQ && opcode <= OP_GE);
+    int8_t ot = is_cmp ? RAY_BOOL : xt;
+
+    /* rc==1 buffer reuse (arithmetic only, not slices — slices alias
+     * their parent's buffer so writing into them corrupts the parent) */
+    ray_t* out;
+    if (!is_cmp && xv && x->rc == 1 && x->type == ot &&
+        !(x->attrs & RAY_ATTR_SLICE)) {
+        out = x;
+        ray_retain(out);
+    } else if (!is_cmp && yv && y->rc == 1 && y->type == ot &&
+               !(y->attrs & RAY_ATTR_SLICE)) {
+        out = y;
+        ray_retain(out);
+    } else {
+        out = ray_vec_new(ot, len);
+    }
+    if (!out || RAY_IS_ERR(out)) return out;
+    out->len = len;
+
+    binop_vec_ctx_t ctx = { .left = x, .right = y, .out = out, .opcode = opcode };
+    ray_pool_t* pool = ray_pool_get();
+    if (pool && len >= RAY_PARALLEL_THRESHOLD)
+        ray_pool_dispatch(pool, binop_vec_worker, &ctx, len);
+    else
+        binop_vec_worker(&ctx, 0, 0, len);
+
+    return out;
+}
 
 /* Binary arithmetic */
 ray_t* ray_add_fn(ray_t* a, ray_t* b) {
+
     /* Temporal + integer arithmetic (only int types, not float) */
     if (is_temporal(a) && is_numeric(b) && b->type != -RAY_F64) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
@@ -91,6 +346,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
 }
 
 ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
+
     /* Temporal - int null propagation (both operands) */
     if (is_temporal(a) && is_numeric(b)) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
@@ -160,6 +416,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
 }
 
 ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
+
     /* int * TIME → TIME, TIME * int → TIME */
     if (is_numeric(a) && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIME);
