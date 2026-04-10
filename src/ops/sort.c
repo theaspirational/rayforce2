@@ -2130,6 +2130,13 @@ ray_t* ray_sort(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
             result->len = nrows;
             radix_decode_into(ray_data(result), cols[0]->type, sorted_keys,
                               nrows, descs ? descs[0] : 0);
+            /* Propagate null bitmap using sorted indices */
+            if (cols[0]->attrs & RAY_ATTR_HAS_NULLS) {
+                int64_t* idx_data = (int64_t*)ray_data(idx);
+                for (int64_t i = 0; i < nrows; i++)
+                    if (ray_vec_is_null(cols[0], idx_data[i]))
+                        ray_vec_set_null(result, i, true);
+            }
             ray_release(idx);
             scratch_free(keys_hdr);
             return result;

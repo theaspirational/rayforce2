@@ -757,6 +757,13 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
     case 16: for (int64_t i = 0; i < n; i++) memcpy(dst + i*16, src + idx[i]*16, 16); break;
     }
 
+    /* Propagate null bitmap */
+    if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+        for (int64_t i = 0; i < n; i++)
+            if (ray_vec_is_null(vec, idx[i]))
+                ray_vec_set_null(result, i, true);
+    }
+
     return result;
 }
 
