@@ -165,8 +165,9 @@ const char* ray_err_code(ray_t* err);
 #define ray_is_vec(v)     ((v)->type >= RAY_BOOL && (v)->type <= RAY_STR)
 #define ray_len(v)        ((v)->len)
 
-/* Element type sizes — needed for slice-aware ray_data */
-extern const uint8_t ray_type_sizes[];
+/* Element type sizes indexed by type tag — covers all uint8_t values.
+ * Only types 1-14 (vectors) have non-zero entries. */
+extern const uint8_t ray_type_sizes[256];
 
 static inline void* ray_data_fn(ray_t* v) {
     if (__builtin_expect(!!(v->attrs & RAY_ATTR_SLICE), 0)) {

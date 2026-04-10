@@ -23,8 +23,9 @@
 
 #include "core/types.h"
 
-/* Element sizes indexed by positive type tag (data types 0-15). */
-const uint8_t ray_type_sizes[RAY_TYPE_COUNT] = {
+/* Element sizes indexed by type tag.  Only types 0-14 (vectors) have
+ * non-zero entries; remaining indices are zero (safe for non-vector types). */
+const uint8_t ray_type_sizes[256] = {
     /* [RAY_LIST]      =  0 */ 8,   /* pointer-sized (ray_t*) */
     /* [RAY_BOOL]      =  1 */ 1,
     /* [RAY_U8]        =  2 */ 1,

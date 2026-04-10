@@ -37,7 +37,7 @@
 #define RAY_TYPE_COUNT 15
 
 /* Type sizes lookup table (defined in types.c) */
-extern const uint8_t ray_type_sizes[RAY_TYPE_COUNT];
+extern const uint8_t ray_type_sizes[256];
 
 /* Element size for a given type tag */
 #define ray_elem_size(t)  (ray_type_sizes[(t)])
