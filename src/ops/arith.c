@@ -22,63 +22,275 @@
  */
 
 #include "lang/eval_internal.h"
-#include "core/pool.h"
-#include "mem/heap.h"
-#include "mem/cow.h"
+#include "ops/dispatch.h"
+#include "ops/ops.h"
 
 /* ══════════════════════════════════════════
- * Typed vector arithmetic — rayforce1 pattern
+ * Arithmetic partial functions + builtins
  *
- * Each operation dispatches on MTYPE2(left_type, right_type) once,
- * then runs a tight typed-pointer loop that the compiler vectorizes.
- * Output buffer reuses input when rc==1 and types match.
+ * Each _partial function dispatches on MTYPE2(x->type, y->type),
+ * then runs a typed pointer loop the compiler auto-vectorizes.
+ * The builtin (ray_add_fn etc.) calls ray_binop_map which handles
+ * atoms, vectors, rc==1 reuse, and parallel dispatch.
  * ══════════════════════════════════════════ */
 
-#define MTYPE2(a, b) (((int)(a) + 128) * 256 + ((int)(b) + 128))
+/* ── Typed loop macros ─────────────────────────────────────────── */
 
-/* Typed loop macros: atom+vec, vec+atom, vec+vec.
- * lt/rt/ot = element C types, OP = binary expression macro. */
-#define LOOP_A_V(lval, rptr, optr, n, OP)              \
-    for (int64_t _i = 0; _i < (n); _i++)               \
-        (optr)[_i] = OP((lval), (rptr)[_i]);
+/* Safe scalar read from atom union — memcpy avoids type-punning UB */
+#define ATOM_AS(T, obj) ({T _v; memcpy(&_v, &(obj)->i64, sizeof(T)); _v;})
 
-#define LOOP_V_A(lptr, rval, optr, n, OP)              \
-    for (int64_t _i = 0; _i < (n); _i++)               \
-        (optr)[_i] = OP((lptr)[_i], (rval));
+/* Generate a typed V×V, A×V, V×A loop.  OP is a macro taking (a,b). */
+#define VEC_BINOP(LT, RT, OT, OP, x, y, len, off, out)                     \
+    do {                                                                     \
+        OT* restrict _o = (OT*)ray_data(out) + (off);                       \
+        bool _xv = ray_is_vec(x), _yv = ray_is_vec(y);                     \
+        if (_xv && _yv) {                                                    \
+            LT* _l = (LT*)ray_data(x) + (off);                             \
+            RT* _r = (RT*)ray_data(y) + (off);                             \
+            for (int64_t _i = 0; _i < (len); _i++) _o[_i] = OP(_l[_i], _r[_i]); \
+        } else if (_xv) {                                                    \
+            LT* _l = (LT*)ray_data(x) + (off);                             \
+            RT _s = ATOM_AS(RT, y);                                         \
+            for (int64_t _i = 0; _i < (len); _i++) _o[_i] = OP(_l[_i], _s); \
+        } else {                                                             \
+            LT _s = ATOM_AS(LT, x);                                        \
+            RT* _r = (RT*)ray_data(y) + (off);                             \
+            for (int64_t _i = 0; _i < (len); _i++) _o[_i] = OP(_s, _r[_i]); \
+        }                                                                    \
+    } while(0)
 
-#define LOOP_V_V(lptr, rptr, optr, n, OP)              \
-    for (int64_t _i = 0; _i < (n); _i++)               \
-        (optr)[_i] = OP((lptr)[_i], (rptr)[_i]);
+/* Simpler same-type version */
+#define VEC_BINOP_SAME(T, OP, x, y, len, off, out) VEC_BINOP(T, T, T, OP, x, y, len, off, out)
 
-/* Op macros — expand to typed expressions the compiler can vectorize */
-#define OP_ADD_I64(a,b) ((int64_t)((uint64_t)(a)+(uint64_t)(b)))
-#define OP_SUB_I64(a,b) ((int64_t)((uint64_t)(a)-(uint64_t)(b)))
-#define OP_MUL_I64(a,b) ((int64_t)((uint64_t)(a)*(uint64_t)(b)))
-#define OP_ADD_I32(a,b) ((int32_t)((uint32_t)(a)+(uint32_t)(b)))
-#define OP_SUB_I32(a,b) ((int32_t)((uint32_t)(a)-(uint32_t)(b)))
-#define OP_MUL_I32(a,b) ((int32_t)((uint32_t)(a)*(uint32_t)(b)))
-#define OP_ADD_F64(a,b) ((a)+(b))
-#define OP_SUB_F64(a,b) ((a)-(b))
-#define OP_MUL_F64(a,b) ((a)*(b))
-#define OP_EQ_I64(a,b)  ((uint8_t)((a)==(b)))
-#define OP_NE_I64(a,b)  ((uint8_t)((a)!=(b)))
-#define OP_LT_I64(a,b)  ((uint8_t)((a)<(b)))
-#define OP_LE_I64(a,b)  ((uint8_t)((a)<=(b)))
-#define OP_GT_I64(a,b)  ((uint8_t)((a)>(b)))
-#define OP_GE_I64(a,b)  ((uint8_t)((a)>=(b)))
-#define OP_EQ_F64(a,b)  ((uint8_t)((a)==(b)))
-#define OP_NE_F64(a,b)  ((uint8_t)((a)!=(b)))
-#define OP_LT_F64(a,b)  ((uint8_t)((a)<(b)))
-#define OP_LE_F64(a,b)  ((uint8_t)((a)<=(b)))
-#define OP_GT_F64(a,b)  ((uint8_t)((a)>(b)))
-#define OP_GE_F64(a,b)  ((uint8_t)((a)>=(b)))
-/* MIN2/MAX2 */
-#define OP_MIN2_I64(a,b) ((a)<(b)?(a):(b))
-#define OP_MAX2_I64(a,b) ((a)>(b)?(a):(b))
-#define OP_MIN2_F64(a,b) ((a)<(b)?(a):(b))
-#define OP_MAX2_F64(a,b) ((a)>(b)?(a):(b))
+/* Op macros */
+#define ADD_I64(a,b) ((int64_t)((uint64_t)(a)+(uint64_t)(b)))
+#define SUB_I64(a,b) ((int64_t)((uint64_t)(a)-(uint64_t)(b)))
+#define MUL_I64(a,b) ((int64_t)((uint64_t)(a)*(uint64_t)(b)))
+#define ADD_I32(a,b) ((int32_t)((uint32_t)(a)+(uint32_t)(b)))
+#define SUB_I32(a,b) ((int32_t)((uint32_t)(a)-(uint32_t)(b)))
+#define MUL_I32(a,b) ((int32_t)((uint32_t)(a)*(uint32_t)(b)))
+#define ADD_F64(a,b) ((a)+(b))
+#define SUB_F64(a,b) ((a)-(b))
+#define MUL_F64(a,b) ((a)*(b))
 
-/* Context for parallel typed dispatch */
+/* ── ADD partial ───────────────────────────────────────────────── */
+
+static ray_t* ray_add_partial(ray_t* x, ray_t* y, int64_t len, int64_t off, ray_t* out) {
+    switch (MTYPE2(x->type, y->type)) {
+        /* atom × atom — delegate to ray_add_fn (handles temporals etc.) */
+        /* This case is only reached from probe_output_type; actual atom×atom
+         * goes through ray_add_fn directly. */
+        case MTYPE2(-RAY_I64, -RAY_I64): return make_i64(x->i64 + y->i64);
+        case MTYPE2(-RAY_I32, -RAY_I32): return make_i32(x->i32 + y->i32);
+        case MTYPE2(-RAY_F64, -RAY_F64): return make_f64(x->f64 + y->f64);
+        case MTYPE2(-RAY_I64, -RAY_F64): return make_f64((double)x->i64 + y->f64);
+        case MTYPE2(-RAY_F64, -RAY_I64): return make_f64(x->f64 + (double)y->i64);
+        case MTYPE2(-RAY_I32, -RAY_I64): return make_i64((int64_t)x->i32 + y->i64);
+        case MTYPE2(-RAY_I64, -RAY_I32): return make_i64(x->i64 + (int64_t)y->i32);
+        case MTYPE2(-RAY_I32, -RAY_F64): return make_f64((double)x->i32 + y->f64);
+        case MTYPE2(-RAY_F64, -RAY_I32): return make_f64(x->f64 + (double)y->i32);
+
+        /* I64 vec (same-type) */
+        case MTYPE2(RAY_I64, RAY_I64):
+        case MTYPE2(-RAY_I64, RAY_I64):
+        case MTYPE2(RAY_I64, -RAY_I64):
+            VEC_BINOP_SAME(int64_t, ADD_I64, x, y, len, off, out); return NULL;
+
+        /* I32 vec (same-type) */
+        case MTYPE2(RAY_I32, RAY_I32):
+        case MTYPE2(-RAY_I32, RAY_I32):
+        case MTYPE2(RAY_I32, -RAY_I32):
+            VEC_BINOP_SAME(int32_t, ADD_I32, x, y, len, off, out); return NULL;
+
+        /* F64 vec (same-type) */
+        case MTYPE2(RAY_F64, RAY_F64):
+        case MTYPE2(-RAY_F64, RAY_F64):
+        case MTYPE2(RAY_F64, -RAY_F64):
+            VEC_BINOP_SAME(double, ADD_F64, x, y, len, off, out); return NULL;
+
+        /* U8 vec */
+        case MTYPE2(RAY_U8, RAY_U8):
+        case MTYPE2(-RAY_U8, RAY_U8):
+        case MTYPE2(RAY_U8, -RAY_U8): {
+            uint8_t* restrict o = (uint8_t*)ray_data(out) + off;
+            bool xvec = ray_is_vec(x), yvec = ray_is_vec(y);
+            if (xvec && yvec) {
+                uint8_t* l = (uint8_t*)ray_data(x) + off;
+                uint8_t* r = (uint8_t*)ray_data(y) + off;
+                for (int64_t i = 0; i < len; i++) o[i] = l[i] + r[i];
+            } else if (xvec) {
+                uint8_t* l = (uint8_t*)ray_data(x) + off;
+                uint8_t s = y->u8;
+                for (int64_t i = 0; i < len; i++) o[i] = l[i] + s;
+            } else {
+                uint8_t s = x->u8;
+                uint8_t* r = (uint8_t*)ray_data(y) + off;
+                for (int64_t i = 0; i < len; i++) o[i] = s + r[i];
+            }
+            return NULL;
+        }
+
+        /* Cross-type: I32+I64 → I64 (widen I32 to I64 in loop) */
+        case MTYPE2(-RAY_I32, RAY_I64):
+        case MTYPE2(RAY_I32, RAY_I64): {
+            int64_t* restrict o = (int64_t*)ray_data(out) + off;
+            int64_t* rd = (int64_t*)ray_data(y) + off;
+            if (ray_is_vec(x)) {
+                int32_t* ld = (int32_t*)ray_data(x) + off;
+                for (int64_t i = 0; i < len; i++) o[i] = (int64_t)ld[i] + rd[i];
+            } else {
+                int64_t sv = (int64_t)x->i32;
+                for (int64_t i = 0; i < len; i++) o[i] = sv + rd[i];
+            }
+            return NULL;
+        }
+        case MTYPE2(RAY_I64, -RAY_I32):
+        case MTYPE2(RAY_I64, RAY_I32): {
+            int64_t* restrict o = (int64_t*)ray_data(out) + off;
+            int64_t* ld = (int64_t*)ray_data(x) + off;
+            if (ray_is_vec(y)) {
+                int32_t* rd = (int32_t*)ray_data(y) + off;
+                for (int64_t i = 0; i < len; i++) o[i] = ld[i] + (int64_t)rd[i];
+            } else {
+                int64_t sv = (int64_t)y->i32;
+                for (int64_t i = 0; i < len; i++) o[i] = ld[i] + sv;
+            }
+            return NULL;
+        }
+
+        /* Cross-type: int+F64 → F64 */
+        case MTYPE2(-RAY_I64, RAY_F64):
+        case MTYPE2(RAY_I64, RAY_F64): {
+            double* restrict o = (double*)ray_data(out) + off;
+            double* rd = (double*)ray_data(y) + off;
+            if (ray_is_vec(x)) {
+                int64_t* ld = (int64_t*)ray_data(x) + off;
+                for (int64_t i = 0; i < len; i++) o[i] = (double)ld[i] + rd[i];
+            } else {
+                double sv = (double)x->i64;
+                for (int64_t i = 0; i < len; i++) o[i] = sv + rd[i];
+            }
+            return NULL;
+        }
+        case MTYPE2(RAY_F64, -RAY_I64):
+        case MTYPE2(RAY_F64, RAY_I64): {
+            double* restrict o = (double*)ray_data(out) + off;
+            double* ld = (double*)ray_data(x) + off;
+            if (ray_is_vec(y)) {
+                int64_t* rd = (int64_t*)ray_data(y) + off;
+                for (int64_t i = 0; i < len; i++) o[i] = ld[i] + (double)rd[i];
+            } else {
+                double sv = (double)y->i64;
+                for (int64_t i = 0; i < len; i++) o[i] = ld[i] + sv;
+            }
+            return NULL;
+        }
+        case MTYPE2(-RAY_I32, RAY_F64):
+        case MTYPE2(RAY_I32, RAY_F64): {
+            double* restrict o = (double*)ray_data(out) + off;
+            double* rd = (double*)ray_data(y) + off;
+            if (ray_is_vec(x)) {
+                int32_t* ld = (int32_t*)ray_data(x) + off;
+                for (int64_t i = 0; i < len; i++) o[i] = (double)ld[i] + rd[i];
+            } else {
+                double sv = (double)x->i32;
+                for (int64_t i = 0; i < len; i++) o[i] = sv + rd[i];
+            }
+            return NULL;
+        }
+        case MTYPE2(RAY_F64, -RAY_I32):
+        case MTYPE2(RAY_F64, RAY_I32): {
+            double* restrict o = (double*)ray_data(out) + off;
+            double* ld = (double*)ray_data(x) + off;
+            if (ray_is_vec(y)) {
+                int32_t* rd = (int32_t*)ray_data(y) + off;
+                for (int64_t i = 0; i < len; i++) o[i] = ld[i] + (double)rd[i];
+            } else {
+                double sv = (double)y->i32;
+                for (int64_t i = 0; i < len; i++) o[i] = ld[i] + sv;
+            }
+            return NULL;
+        }
+
+        default: return RAY_PARTIAL_UNSUPPORTED;
+    }
+}
+
+/* ── SUB partial ───────────────────────────────────────────────── */
+
+static ray_t* ray_sub_partial(ray_t* x, ray_t* y, int64_t len, int64_t off, ray_t* out) {
+    switch (MTYPE2(x->type, y->type)) {
+        case MTYPE2(-RAY_I64, -RAY_I64): return make_i64(x->i64 - y->i64);
+        case MTYPE2(-RAY_I32, -RAY_I32): return make_i32(x->i32 - y->i32);
+        case MTYPE2(-RAY_F64, -RAY_F64): return make_f64(x->f64 - y->f64);
+        case MTYPE2(-RAY_I64, -RAY_F64): return make_f64((double)x->i64 - y->f64);
+        case MTYPE2(-RAY_F64, -RAY_I64): return make_f64(x->f64 - (double)y->i64);
+        case MTYPE2(-RAY_I32, -RAY_I64): return make_i64((int64_t)x->i32 - y->i64);
+        case MTYPE2(-RAY_I64, -RAY_I32): return make_i64(x->i64 - (int64_t)y->i32);
+
+        case MTYPE2(RAY_I64, RAY_I64):
+        case MTYPE2(-RAY_I64, RAY_I64):
+        case MTYPE2(RAY_I64, -RAY_I64):
+            VEC_BINOP_SAME(int64_t, SUB_I64, x, y, len, off, out); return NULL;
+        case MTYPE2(RAY_I32, RAY_I32):
+        case MTYPE2(-RAY_I32, RAY_I32):
+        case MTYPE2(RAY_I32, -RAY_I32):
+            VEC_BINOP_SAME(int32_t, SUB_I32, x, y, len, off, out); return NULL;
+        case MTYPE2(RAY_F64, RAY_F64):
+        case MTYPE2(-RAY_F64, RAY_F64):
+        case MTYPE2(RAY_F64, -RAY_F64):
+            VEC_BINOP_SAME(double, SUB_F64, x, y, len, off, out); return NULL;
+
+        default: return RAY_PARTIAL_UNSUPPORTED;
+    }
+}
+
+/* ── MUL partial ───────────────────────────────────────────────── */
+
+static ray_t* ray_mul_partial(ray_t* x, ray_t* y, int64_t len, int64_t off, ray_t* out) {
+    switch (MTYPE2(x->type, y->type)) {
+        case MTYPE2(-RAY_I64, -RAY_I64): return make_i64(x->i64 * y->i64);
+        case MTYPE2(-RAY_I32, -RAY_I32): return make_i32(x->i32 * y->i32);
+        case MTYPE2(-RAY_F64, -RAY_F64): return make_f64(x->f64 * y->f64);
+        case MTYPE2(-RAY_I64, -RAY_F64): return make_f64((double)x->i64 * y->f64);
+        case MTYPE2(-RAY_F64, -RAY_I64): return make_f64(x->f64 * (double)y->i64);
+
+        case MTYPE2(RAY_I64, RAY_I64):
+        case MTYPE2(-RAY_I64, RAY_I64):
+        case MTYPE2(RAY_I64, -RAY_I64):
+            VEC_BINOP_SAME(int64_t, MUL_I64, x, y, len, off, out); return NULL;
+        case MTYPE2(RAY_I32, RAY_I32):
+        case MTYPE2(-RAY_I32, RAY_I32):
+        case MTYPE2(RAY_I32, -RAY_I32):
+            VEC_BINOP_SAME(int32_t, MUL_I32, x, y, len, off, out); return NULL;
+        case MTYPE2(RAY_F64, RAY_F64):
+        case MTYPE2(-RAY_F64, RAY_F64):
+        case MTYPE2(RAY_F64, -RAY_F64):
+            VEC_BINOP_SAME(double, MUL_F64, x, y, len, off, out); return NULL;
+
+        default: return RAY_PARTIAL_UNSUPPORTED;
+    }
+}
+
+/* ── Builtins ──────────────────────────────────────────────────── */
+
+/* OLD binop_vec infrastructure removed — now in dispatch.c/dispatch.h.
+ * Keeping a stub for eval.c backward compat until eval.c is cleaned up. */
+ray_t* binop_vec(ray_t* x, ray_t* y, uint16_t opcode) {
+    (void)opcode;
+    /* Try add/sub/mul partials based on opcode */
+    ray_binop_partial_fn partial = NULL;
+    switch (opcode) {
+        case OP_ADD: partial = ray_add_partial; break;
+        case OP_SUB: partial = ray_sub_partial; break;
+        case OP_MUL: partial = ray_mul_partial; break;
+        default: return NULL;
+    }
+    return ray_binop_map(partial, x, y);
+}
+
+/* DEAD CODE BELOW — delete after eval.c cleanup */
+#if 0
 typedef struct {
     ray_t* left;
     ray_t* right;
@@ -280,9 +492,15 @@ ray_t* binop_vec(ray_t* x, ray_t* y, uint16_t opcode) {
 
     return out;
 }
+#endif /* dead code */
 
 /* Binary arithmetic */
 ray_t* ray_add_fn(ray_t* a, ray_t* b) {
+    /* Vector fast path — only when at least one operand is a typed vector */
+    if (ray_is_vec(a) || ray_is_vec(b)) {
+        ray_t* r = ray_binop_map(ray_add_partial, a, b);
+        if (r) return r;
+    }
 
     /* Temporal + integer arithmetic (only int types, not float) */
     if (is_temporal(a) && is_numeric(b) && b->type != -RAY_F64) {
@@ -346,6 +564,10 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
 }
 
 ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
+    if (ray_is_vec(a) || ray_is_vec(b)) {
+        ray_t* r = ray_binop_map(ray_sub_partial, a, b);
+        if (r) return r;
+    }
 
     /* Temporal - int null propagation (both operands) */
     if (is_temporal(a) && is_numeric(b)) {
@@ -416,6 +638,10 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
 }
 
 ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
+    if (ray_is_vec(a) || ray_is_vec(b)) {
+        ray_t* r = ray_binop_map(ray_mul_partial, a, b);
+        if (r) return r;
+    }
 
     /* int * TIME → TIME, TIME * int → TIME */
     if (is_numeric(a) && b->type == -RAY_TIME) {

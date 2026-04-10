@@ -13,6 +13,7 @@
 #include "lang/eval.h"
 #include "lang/format.h"
 #include "core/types.h"
+#include "mem/heap.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
