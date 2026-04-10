@@ -321,9 +321,19 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                  ((obj)->type==-RAY_I32||(obj)->type==-RAY_DATE||(obj)->type==-RAY_TIME) ? (int64_t)(obj)->i32 : \
                  ((obj)->type==-RAY_I16) ? (int64_t)(obj)->i16 : (int64_t)(obj)->u8)
 
-            /* Output type = probed result type (from e0) */
-            ray_t* vec = ray_vec_new(out_type, len);
-            if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
+            /* Reuse input buffer when rc==1 and type matches (avoids allocation).
+             * Retain so the caller's ray_release(left/right) doesn't free our output. */
+            ray_t* vec;
+            if (lv && left->rc == 1 && left->type == out_type) {
+                vec = left;
+                ray_retain(vec);  /* caller will release left; we keep ownership */
+            } else if (rv && right->rc == 1 && right->type == out_type) {
+                vec = right;
+                ray_retain(vec);
+            } else {
+                vec = ray_vec_new(out_type, len);
+            }
+            if (!vec || RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
             vec->len = len;
 
             void* ldata = lv ? ray_data(left) : NULL;
@@ -336,41 +346,68 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
 
             #define LA(i) (ldata ? READ_INT(ldata, esz_l, i) : lsv)
             #define RA(i) (rdata ? READ_INT(rdata, esz_r, i) : rsv)
-            #define ISNULL_L(i) (l_atom_null || (lv && ray_vec_is_null(left, i)))
-            #define ISNULL_R(i) (r_atom_null || (rv && ray_vec_is_null(right, i)))
 
-            /* Compute into i64 temp, then store at output width */
-            for (int64_t i = 0; i < len; i++) {
-                int64_t a = LA(i), b = RA(i);
-                int64_t r;
-                int null = ISNULL_L(i) || ISNULL_R(i);
-                if (null) {
-                store_null:
-                    /* Store zero and mark null in bitmap */
-                    if (out_esz == 8)      ((int64_t*)ray_data(vec))[i] = 0;
-                    else if (out_esz == 4)  ((int32_t*)ray_data(vec))[i] = 0;
-                    else if (out_esz == 2)  ((int16_t*)ray_data(vec))[i] = 0;
-                    else                    ((uint8_t*)ray_data(vec))[i] = 0;
-                    ray_vec_set_null(vec, i, true);
-                    continue;
+            /* Hoist null check: skip per-element null testing when no nulls */
+            bool l_has_nulls = l_atom_null || (lv && (left->attrs & RAY_ATTR_HAS_NULLS));
+            bool r_has_nulls = r_atom_null || (rv && (right->attrs & RAY_ATTR_HAS_NULLS));
+            bool any_nulls = l_has_nulls || r_has_nulls;
+            void* out_data = ray_data(vec);  /* hoist out of loop */
+
+            if (!any_nulls) {
+                /* Fast path: no nulls — tight loop, no per-element checks */
+                for (int64_t i = 0; i < len; i++) {
+                    int64_t a = LA(i), b = RA(i);
+                    int64_t r;
+                    switch (dag_opcode) {
+                    case OP_ADD: r = (int64_t)((uint64_t)a + (uint64_t)b); break;
+                    case OP_SUB: r = (int64_t)((uint64_t)a - (uint64_t)b); break;
+                    case OP_MUL: r = (int64_t)((uint64_t)a * (uint64_t)b); break;
+                    case OP_DIV: if (b==0) { if (out_esz==8) ((int64_t*)out_data)[i]=0; else if (out_esz==4) ((int32_t*)out_data)[i]=0; else if (out_esz==2) ((int16_t*)out_data)[i]=0; else ((uint8_t*)out_data)[i]=0; ray_vec_set_null(vec,i,true); continue; }
+                                r=a/b; if ((a^b)<0 && r*b!=a) r--; break;
+                    case OP_MOD: if (b==0) { if (out_esz==8) ((int64_t*)out_data)[i]=0; else if (out_esz==4) ((int32_t*)out_data)[i]=0; else if (out_esz==2) ((int16_t*)out_data)[i]=0; else ((uint8_t*)out_data)[i]=0; ray_vec_set_null(vec,i,true); continue; }
+                                r=a%b; if (r && (r^b)<0) r+=b; break;
+                    default: r = 0; break;
+                    }
+                    if (out_esz == 8)      ((int64_t*)out_data)[i] = r;
+                    else if (out_esz == 4)  ((int32_t*)out_data)[i] = (int32_t)r;
+                    else if (out_esz == 2)  ((int16_t*)out_data)[i] = (int16_t)r;
+                    else                    ((uint8_t*)out_data)[i] = (uint8_t)r;
                 }
-                switch (dag_opcode) {
-                case OP_ADD: r = (int64_t)((uint64_t)a + (uint64_t)b); break;
-                case OP_SUB: r = (int64_t)((uint64_t)a - (uint64_t)b); break;
-                case OP_MUL: r = (int64_t)((uint64_t)a * (uint64_t)b); break;
-                case OP_DIV: if (b==0) goto store_null; else { r=a/b; if ((a^b)<0 && r*b!=a) r--; } break;
-                case OP_MOD: if (b==0) goto store_null; else { r=a%b; if (r && (r^b)<0) r+=b; } break;
-                default: r = 0; break;
+            } else {
+                /* Slow path: check nulls per element */
+                #define ISNULL_L(i) (l_atom_null || (lv && ray_vec_is_null(left, i)))
+                #define ISNULL_R(i) (r_atom_null || (rv && ray_vec_is_null(right, i)))
+                for (int64_t i = 0; i < len; i++) {
+                    int64_t a = LA(i), b = RA(i);
+                    int64_t r;
+                    if (ISNULL_L(i) || ISNULL_R(i)) {
+                        if (out_esz == 8)      ((int64_t*)out_data)[i] = 0;
+                        else if (out_esz == 4)  ((int32_t*)out_data)[i] = 0;
+                        else if (out_esz == 2)  ((int16_t*)out_data)[i] = 0;
+                        else                    ((uint8_t*)out_data)[i] = 0;
+                        ray_vec_set_null(vec, i, true);
+                        continue;
+                    }
+                    switch (dag_opcode) {
+                    case OP_ADD: r = (int64_t)((uint64_t)a + (uint64_t)b); break;
+                    case OP_SUB: r = (int64_t)((uint64_t)a - (uint64_t)b); break;
+                    case OP_MUL: r = (int64_t)((uint64_t)a * (uint64_t)b); break;
+                    case OP_DIV: if (b==0) { ((int64_t*)out_data)[i]=0; ray_vec_set_null(vec,i,true); continue; }
+                                r=a/b; if ((a^b)<0 && r*b!=a) r--; break;
+                    case OP_MOD: if (b==0) { ((int64_t*)out_data)[i]=0; ray_vec_set_null(vec,i,true); continue; }
+                                r=a%b; if (r && (r^b)<0) r+=b; break;
+                    default: r = 0; break;
+                    }
+                    if (out_esz == 8)      ((int64_t*)out_data)[i] = r;
+                    else if (out_esz == 4)  ((int32_t*)out_data)[i] = (int32_t)r;
+                    else if (out_esz == 2)  ((int16_t*)out_data)[i] = (int16_t)r;
+                    else                    ((uint8_t*)out_data)[i] = (uint8_t)r;
                 }
-                if (out_esz == 8)      ((int64_t*)ray_data(vec))[i] = r;
-                else if (out_esz == 4)  ((int32_t*)ray_data(vec))[i] = (int32_t)r;
-                else if (out_esz == 2)  ((int16_t*)ray_data(vec))[i] = (int16_t)r;
-                else                    ((uint8_t*)ray_data(vec))[i] = (uint8_t)r;
+                #undef ISNULL_L
+                #undef ISNULL_R
             }
             #undef LA
             #undef RA
-            #undef ISNULL_L
-            #undef ISNULL_R
             #undef READ_INT
             #undef SCALAR_INT
             ray_release(e0);
