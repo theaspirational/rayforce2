@@ -63,7 +63,9 @@
  * before interpreting attrs.
  */
 
+#ifndef RAY_ATTR_SLICE
 #define RAY_ATTR_SLICE        0x10
+#endif
 #define RAY_ATTR_NULLMAP_EXT  0x20
 #define RAY_ATTR_HAS_NULLS    0x40
 #define RAY_ATTR_ARENA        0x80

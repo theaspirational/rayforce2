@@ -911,16 +911,7 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
             ray_t* result = ray_vec_new(vtype, count);
             if (RAY_IS_ERR(result)) return result;
             result->len = count;
-            /* Resolve slice for element data */
-            char* rsrc;
-            int64_t roff = 0;
-            if (vec->attrs & RAY_ATTR_SLICE) {
-                rsrc = (char*)ray_data(vec->slice_parent);
-                roff = vec->slice_offset;
-            } else {
-                rsrc = (char*)ray_data(vec);
-            }
-            memcpy(ray_data(result), rsrc + (roff + start) * esz, (size_t)(count * esz));
+            memcpy(ray_data(result), (char*)ray_data(vec) + start * esz, (size_t)(count * esz));
             /* Propagate null bitmap — check parent's flag for slices */
             bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) ||
                              ((vec->attrs & RAY_ATTR_SLICE) && vec->slice_parent &&
@@ -1061,27 +1052,19 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
         ray_t* result = ray_vec_new(vtype, abs_n);
         if (RAY_IS_ERR(result)) return result;
         result->len = abs_n;
-        /* Resolve slice: element data is in the parent */
-        char* src;
-        int64_t src_off = 0;
-        if (vec->attrs & RAY_ATTR_SLICE) {
-            src = (char*)ray_data(vec->slice_parent);
-            src_off = vec->slice_offset;
-        } else {
-            src = (char*)ray_data(vec);
-        }
+        char* src = (char*)ray_data(vec);
         char* dst = (char*)ray_data(result);
         if (len == 0) {
             memset(dst, 0, (size_t)(abs_n * esz));
         } else if (n >= 0) {
             for (int64_t i = 0; i < abs_n; i++)
-                memcpy(dst + i * esz, src + (src_off + i % len) * esz, esz);
+                memcpy(dst + i * esz, src + (i % len) * esz, esz);
         } else {
             /* Negative: take from end with wrap */
             for (int64_t i = 0; i < abs_n; i++) {
                 int64_t si = len - (abs_n - i) % len;
                 if (si == len) si = 0;
-                memcpy(dst + i * esz, src + (src_off + si) * esz, esz);
+                memcpy(dst + i * esz, src + si * esz, esz);
             }
         }
         /* Propagate null bitmap — check parent's flag for slices */

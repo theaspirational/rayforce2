@@ -158,11 +158,23 @@ const char* ray_err_code(ray_t* err);
 
 /* ===== Accessor Macros ===== */
 
+#define RAY_ATTR_SLICE  0x10
+
 #define ray_type(v)       ((v)->type)
 #define ray_is_atom(v)    ((v)->type < 0 || (v)->type >= RAY_LAMBDA)
 #define ray_is_vec(v)     ((v)->type >= RAY_BOOL && (v)->type <= RAY_STR)
 #define ray_len(v)        ((v)->len)
-static inline void* ray_data_fn(ray_t* v) { return (void*)v->data; }
+
+/* Element type sizes — needed for slice-aware ray_data */
+extern const uint8_t ray_type_sizes[];
+
+static inline void* ray_data_fn(ray_t* v) {
+    if (__builtin_expect(!!(v->attrs & RAY_ATTR_SLICE), 0)) {
+        uint8_t esz = ray_type_sizes[(uint8_t)v->type];
+        return (char*)v->slice_parent->data + v->slice_offset * esz;
+    }
+    return (void*)v->data;
+}
 #define ray_data(v)       ray_data_fn(v)
 
 /* ===== Memory Allocator API ===== */

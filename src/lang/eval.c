@@ -188,12 +188,9 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     /* Reject slices from all fast paths — ray_data() on a slice doesn't
      * return element data.  Slices go through the element-by-element
      * boxed path which uses collection_elem for proper resolution. */
-    bool has_slice = (left_coll && ray_is_vec(left) && (left->attrs & RAY_ATTR_SLICE)) ||
-                     (right_coll && ray_is_vec(right) && (right->attrs & RAY_ATTR_SLICE));
-
     /* Fast path: typed dispatch with rc==1 reuse + parallel.
      * binop_vec returns NULL when not applicable (falls through). */
-    if (!has_slice && dag_opcode > 0) {
+    if (dag_opcode > 0) {
         extern ray_t* binop_vec(ray_t*, ray_t*, uint16_t);
         ray_t* r = binop_vec(left, right, dag_opcode);
         if (r) return r;
@@ -294,7 +291,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
      * ══════════════════════════════════════════════════════════════ */
 
     /* Direct array loops — all integer types (I64, TIMESTAMP=i64, I32, DATE, TIME=i32, I16, U8) */
-    if (!has_slice && !force_boxed && dag_opcode > 0 && dag_opcode <= OP_MOD) {
+    if (!force_boxed && dag_opcode > 0 && dag_opcode <= OP_MOD) {
         int8_t ltype = left_coll ? left->type : -(left->type);
         int8_t rtype = right_coll ? right->type : -(right->type);
         int esz_l = (ltype == RAY_I64 || ltype == RAY_TIMESTAMP) ? 8 :
@@ -430,7 +427,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     }
 
     /* DAG executor — for F64 and comparisons */
-    if (!has_slice && !force_boxed && dag_opcode > 0) {
+    if (!force_boxed && dag_opcode > 0) {
         int is_idiv = (dag_opcode == OP_DIV || dag_opcode == OP_MOD);
         int is_cmp  = (dag_opcode >= OP_EQ && dag_opcode <= OP_GE);
 

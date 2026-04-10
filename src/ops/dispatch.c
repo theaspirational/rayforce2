@@ -74,9 +74,7 @@ ray_t* ray_binop_map(ray_binop_partial_fn partial, ray_t* x, ray_t* y) {
      * and ray_binop_map doesn't know the operation. */
     if (len == 0) return NULL;
 
-    /* Reject slices — ray_data() doesn't work on them */
-    if (xv && (x->attrs & RAY_ATTR_SLICE)) return NULL;
-    if (yv && (y->attrs & RAY_ATTR_SLICE)) return NULL;
+    /* ray_data() is now slice-aware — no need to reject slices */
 
     /* Reject nulls — per-element null propagation needs the slow path */
     if (xv && (x->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
@@ -121,9 +119,11 @@ ray_t* ray_binop_map(ray_binop_partial_fn partial, ray_t* x, ray_t* y) {
 
     /* Allocate output: rc==1 reuse when type matches */
     ray_t* out;
-    if (xv && x->rc == 1 && x->type == ot && !(x->attrs & RAY_ATTR_HAS_NULLS))
+    if (xv && x->rc == 1 && x->type == ot &&
+        !(x->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE)))
         { out = x; ray_retain(out); }
-    else if (yv && y->rc == 1 && y->type == ot && !(y->attrs & RAY_ATTR_HAS_NULLS))
+    else if (yv && y->rc == 1 && y->type == ot &&
+             !(y->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE)))
         { out = y; ray_retain(out); }
     else
         out = ray_vec_new(ot, len);
