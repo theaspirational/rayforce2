@@ -976,7 +976,7 @@ static void radix_phase2_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
          * bound on groups. Over-allocation is bounded: worst case total >> groups,
          * but total * row_stride is already committed via HT capacity anyway. */
         uint32_t init_grp = 256;
-        while (init_grp < total) init_grp *= 2;
+        while (init_grp < total && init_grp < 65536) init_grp *= 2;
         if (!group_ht_init_sized(&c->part_hts[p], part_ht_cap, &c->layout, init_grp))
             continue;
 

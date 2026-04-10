@@ -228,7 +228,11 @@ static inline ray_pool_hdr_t* ray_pool_of(ray_t* v) {
                 return hdr;
         }
     }
-    return (ray_pool_hdr_t*)((uintptr_t)v & ~(stride - 1));
+    ray_pool_hdr_t* fallback = (ray_pool_hdr_t*)((uintptr_t)v & ~(stride - 1));
+    if (fallback->pool_order >= RAY_HEAP_POOL_ORDER &&
+        fallback->pool_order <= RAY_HEAP_MAX_ORDER)
+        return fallback;
+    return NULL;
 }
 
 /* --------------------------------------------------------------------------

@@ -82,7 +82,7 @@ static inline void env_unlock(void) {
     atomic_store_explicit(&g_env_lock, 0, memory_order_release);
 }
 
-#define ENV_CAP 512
+#define ENV_CAP 1024
 
 static struct {
     int64_t keys[ENV_CAP];

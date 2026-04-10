@@ -267,6 +267,7 @@ static void heap_flush_slabs(ray_heap_t* h) {
                 po = h->pools[pidx].pool_order;
             } else {
                 ray_pool_hdr_t* phdr = ray_pool_of(blk);
+                if (!phdr) continue;
                 pb = (uintptr_t)phdr;
                 po = phdr->pool_order;
             }
@@ -292,6 +293,7 @@ static void heap_flush_foreign(ray_heap_t* h, bool return_to_owner) {
         ray_t* next = blk->fl_next;
         if (return_to_owner) {
             ray_pool_hdr_t* phdr = ray_pool_of(blk);  /* GC path, not hot */
+            if (!phdr) { blk = next; continue; }
             uint16_t owner_id = phdr->heap_id;
             ray_heap_t* owner = ray_heap_registry[owner_id % RAY_HEAP_REGISTRY_SIZE];
             if (owner && owner->id == owner_id && owner != h) {
@@ -319,6 +321,7 @@ static void heap_flush_foreign(ray_heap_t* h, bool return_to_owner) {
             po = h->pools[pidx].pool_order;
         } else {
             ray_pool_hdr_t* phdr = ray_pool_of(blk);
+            if (!phdr) { blk = next; continue; }
             pb = (uintptr_t)phdr;
             po = phdr->pool_order;
         }
@@ -707,6 +710,7 @@ void ray_free(ray_t* v) {
      * ray_pool_of() derives pool base in O(1) via self-aligned AND mask.
      * Pool header stores heap_id stamped at pool creation. */
     ray_pool_hdr_t* phdr = ray_pool_of(v);
+    if (!phdr) return;
     bool is_local = (phdr->heap_id == h->id);
 
     /* Slab fast path (same heap only) */
@@ -726,12 +730,14 @@ void ray_free(ray_t* v) {
         }
     }
 
-    /* Foreign: different heap — enqueue to foreign list */
+    /* Foreign: different heap — enqueue to foreign list.
+     * Do NOT adjust bytes_allocated here: the allocation was charged to the
+     * owning thread's stats, not ours.  Stats are reconciled when the owning
+     * heap flushes foreign blocks via heap_flush_foreign(). */
     if (!is_local) {
         v->fl_next = h->foreign;
         h->foreign = v;
         RAY_STAT(ray_tl_stats.free_count++);
-        RAY_STAT(ray_tl_stats.bytes_allocated -= block_size);
         return;
     }
 
@@ -834,8 +840,10 @@ ray_t* ray_scratch_realloc(ray_t* v, size_t new_data_size) {
             new_v->rc = 1;
         /* Ownership transfers via memcpy — no retain needed on new_v.
          * Detach nulls old pointers so ray_free won't double-release. */
-        ray_detach_owned_refs(v);
-        ray_free(v);
+        if (!(v->attrs & RAY_ATTR_ARENA)) {
+            ray_detach_owned_refs(v);
+            ray_free(v);
+        }
     }
     return new_v;
 }
@@ -935,6 +943,7 @@ static void heap_return_foreign_freelist(ray_heap_t* h) {
             if (pidx < 0) {
                 /* Foreign block — find owner via pool header (GC path) */
                 ray_pool_hdr_t* phdr = ray_pool_of(blk);
+                if (!phdr) { blk = next; continue; }
                 ray_heap_t* owner = ray_heap_registry[phdr->heap_id % RAY_HEAP_REGISTRY_SIZE];
                 if (owner && owner->id == phdr->heap_id) {
                     fl_remove(blk);
@@ -976,15 +985,13 @@ void ray_heap_gc(void) {
          * back to their owning worker heaps. */
         heap_return_foreign_freelist(h);
 
-        /* Phase 3: Flush foreign + slabs on all worker heaps.
-         * Workers may have accumulated foreign blocks from other workers,
-         * and slab caches prevent buddy coalescing needed for reclamation. */
-        for (int hid = 0; hid < RAY_HEAP_REGISTRY_SIZE; hid++) {
-            ray_heap_t* wh = ray_heap_registry[hid];
-            if (!wh || wh == h) continue;
-            heap_flush_foreign(wh, true);
-            heap_flush_slabs(wh);
-        }
+        /* Phase 3: Skip worker heaps — we cannot safely touch their
+         * foreign lists or slab caches because workers may still be
+         * between pending-- and sem_wait, calling ray_free which
+         * modifies wh->foreign and wh->slabs.  Workers flush their
+         * own foreign/slabs on their next dispatch entry.
+         * TODO: full cross-heap reclamation requires a worker
+         * quiescence barrier. */
 
         /* Phase 4: Reclaim OVERSIZED empty pools.
          * Standard pools (pool_order == RAY_HEAP_POOL_ORDER) are never
@@ -996,6 +1003,19 @@ void ray_heap_gc(void) {
          * Emptiness is computed by walking all heaps' freelists and slab
          * caches to sum free capacity within the pool. This avoids atomic
          * live_count operations on the alloc/free hot path. */
+        /* Phase 4: Reclaim oversized empty pools.
+         *
+         * For each candidate pool (owned by heap gh), count free bytes from:
+         *   (a) gh's own freelist + slab cache — safe, only gh modifies these
+         *   (b) ALL heaps' foreign lists (read-only) — foreign lists are
+         *       prepend-only during the race window, so a read-only walk
+         *       sees a consistent suffix. A concurrent prepend may be
+         *       missed, making us undercount — which is conservative.
+         *
+         * On removal, only unlink from gh's freelist/slabs. Blocks still
+         * in other heaps' foreign lists will be discovered as dangling on
+         * their next flush (foreign block with unmapped pool → ray_pool_of
+         * returns NULL → skipped by the NULL guard). */
         for (int hid = 0; hid < RAY_HEAP_REGISTRY_SIZE; hid++) {
             ray_heap_t* gh = ray_heap_registry[hid];
             if (!gh) continue;
@@ -1013,29 +1033,37 @@ void ray_heap_gc(void) {
                 uint8_t po = phdr->pool_order;
                 uintptr_t pb = (uintptr_t)phdr;
                 uintptr_t pe = pb + BSIZEOF(po);
-                /* Total usable capacity (minus header block) */
                 size_t pool_capacity = BSIZEOF(po) - BSIZEOF(RAY_ORDER_MIN);
 
-                /* Sum free bytes: walk all heaps' freelists + slab caches */
+                /* (a) Sum free bytes from owning heap's freelist + slabs */
                 size_t free_bytes = 0;
-                for (int scan_hid = 0; scan_hid < RAY_HEAP_REGISTRY_SIZE; scan_hid++) {
-                    ray_heap_t* scan_h = ray_heap_registry[scan_hid];
-                    if (!scan_h) continue;
-                    for (int ord = RAY_ORDER_MIN; ord < RAY_HEAP_FL_SIZE; ord++) {
-                        ray_fl_head_t* fh = &scan_h->freelist[ord];
-                        ray_t* blk = fh->fl_next;
-                        while (blk != (ray_t*)fh) {
-                            if ((uintptr_t)blk >= pb && (uintptr_t)blk < pe)
-                                free_bytes += BSIZEOF(ord);
-                            blk = blk->fl_next;
-                        }
+                for (int ord = RAY_ORDER_MIN; ord < RAY_HEAP_FL_SIZE; ord++) {
+                    ray_fl_head_t* fh = &gh->freelist[ord];
+                    ray_t* blk = fh->fl_next;
+                    while (blk != (ray_t*)fh) {
+                        if ((uintptr_t)blk >= pb && (uintptr_t)blk < pe)
+                            free_bytes += BSIZEOF(ord);
+                        blk = blk->fl_next;
                     }
-                    for (int si = 0; si < RAY_SLAB_ORDERS; si++) {
-                        for (uint32_t j = 0; j < scan_h->slabs[si].count; j++) {
-                            ray_t* sb = scan_h->slabs[si].stack[j];
-                            if ((uintptr_t)sb >= pb && (uintptr_t)sb < pe)
-                                free_bytes += BSIZEOF(RAY_SLAB_MIN + si);
-                        }
+                }
+                for (int si = 0; si < RAY_SLAB_ORDERS; si++) {
+                    for (uint32_t j = 0; j < gh->slabs[si].count; j++) {
+                        ray_t* sb = gh->slabs[si].stack[j];
+                        if ((uintptr_t)sb >= pb && (uintptr_t)sb < pe)
+                            free_bytes += BSIZEOF(RAY_SLAB_MIN + si);
+                    }
+                }
+
+                /* (b) Also count blocks in ALL heaps' foreign lists
+                 *     (read-only traversal, benign-racy with prepends) */
+                for (int fh_id = 0; fh_id < RAY_HEAP_REGISTRY_SIZE; fh_id++) {
+                    ray_heap_t* fh_heap = ray_heap_registry[fh_id];
+                    if (!fh_heap || fh_heap == gh) continue;
+                    ray_t* fb = fh_heap->foreign;
+                    while (fb) {
+                        if ((uintptr_t)fb >= pb && (uintptr_t)fb < pe)
+                            free_bytes += BSIZEOF(fb->order);
+                        fb = fb->fl_next;
                     }
                 }
 
@@ -1044,34 +1072,32 @@ void ray_heap_gc(void) {
                     continue;  /* pool has live allocations */
                 }
 
-                /* Pool is empty — remove all blocks from all freelists
-                 * and slab caches before munmap. */
-                for (int scan_hid = 0; scan_hid < RAY_HEAP_REGISTRY_SIZE; scan_hid++) {
-                    ray_heap_t* scan_h = ray_heap_registry[scan_hid];
-                    if (!scan_h) continue;
-                    for (int ord = RAY_ORDER_MIN; ord < RAY_HEAP_FL_SIZE; ord++) {
-                        ray_fl_head_t* fh = &scan_h->freelist[ord];
-                        ray_t* blk = fh->fl_next;
-                        while (blk != (ray_t*)fh) {
-                            ray_t* next = blk->fl_next;
-                            if ((uintptr_t)blk >= pb && (uintptr_t)blk < pe) {
-                                fl_remove(blk);
-                                if (fl_empty(fh))
-                                    scan_h->avail &= ~(1ULL << ord);
-                            }
-                            blk = next;
+                /* Pool is empty — remove blocks from owning heap's
+                 * freelists and slab caches before munmap.
+                 * Blocks in other heaps' foreign lists are left dangling;
+                 * they'll be skipped via ray_pool_of NULL guard on flush. */
+                for (int ord = RAY_ORDER_MIN; ord < RAY_HEAP_FL_SIZE; ord++) {
+                    ray_fl_head_t* fh = &gh->freelist[ord];
+                    ray_t* blk = fh->fl_next;
+                    while (blk != (ray_t*)fh) {
+                        ray_t* next = blk->fl_next;
+                        if ((uintptr_t)blk >= pb && (uintptr_t)blk < pe) {
+                            fl_remove(blk);
+                            if (fl_empty(fh))
+                                gh->avail &= ~(1ULL << ord);
                         }
+                        blk = next;
                     }
-                    for (int si = 0; si < RAY_SLAB_ORDERS; si++) {
-                        uint32_t dst = 0;
-                        for (uint32_t j = 0; j < scan_h->slabs[si].count; j++) {
-                            ray_t* sb = scan_h->slabs[si].stack[j];
-                            if ((uintptr_t)sb >= pb && (uintptr_t)sb < pe)
-                                continue;
-                            scan_h->slabs[si].stack[dst++] = sb;
-                        }
-                        scan_h->slabs[si].count = dst;
+                }
+                for (int si = 0; si < RAY_SLAB_ORDERS; si++) {
+                    uint32_t dst = 0;
+                    for (uint32_t j = 0; j < gh->slabs[si].count; j++) {
+                        ray_t* sb = gh->slabs[si].stack[j];
+                        if ((uintptr_t)sb >= pb && (uintptr_t)sb < pe)
+                            continue;
+                        gh->slabs[si].stack[dst++] = sb;
                     }
+                    gh->slabs[si].count = dst;
                 }
 
                 ray_vm_free(phdr->vm_base, BSIZEOF(po));
@@ -1117,6 +1143,7 @@ void ray_heap_merge(ray_heap_t* src) {
                 po = dst->pools[pidx].pool_order;
             } else {
                 ray_pool_hdr_t* phdr = ray_pool_of(blk);
+                if (!phdr) continue;
                 pb = (uintptr_t)phdr;
                 po = phdr->pool_order;
             }
@@ -1136,6 +1163,7 @@ void ray_heap_merge(ray_heap_t* src) {
             po = dst->pools[pidx].pool_order;
         } else {
             ray_pool_hdr_t* phdr = ray_pool_of(fblk);
+            if (!phdr) { fblk = next; continue; }
             pb = (uintptr_t)phdr;
             po = phdr->pool_order;
         }

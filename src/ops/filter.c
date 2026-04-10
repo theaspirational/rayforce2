@@ -32,6 +32,7 @@
 static void parted_gather_col(ray_t* parted_col, const int64_t* match_idx,
                                int64_t count, ray_t* dst_col) {
     int64_t n_segs = parted_col->len;
+    if (n_segs == 0) return;  /* zero-length VLA is UB in C17 */
     ray_t** segs = (ray_t**)ray_data(parted_col);
     int8_t base = (int8_t)RAY_PARTED_BASETYPE(parted_col->type);
     uint8_t base_attrs = (base == RAY_SYM && n_segs > 0 && segs[0])
@@ -70,6 +71,8 @@ static ray_t* exec_filter_vec(ray_t* input, ray_t* pred, int64_t pass_count) {
     ray_morsel_init(&mi, input);
     ray_morsel_init(&mf, pred);
     int64_t out_idx = 0;
+
+    if (input->len != pred->len) { ray_release(result); return ray_error("length", NULL); }
 
     while (ray_morsel_next(&mi) && ray_morsel_next(&mf)) {
         uint8_t* bits = (uint8_t*)mf.morsel_ptr;
@@ -497,6 +500,7 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
         ray_t* col = ray_table_get_col_idx(tbl, c);
         col_names[c] = ray_table_col_name(tbl, c);
         if (!col || RAY_IS_ERR(col)) { new_cols[c] = NULL; continue; }
+        if (col->type == RAY_MAPCOMMON) { new_cols[c] = NULL; continue; }
         int8_t ct = RAY_IS_PARTED(col->type)
                   ? (int8_t)RAY_PARTED_BASETYPE(col->type) : col->type;
         uint8_t ca = 0;

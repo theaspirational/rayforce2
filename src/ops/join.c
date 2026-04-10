@@ -30,6 +30,9 @@ static uint64_t hash_row_keys(ray_t** key_vecs, uint8_t n_keys, int64_t row) {
     for (uint8_t k = 0; k < n_keys; k++) {
         ray_t* col = key_vecs[k];
         if (!col) continue;
+        /* NULL key — produce unique hash that won't match any other row */
+        if (ray_vec_is_null(col, row))
+            return h ^ ((uint64_t)row * 0x9E3779B97F4A7C15ULL);
         uint64_t kh;
         if (col->type == RAY_F64)
             kh = ray_hash_f64(((double*)ray_data(col))[row]);
@@ -369,6 +372,8 @@ static inline bool join_keys_eq(ray_t* const* l_vecs, ray_t* const* r_vecs, uint
         ray_t* lc = l_vecs[k];
         ray_t* rc = r_vecs[k];
         if (!lc || !rc) return false;
+        /* NULL != NULL in join predicates */
+        if (ray_vec_is_null(lc, l) || ray_vec_is_null(rc, r)) return false;
         if (lc->type == RAY_F64) {
             if (((double*)ray_data(lc))[l] != ((double*)ray_data(rc))[r]) return false;
         } else {
@@ -1599,14 +1604,14 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     for (int64_t i = 0; i < right_n; i++) rt_time[i] = READ_TIME(rt_time_vec, i);
     #undef READ_TIME
 
-    /* Get eq key vectors */
-    int64_t* lt_eq[256], *rt_eq[256];
+    /* Get eq key vectors — stored as ray_t* for type-safe access */
+    ray_t* lt_eq[256], *rt_eq[256];
     for (uint8_t k = 0; k < n_eq; k++) {
         ray_t* lv = ray_table_get_col(left_table, eq_syms[k]);
         ray_t* rv = ray_table_get_col(right_table, eq_syms[k]);
         if (!lv || !rv) return ray_error("schema", NULL);
-        lt_eq[k] = (int64_t*)ray_data(lv);
-        rt_eq[k] = (int64_t*)ray_data(rv);
+        lt_eq[k] = lv;
+        rt_eq[k] = rv;
     }
 
     /* Sort both tables by (eq_keys, time_key) using index arrays */
@@ -1645,8 +1650,10 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                     int64_t ai = li_idx[a], bi = li_idx[b];
                     int cmp = 0;
                     for (uint8_t k2 = 0; k2 < n_eq && cmp == 0; k2++) {
-                        if (lt_eq[k2][ai] < lt_eq[k2][bi]) cmp = -1;
-                        else if (lt_eq[k2][ai] > lt_eq[k2][bi]) cmp = 1;
+                        int64_t va = read_col_i64(ray_data(lt_eq[k2]), ai, lt_eq[k2]->type, lt_eq[k2]->attrs);
+                        int64_t vb = read_col_i64(ray_data(lt_eq[k2]), bi, lt_eq[k2]->type, lt_eq[k2]->attrs);
+                        if (va < vb) cmp = -1;
+                        else if (va > vb) cmp = 1;
                     }
                     if (cmp == 0) {
                         if (lt_time[ai] < lt_time[bi]) cmp = -1;
@@ -1672,8 +1679,10 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                     int64_t ai = ri_idx[a], bi = ri_idx[b];
                     int cmp = 0;
                     for (uint8_t k2 = 0; k2 < n_eq && cmp == 0; k2++) {
-                        if (rt_eq[k2][ai] < rt_eq[k2][bi]) cmp = -1;
-                        else if (rt_eq[k2][ai] > rt_eq[k2][bi]) cmp = 1;
+                        int64_t va = read_col_i64(ray_data(rt_eq[k2]), ai, rt_eq[k2]->type, rt_eq[k2]->attrs);
+                        int64_t vb = read_col_i64(ray_data(rt_eq[k2]), bi, rt_eq[k2]->type, rt_eq[k2]->attrs);
+                        if (va < vb) cmp = -1;
+                        else if (va > vb) cmp = 1;
                     }
                     if (cmp == 0) {
                         if (rt_time[ai] < rt_time[bi]) cmp = -1;
@@ -1704,14 +1713,30 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     for (int64_t lp = 0; lp < left_n; lp++) {
         int64_t li = li_idx[lp];
 
-        /* Detect partition change — reset best match */
+        /* Detect partition change — reset best match and rewind rp */
         if (lp > 0) {
             int64_t prev_li = li_idx[lp - 1];
             int changed = 0;
             for (uint8_t k = 0; k < n_eq; k++) {
-                if (lt_eq[k][li] != lt_eq[k][prev_li]) { changed = 1; break; }
+                int64_t cv = read_col_i64(ray_data(lt_eq[k]), li, lt_eq[k]->type, lt_eq[k]->attrs);
+                int64_t pv = read_col_i64(ray_data(lt_eq[k]), prev_li, lt_eq[k]->type, lt_eq[k]->attrs);
+                if (cv != pv) { changed = 1; break; }
             }
-            if (changed) best_ri = -1;
+            if (changed) {
+                best_ri = -1;
+                /* Rewind rp to find start of new partition in right table */
+                while (rp > 0) {
+                    int64_t ri_prev = ri_idx[rp - 1];
+                    int eq_match = 1;
+                    for (uint8_t k = 0; k < n_eq; k++) {
+                        int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri_prev, rt_eq[k]->type, rt_eq[k]->attrs);
+                        int64_t lv = read_col_i64(ray_data(lt_eq[k]), li, lt_eq[k]->type, lt_eq[k]->attrs);
+                        if (rv < lv) { eq_match = 0; break; }
+                    }
+                    if (!eq_match) break;
+                    rp--;
+                }
+            }
         }
 
         /* Advance right pointer, accumulating best match */
@@ -1719,8 +1744,10 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             int64_t ri = ri_idx[rp];
             int eq_cmp = 0;
             for (uint8_t k = 0; k < n_eq && eq_cmp == 0; k++) {
-                if (rt_eq[k][ri] < lt_eq[k][li]) eq_cmp = -1;
-                else if (rt_eq[k][ri] > lt_eq[k][li]) eq_cmp = 1;
+                int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri, rt_eq[k]->type, rt_eq[k]->attrs);
+                int64_t lv = read_col_i64(ray_data(lt_eq[k]), li, lt_eq[k]->type, lt_eq[k]->attrs);
+                if (rv < lv) eq_cmp = -1;
+                else if (rv > lv) eq_cmp = 1;
             }
             if (eq_cmp > 0) break;  /* right partition past left */
             if (eq_cmp == 0) {

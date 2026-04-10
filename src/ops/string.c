@@ -245,8 +245,9 @@ ray_t* exec_string_unary(ray_graph_t* g, ray_op_t* op) {
         }
 
         if (is_str) {
+            ray_t* prev = result;
             result = ray_str_vec_append(result, buf, out_len);
-            if (RAY_IS_ERR(result)) { scratch_free(dyn_hdr); break; }
+            if (RAY_IS_ERR(result)) { ray_release(prev); scratch_free(dyn_hdr); break; }
         } else {
             buf[out_len] = '\0';
             sym_dst[i] = ray_sym_intern(buf, out_len);
@@ -494,8 +495,9 @@ ray_t* exec_replace(ray_graph_t* g, ray_op_t* op) {
             }
         }
         if (is_str) {
+            ray_t* prev = result;
             result = ray_str_vec_append(result, buf, bi);
-            if (RAY_IS_ERR(result)) { scratch_free(dyn_hdr); break; }
+            if (RAY_IS_ERR(result)) { ray_release(prev); scratch_free(dyn_hdr); break; }
         } else {
             buf[bi] = '\0';
             sym_dst[i] = ray_sym_intern(buf, bi);
@@ -563,7 +565,9 @@ ray_t* exec_concat(ray_graph_t* g, ray_op_t* op) {
         /* Check if any arg is null at this row */
         bool any_null = false;
         for (int a = 0; a < n_args; a++) {
-            if (!ray_is_atom(args[a]) && ray_vec_is_null((ray_t*)args[a], r < args[a]->len ? r : 0)) {
+            if (ray_is_atom(args[a])) {
+                if (RAY_ATOM_IS_NULL(args[a])) { any_null = true; break; }
+            } else if (ray_vec_is_null((ray_t*)args[a], r < args[a]->len ? r : 0)) {
                 any_null = true;
                 break;
             }
@@ -633,8 +637,9 @@ ray_t* exec_concat(ray_graph_t* g, ray_op_t* op) {
             }
         }
         if (out_str) {
+            ray_t* prev = result;
             result = ray_str_vec_append(result, buf, bi);
-            if (RAY_IS_ERR(result)) { scratch_free(dyn_hdr); break; }
+            if (RAY_IS_ERR(result)) { ray_release(prev); scratch_free(dyn_hdr); break; }
         } else {
             buf[bi] = '\0';
             dst[r] = ray_sym_intern(buf, bi);

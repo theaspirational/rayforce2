@@ -1029,7 +1029,7 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
                 } else {
                     val = 0;
                 }
-                uint64_t part = (uint64_t)(val - c->mins[k]);
+                uint64_t part = (uint64_t)val - (uint64_t)c->mins[k];
                 if (c->descs[k]) part = (uint64_t)c->ranges[k] - part;
                 composite |= part << c->bit_shifts[k];
             }
@@ -1406,7 +1406,7 @@ static void fused_topn_fn(void* arg, uint32_t wid,
             } else {
                 val = 0;
             }
-            uint64_t part = (uint64_t)(val - c->mins[k]);
+            uint64_t part = (uint64_t)val - (uint64_t)c->mins[k];
             if (c->descs[k]) part = (uint64_t)c->ranges[k] - part;
             composite |= part << c->bit_shifts[k];
         }

@@ -314,7 +314,10 @@ void ray_pool_dispatch(ray_pool_t* pool, ray_pool_fn fn, void* ctx,
      * Safe for main to modify worker heaps between dispatches. */
     atomic_store_explicit(&ray_parallel_flag, 0, memory_order_release);
 
-    /* Restore single-threaded fast path */
+    /* Memory fence ensures all worker RC operations are visible before
+     * main thread switches to non-atomic refcounting.  Workers may still
+     * be between pending-- and sem_wait. */
+    atomic_thread_fence(memory_order_seq_cst);
     ray_rc_sync = false;
 }
 
@@ -397,6 +400,7 @@ void ray_pool_dispatch_n(ray_pool_t* pool, ray_pool_fn fn, void* ctx,
     }
 
     atomic_store_explicit(&ray_parallel_flag, 0, memory_order_release);
+    atomic_thread_fence(memory_order_seq_cst);
     ray_rc_sync = false;
 }
 

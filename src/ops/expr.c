@@ -531,6 +531,7 @@ bool expr_compile(ray_graph_t* g, ray_t* tbl, ray_op_t* root, ray_expr_t* out) {
                 if (op == OP_CAST) {
                     /* No promotion needed; CAST handles the conversion */
                     r = out->n_regs;
+                    if (r >= EXPR_MAX_REGS) return false;
                 } else if (ot == RAY_F64 && s2 != 0xFF) {
                     /* Arithmetic with f64 output — promote i64 inputs to f64 */
                     s1 = expr_ensure_type(out, s1, RAY_F64);
@@ -1512,7 +1513,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
         if (str_resolved && lhs->type == -RAY_STR)
             l_i64_val = resolved_sym_id;
         else if (ray_is_atom(lhs)) {
-            if (lhs->type == -RAY_F64 || lhs->type == -RAY_F64) l_f64_val = lhs->f64;
+            if (lhs->type == -RAY_F64) l_f64_val = lhs->f64;
             else l_i64_val = lhs->i64;
         } else {
             int8_t t = lhs->type;
@@ -1526,7 +1527,7 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
         if (str_resolved && rhs->type == -RAY_STR)
             r_i64_val = resolved_sym_id;
         else if (ray_is_atom(rhs)) {
-            if (rhs->type == -RAY_F64 || rhs->type == -RAY_F64) r_f64_val = rhs->f64;
+            if (rhs->type == -RAY_F64) r_f64_val = rhs->f64;
             else r_i64_val = rhs->i64;
         } else {
             int8_t t = rhs->type;

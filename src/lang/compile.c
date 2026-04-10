@@ -184,7 +184,9 @@ static int32_t emit_jump(compiler_t *c, uint8_t opcode) {
 }
 
 static void patch_jump(compiler_t *c, int32_t pos) {
-    int16_t offset = (int16_t)(c->code_len - pos - 2);
+    int32_t raw = c->code_len - pos - 2;
+    if (raw > 32767 || raw < -32768) { c->error = true; return; }
+    int16_t offset = (int16_t)raw;
     c->code[pos]     = (uint8_t)(offset >> 8);
     c->code[pos + 1] = (uint8_t)(offset & 0xFF);
 }
@@ -499,5 +501,5 @@ ray_span_t ray_bc_dbg_get(ray_t* dbg, int32_t ip) {
 }
 
 void ray_compile_reset(void) {
-    sf_set = sf_let = sf_if = sf_do = sf_fn = sf_try = -1;
+    sf_set = sf_let = sf_if = sf_do = sf_fn = sf_self = sf_try = -1;
 }

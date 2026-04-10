@@ -735,6 +735,13 @@ static ray_hnsw_t* hnsw_load_impl(const char* dir, bool use_mmap) {
         if (fread(&layer->n_nodes, sizeof(int64_t), 1, f) != 1) { fclose(f); ray_hnsw_free(idx); return NULL; }
         if (fread(&layer->M_max, sizeof(int64_t), 1, f) != 1) { fclose(f); ray_hnsw_free(idx); return NULL; }
 
+        /* Validate layer metadata against header */
+        if (layer->n_nodes <= 0 || layer->n_nodes > hdr.n_nodes) { fclose(f); ray_hnsw_free(idx); return NULL; }
+        if (layer->M_max <= 0 || layer->M_max > 4096) { fclose(f); ray_hnsw_free(idx); return NULL; }
+        if ((uint64_t)layer->n_nodes > SIZE_MAX / sizeof(int64_t) / (uint64_t)layer->M_max) {
+            fclose(f); ray_hnsw_free(idx); return NULL;
+        }
+
         /* Allocate and read neighbors */
         size_t nb_count = (size_t)layer->n_nodes * (size_t)layer->M_max;
         if (nb_count > 0) {

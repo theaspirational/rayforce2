@@ -131,6 +131,7 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
     }
 
     /* Un-delta */
+    if (di == 0) { ray_sys_free(decoded); return 0; }
     dst[0] = decoded[0];
     for (size_t i = 1; i < di; i++)
         dst[i] = (uint8_t)(decoded[i] + dst[i - 1]);
@@ -240,6 +241,7 @@ static ray_t* eval_payload(uint8_t* payload, size_t payload_len,
         if (payload_len < 4) return NULL;
         uint32_t uncomp_size;
         memcpy(&uncomp_size, payload, 4);
+        if (uncomp_size == 0 || uncomp_size > 256u * 1024u * 1024u) return NULL;
         decompressed = (uint8_t*)ray_sys_alloc(uncomp_size);
         if (!decompressed) return NULL;
         size_t dlen = ray_ipc_decompress(payload + 4, payload_len - 4,

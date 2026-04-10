@@ -1470,20 +1470,35 @@ op_callf: {
             ray_compile(fn_obj);
 
         if (LAMBDA_IS_COMPILED(fn_obj)) {
+            /* All checks before any VM state mutation.
+             * Stack limits take priority over arity (safety first). */
+            int64_t pcnt = ray_len(LAMBDA_PARAMS(fn_obj));
+            int32_t callee_locals = LAMBDA_NLOCALS(fn_obj);
+            if (vm.rp >= VM_STACK_SIZE ||
+                vm.sp + callee_locals >= VM_STACK_SIZE) {
+                for (int32_t i = 0; i < n; i++)
+                    if (fn_args[i]) ray_release(fn_args[i]);
+                ray_release(fn_obj);
+                goto vm_error_limit;
+            }
+            if (n != pcnt) {
+                for (int32_t i = 0; i < n; i++)
+                    if (fn_args[i]) ray_release(fn_args[i]);
+                ray_release(fn_obj);
+                vm_err_obj = ray_error("arity", "expected %" PRId64 " args, got %d", pcnt, n);
+                goto vm_error;
+            }
+
             /* Push return frame */
-            if (vm.rp >= VM_STACK_SIZE) goto vm_error_limit;
             vm.rs[vm.rp++] = (vm_ctx_t){ .fn = vm.fn, .fp = vm.fp, .ip = ip };
 
             /* Set up new frame */
             vm.fn = fn_obj;  /* takes ownership of stack ref */
             vm.fp = vm.sp;
-            int32_t callee_locals = LAMBDA_NLOCALS(fn_obj);
-            if (vm.sp + callee_locals >= VM_STACK_SIZE) goto vm_error_limit;
             vm.sp += callee_locals;
             n_locals = callee_locals;
 
             /* Bind parameters */
-            int64_t pcnt = ray_len(LAMBDA_PARAMS(fn_obj));
             int64_t bind = pcnt < n ? pcnt : n;
             for (int64_t i = 0; i < bind; i++)
                 LOCAL(i) = fn_args[i];  /* transfer ownership from args */
@@ -1706,8 +1721,10 @@ vm_error_cleanup: {
             if (v) ray_release(v);
         }
 
-        /* Get error value */
-        ray_t *err_val = __raise_val;
+        /* Get error value — prefer vm_err_obj (VM-detected errors like
+         * arity mismatch) over __raise_val (user raise expressions) */
+        ray_t *err_val = vm_err_obj ? vm_err_obj : __raise_val;
+        vm_err_obj = NULL;
         __raise_val = NULL;
         if (!err_val) err_val = make_i64(0);
 

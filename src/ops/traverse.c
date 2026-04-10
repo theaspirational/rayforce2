@@ -583,8 +583,11 @@ bfs_done:
         path_buf[path_len++] = cur;
         cur = parent[cur];
     }
-    if (path_len < 256)
-        path_buf[path_len++] = src_node;
+    if (cur != src_node) {
+        scratch_free(parent_hdr);
+        return ray_error("range", "path exceeds 254 hops");
+    }
+    path_buf[path_len++] = src_node;
     scratch_free(parent_hdr);
 
     /* Reverse path */
@@ -940,6 +943,12 @@ ray_t* exec_dijkstra(ray_graph_t* g, ray_op_t* op,
     if (!weight_vec || RAY_IS_ERR(weight_vec)) return ray_error("schema", NULL);
     if (weight_vec->type != RAY_F64) return ray_error("schema", NULL);
     double* weights = (double*)ray_data(weight_vec);
+
+    /* Dijkstra requires non-negative edge weights */
+    for (int64_t i = 0; i < m; i++) {
+        if (weights[i] < 0.0)
+            return ray_error("domain", "Dijkstra requires non-negative edge weights");
+    }
 
     /* Allocate working arrays.
      * Heap capacity = max(n, m) + 1: each edge relaxation can push one entry,

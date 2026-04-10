@@ -143,10 +143,9 @@ ray_t* ray_part_load(const char* db_root, const char* table_name) {
          * The actual format is not strictly enforced here -- invalid entries
          * will simply fail during splay load and be caught there.
          * Non-conforming entries are harmless and silently skipped. */
-        bool valid = false;
+        bool valid = (ent->d_name[0] != '\0');
         for (const char* c = ent->d_name; *c; c++) {
-            if (*c == '.') { valid = true; continue; }
-            if (*c >= '0' && *c <= '9') continue;
+            if (*c == '.' || (*c >= '0' && *c <= '9')) continue;
             valid = false; break;
         }
         if (!valid) continue;
@@ -332,10 +331,9 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
         /* Partition directory name format validation is intentionally loose:
          * accepts any sequence of digits and dots (e.g. "2024.01.15").
          * Invalid entries fail during splay open and are caught there. */
-        bool valid = false;
+        bool valid = (ent->d_name[0] != '\0');
         for (const char* c = ent->d_name; *c; c++) {
-            if (*c == '.') { valid = true; continue; }
-            if (*c >= '0' && *c <= '9') continue;
+            if (*c == '.' || (*c >= '0' && *c <= '9')) continue;
             valid = false; break;
         }
         if (!valid) continue;
