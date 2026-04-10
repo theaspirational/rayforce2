@@ -69,8 +69,18 @@ ray_t* ray_binop_map(ray_binop_partial_fn partial, ray_t* x, ray_t* y) {
         len = x->len < y->len ? x->len : y->len;  /* zip-map: truncate to shorter */
     else
         len = xv ? x->len : y->len;
-    if (len == 0)
-        return NULL;  /* let caller handle — output type may be op-dependent */
+    if (len == 0) {
+        /* For same-type non-temporal, we know the output type.
+         * Temporal ops fall through — output type is op-dependent
+         * (e.g., DATE-DATE→I32, DATE+int→DATE). */
+        int8_t xt = xv ? x->type : -(x->type);
+        int8_t yt = yv ? y->type : -(y->type);
+        bool temporal = (xt==RAY_DATE||xt==RAY_TIME||xt==RAY_TIMESTAMP||
+                         yt==RAY_DATE||yt==RAY_TIME||yt==RAY_TIMESTAMP);
+        if (!temporal && xt == yt)
+            return ray_vec_new(xt, 0);
+        return NULL;
+    }
 
     /* Reject slices — ray_data() doesn't work on them */
     if (xv && (x->attrs & RAY_ATTR_SLICE)) return NULL;
