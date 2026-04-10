@@ -1054,28 +1054,32 @@ void ray_heap_gc(void) {
                     }
                 }
 
-                /* (b) Also count blocks in ALL heaps' foreign lists
-                 *     (read-only traversal, benign-racy with prepends) */
-                for (int fh_id = 0; fh_id < RAY_HEAP_REGISTRY_SIZE; fh_id++) {
+                /* (b) Check if ANY blocks from this pool are still in other
+                 *     heaps' foreign lists.  If so, we cannot munmap —
+                 *     those blocks are threaded into the foreign list and
+                 *     dereferencing them after munmap would crash.
+                 *     They'll be flushed to the owner on the next GC. */
+                bool has_foreign = false;
+                for (int fh_id = 0; fh_id < RAY_HEAP_REGISTRY_SIZE && !has_foreign; fh_id++) {
                     ray_heap_t* fh_heap = ray_heap_registry[fh_id];
                     if (!fh_heap || fh_heap == gh) continue;
                     ray_t* fb = fh_heap->foreign;
                     while (fb) {
-                        if ((uintptr_t)fb >= pb && (uintptr_t)fb < pe)
-                            free_bytes += BSIZEOF(fb->order);
+                        if ((uintptr_t)fb >= pb && (uintptr_t)fb < pe) {
+                            has_foreign = true;
+                            break;
+                        }
                         fb = fb->fl_next;
                     }
                 }
 
-                if (free_bytes < pool_capacity) {
+                if (free_bytes < pool_capacity || has_foreign) {
                     p++;
-                    continue;  /* pool has live allocations */
+                    continue;  /* pool has live allocations or dangling foreign refs */
                 }
 
-                /* Pool is empty — remove blocks from owning heap's
-                 * freelists and slab caches before munmap.
-                 * Blocks in other heaps' foreign lists are left dangling;
-                 * they'll be skipped via ray_pool_of NULL guard on flush. */
+                /* Pool is empty and no foreign-list refs — safe to munmap.
+                 * Remove blocks from owning heap's freelists and slab caches. */
                 for (int ord = RAY_ORDER_MIN; ord < RAY_HEAP_FL_SIZE; ord++) {
                     ray_fl_head_t* fh = &gh->freelist[ord];
                     ray_t* blk = fh->fl_next;
