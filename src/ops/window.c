@@ -760,6 +760,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                 if (keys) {
                     radix_encode_ctx_t enc = {
                         .keys = keys, .data = ray_data(sort_vecs[0]),
+                        .col = sort_vecs[0],
                         .type = sort_vecs[0]->type,
                         .col_attrs = sort_vecs[0]->attrs,
                         .desc = sort_descs[0],

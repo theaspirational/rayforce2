@@ -706,14 +706,24 @@ ray_t* call_fn2(ray_t* fn, ray_t* a, ray_t* b) {
 ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
     int8_t type = vec->type;
 
+    /* Check nulls once — resolve through slices */
+    bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) ||
+                     ((vec->attrs & RAY_ATTR_SLICE) && vec->slice_parent &&
+                      (vec->slice_parent->attrs & RAY_ATTR_HAS_NULLS));
+
     if (type == RAY_STR) {
         ray_t* result = ray_vec_new(type, n);
         if (RAY_IS_ERR(result)) return result;
         result->len = n;
         for (int64_t i = 0; i < n; i++) {
-            size_t slen;
-            const char* s = ray_str_vec_get(vec, idx[i], &slen);
-            result = ray_str_vec_set(result, i, s ? s : "", s ? slen : 0);
+            if (has_nulls && ray_vec_is_null(vec, idx[i])) {
+                result = ray_str_vec_set(result, i, "", 0);
+                ray_vec_set_null(result, i, true);
+            } else {
+                size_t slen;
+                const char* s = ray_str_vec_get(vec, idx[i], &slen);
+                result = ray_str_vec_set(result, i, s ? s : "", s ? slen : 0);
+            }
         }
         return result;
     }
@@ -738,6 +748,11 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
             ray_retain(vec->sym_dict);
             result->sym_dict = vec->sym_dict;
         }
+        if (has_nulls) {
+            for (int64_t i = 0; i < n; i++)
+                if (ray_vec_is_null(vec, idx[i]))
+                    ray_vec_set_null(result, i, true);
+        }
         return result;
     }
 
@@ -758,7 +773,7 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
     }
 
     /* Propagate null bitmap */
-    if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+    if (has_nulls) {
         for (int64_t i = 0; i < n; i++)
             if (ray_vec_is_null(vec, idx[i]))
                 ray_vec_set_null(result, i, true);

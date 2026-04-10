@@ -919,12 +919,29 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
         switch (c->type) {
         case RAY_I64: case RAY_TIMESTAMP: {
             const int64_t* d = (const int64_t*)c->data;
-            if (c->desc) {
-                for (int64_t i = start; i < end; i++)
-                    c->keys[i] = ~((uint64_t)d[i] ^ ((uint64_t)1 << 63));
+            bool has_nulls = c->col && (c->col->attrs & RAY_ATTR_HAS_NULLS);
+            bool nf = c->nulls_first;
+            bool desc = c->desc;
+            /* Null key: nf=true→sort first, nf=false→sort last.
+             * For ASC  NULLS FIRST → e=0            (smallest)
+             * For ASC  NULLS LAST  → e=UINT64_MAX   (largest)
+             * For DESC NULLS FIRST → e=UINT64_MAX   (~e=0, smallest after flip)
+             * For DESC NULLS LAST  → e=0            (~e=UINT64_MAX, largest after flip) */
+            uint64_t null_e = (nf ^ desc) ? 0 : UINT64_MAX;
+            if (desc) {
+                for (int64_t i = start; i < end; i++) {
+                    if (has_nulls && ray_vec_is_null(c->col, i))
+                        c->keys[i] = ~null_e;
+                    else
+                        c->keys[i] = ~((uint64_t)d[i] ^ ((uint64_t)1 << 63));
+                }
             } else {
-                for (int64_t i = start; i < end; i++)
-                    c->keys[i] = (uint64_t)d[i] ^ ((uint64_t)1 << 63);
+                for (int64_t i = start; i < end; i++) {
+                    if (has_nulls && ray_vec_is_null(c->col, i))
+                        c->keys[i] = null_e;
+                    else
+                        c->keys[i] = (uint64_t)d[i] ^ ((uint64_t)1 << 63);
+                }
             }
             break;
         }
@@ -956,12 +973,24 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
         }
         case RAY_I32: case RAY_DATE: case RAY_TIME: {
             const int32_t* d = (const int32_t*)c->data;
-            if (c->desc) {
-                for (int64_t i = start; i < end; i++)
-                    c->keys[i] = ~((uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31)));
+            bool has_nulls = c->col && (c->col->attrs & RAY_ATTR_HAS_NULLS);
+            bool nf = c->nulls_first;
+            bool desc = c->desc;
+            uint64_t null_e = (nf ^ desc) ? 0 : UINT64_MAX;
+            if (desc) {
+                for (int64_t i = start; i < end; i++) {
+                    if (has_nulls && ray_vec_is_null(c->col, i))
+                        c->keys[i] = ~null_e;
+                    else
+                        c->keys[i] = ~((uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31)));
+                }
             } else {
-                for (int64_t i = start; i < end; i++)
-                    c->keys[i] = (uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31));
+                for (int64_t i = start; i < end; i++) {
+                    if (has_nulls && ray_vec_is_null(c->col, i))
+                        c->keys[i] = null_e;
+                    else
+                        c->keys[i] = (uint64_t)((uint32_t)d[i] ^ ((uint32_t)1 << 31));
+                }
             }
             break;
         }
@@ -1663,11 +1692,13 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                                     (size_t)nrows * sizeof(uint64_t));
                 if (keys) {
                     bool desc = descs ? descs[0] : 0;
-                    /* Default: ASC -> nulls last (nf=0), DESC -> nulls first (nf=1) */
-                    bool nf = nulls_first ? nulls_first[0] : desc;
+                    /* kdb+ semantics: null = minimum value.
+                     * ASC → nulls first, DESC → nulls last. */
+                    bool nf = nulls_first ? nulls_first[0] : !desc;
                     radix_encode_ctx_t enc = {
                         .keys = keys, .indices = indices,
                         .data = ray_data(cols[0]),
+                        .col = cols[0],
                         .type = cols[0]->type,
                         .col_attrs = cols[0]->attrs,
                         .desc = desc,
@@ -2010,6 +2041,14 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
     if (!radix_done) {
         if (!iota_done)
             for (int64_t i = 0; i < nrows; i++) indices[i] = i;
+        /* kdb+ semantics: null = minimum value.
+         * ASC → nulls first (nf=1), DESC → nulls last (nf=0). */
+        uint8_t default_nf[n_cols > 0 ? n_cols : 1];
+        if (!nulls_first) {
+            for (uint8_t k = 0; k < n_cols; k++)
+                default_nf[k] = descs ? !descs[k] : 1;
+            nulls_first = default_nf;
+        }
         sort_cmp_ctx_t cmp_ctx = {
             .vecs = cols,
             .desc = descs,

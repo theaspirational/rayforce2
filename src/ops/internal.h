@@ -405,6 +405,7 @@ typedef struct {
     int64_t*        indices;   /* if non-NULL, initialize indices[i]=i (fused iota) */
     /* Single-key fields: */
     const void*     data;      /* raw column data */
+    ray_t*          col;       /* source column (for null bitmap access) */
     int8_t          type;      /* column type */
     uint8_t         col_attrs; /* RAY_SYM width attrs */
     bool            desc;

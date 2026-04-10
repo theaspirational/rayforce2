@@ -106,15 +106,8 @@ ray_t* ray_count_fn(ray_t* x) {
     /* String atom: count = string length */
     if (ray_is_atom(x) && (-x->type) == RAY_STR)
         return make_i64((int64_t)ray_str_len(x));
-    if (ray_is_vec(x)) {
-        /* GUID/STR vectors: return length directly (DAG count doesn't handle these) */
-        if (x->type == RAY_GUID || x->type == RAY_STR) return make_i64(x->len);
-        ray_graph_t* g = ray_graph_new(NULL);
-        if (!g) return ray_error("oom", NULL);
-        ray_op_t* in = ray_graph_input_vec(g, x);
-        ray_op_t* op = ray_count(g, in);
-        return ray_lazy_materialize(ray_lazy_wrap(g, op));
-    }
+    if (ray_is_vec(x))
+        return make_i64(x->len);  /* count = total length including nulls */
     if (!is_list(x)) {
         /* Scalar atom → count 1 */
         if (ray_is_atom(x)) return make_i64(1);
