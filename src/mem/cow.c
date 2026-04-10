@@ -55,7 +55,11 @@ void ray_release(ray_t* v) {
     } else {
         prev = ray_atomic_dec(&v->rc);
     }
-    if (prev == 1) ray_free(v);
+    if (prev == 1) {
+        if (RAY_UNLIKELY(ray_rc_sync))
+            ray_atomic_fence_acquire();
+        ray_free(v);
+    }
 }
 
 /* --------------------------------------------------------------------------

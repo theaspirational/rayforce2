@@ -79,8 +79,20 @@
 #if !defined(ray_atomic_inc)
 #if defined(_MSC_VER)
   #include <intrin.h>
-  #define ray_atomic_inc(p)   _InterlockedIncrement((volatile long*)(p))
-  #define ray_atomic_dec(p)   _InterlockedDecrement((volatile long*)(p))
+  /* MSVC Interlocked* return the NEW value; adjust to match fetch_add/
+   * fetch_sub semantics (return OLD value).
+   * _InterlockedIncrement returns new, subtract 1 to get pre-increment.
+   * _InterlockedDecrement returns new, add 1 to get pre-decrement.
+   * On ARM use _nf (no fence) / _rel variants for relaxed/release semantics. */
+  #if defined(_M_ARM) || defined(_M_ARM64)
+    #define ray_atomic_inc(p)   (_InterlockedIncrement_nf((volatile long*)(p)) - 1)
+    #define ray_atomic_dec(p)   (_InterlockedDecrement_rel((volatile long*)(p)) + 1)
+    #define ray_atomic_fence_acquire()  __dmb(_ARM_BARRIER_ISH)
+  #else
+    #define ray_atomic_inc(p)   (_InterlockedIncrement((volatile long*)(p)) - 1)
+    #define ray_atomic_dec(p)   (_InterlockedDecrement((volatile long*)(p)) + 1)
+    #define ray_atomic_fence_acquire()  _ReadWriteBarrier()
+  #endif
   #define ray_atomic_load(p)  _InterlockedOr((volatile long*)(p), 0)
   #define ray_atomic_store(p, v) _InterlockedExchange((volatile long*)(p), (long)(v))
   #define ray_atomic_cas(p, expected, desired) \
@@ -88,12 +100,13 @@
 #else
   #include <stdatomic.h>
   #define ray_atomic_inc(p)   __atomic_fetch_add(p, 1, __ATOMIC_RELAXED)
-  #define ray_atomic_dec(p)   __atomic_fetch_sub(p, 1, __ATOMIC_ACQ_REL)
+  #define ray_atomic_dec(p)   __atomic_fetch_sub(p, 1, __ATOMIC_RELEASE)
   #define ray_atomic_load(p)  __atomic_load_n(p, __ATOMIC_ACQUIRE)
   #define ray_atomic_store(p, v) __atomic_store_n(p, v, __ATOMIC_RELEASE)
   #define ray_atomic_cas(p, expected, desired) \
       __atomic_compare_exchange_n(p, expected, desired, 0, \
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+  #define ray_atomic_fence_acquire()  __atomic_thread_fence(__ATOMIC_ACQUIRE)
 #endif
 #endif /* !ray_atomic_inc */
 
