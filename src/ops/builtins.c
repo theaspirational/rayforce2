@@ -8,6 +8,7 @@
 #include "lang/eval.h"
 #include "lang/eval_internal.h"
 #include "lang/env.h"
+#include "vec/vec.h"
 #include "lang/nfo.h"
 #include "lang/parse.h"
 #include "core/types.h"
@@ -523,6 +524,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 out[i] = cast->i64;
                 ray_release(cast);
             }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
+            }
             return vec;
         }
         return ray_error("type", NULL);
@@ -561,6 +571,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 out[i] = cast->i32;
                 ray_release(cast);
             }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
+            }
             return vec;
         }
         return ray_error("type", NULL);
@@ -598,6 +617,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
                 out[i] = cast->i16;
                 ray_release(cast);
+            }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
             }
             return vec;
         }
@@ -639,6 +667,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 out[i] = cast->f64;
                 ray_release(cast);
             }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
+            }
             return vec;
         }
         return ray_error("type", NULL);
@@ -672,6 +709,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
                 out[i] = cast->b8;
                 ray_release(cast);
+            }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
             }
             return vec;
         }
@@ -729,6 +775,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 vec = ray_str_vec_append(vec, sp ? sp : "", sp ? slen : 0);
                 ray_release(cast);
                 if (RAY_IS_ERR(vec)) return vec;
+            }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
             }
             return vec;
         }
@@ -791,6 +846,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 out[i] = cast->i64;
                 ray_release(cast);
             }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
+            }
             return vec;
         }
         return ray_error("type", NULL);
@@ -841,6 +905,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 out[i] = cast->i32;
                 ray_release(cast);
             }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
+            }
             return vec;
         }
         return ray_error("type", NULL);
@@ -890,6 +963,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
                 out[i] = cast->i32;
                 ray_release(cast);
+            }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
             }
             return vec;
         }
@@ -996,6 +1078,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 out[i] = cast->i64;
                 ray_release(cast);
             }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
+            }
             return vec;
         }
         return ray_error("type", NULL);
@@ -1039,6 +1130,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 else memcpy(data + i * 16, ray_data(cast), 16);
                 ray_release(cast);
             }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
+            }
             return vec;
         }
         return ray_error("type", NULL);
@@ -1074,6 +1174,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
                 out[i] = cast->u8;
                 ray_release(cast);
+            }
+            if (ray_is_vec(val)) {
+                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+                    { ray_release(vec); return ray_error("oom", NULL); }
+            } else if (val->type == RAY_LIST) {
+                ray_t** le = (ray_t**)ray_data(val);
+                for (int64_t j = 0; j < vec->len; j++)
+                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                        ray_vec_set_null(vec, j, true);
             }
             return vec;
         }
@@ -1639,37 +1748,10 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             return ray_str(buf, la + lb);
         }
     }
-    /* Vector concat: same type */
-    if (ray_is_vec(a) && ray_is_vec(b) && a->type == b->type) {
-        int64_t na = a->len, nb = b->len;
-        if (a->type == RAY_STR) {
-            ray_t* result = ray_vec_new(RAY_STR, na + nb);
-            if (RAY_IS_ERR(result)) return result;
-            for (int64_t i = 0; i < na; i++) {
-                size_t slen;
-                const char* sp = ray_str_vec_get(a, i, &slen);
-                result = ray_str_vec_append(result, sp, slen);
-                if (RAY_IS_ERR(result)) return result;
-            }
-            for (int64_t i = 0; i < nb; i++) {
-                size_t slen;
-                const char* sp = ray_str_vec_get(b, i, &slen);
-                result = ray_str_vec_append(result, sp, slen);
-                if (RAY_IS_ERR(result)) return result;
-            }
-            return result;
-        }
-        int esz = ray_elem_size(a->type);
-        ray_t* result = ray_vec_new(a->type, na + nb);
-        if (RAY_IS_ERR(result)) return result;
-        memcpy(ray_data(result), ray_data(a), (size_t)(na * esz));
-        memcpy((char*)ray_data(result) + na * esz, ray_data(b), (size_t)(nb * esz));
-        result->len = na + nb;
-        /* Copy sym_dict / sym stuff for SYM vectors */
-        if (a->type == RAY_SYM && a->sym_dict)
-            result->sym_dict = (ray_retain(a->sym_dict), a->sym_dict);
-        return result;
-    }
+    /* Vector concat: same type — delegate to ray_vec_concat which handles
+     * null bitmap propagation, SYM width promotion, and STR pool merging. */
+    if (ray_is_vec(a) && ray_is_vec(b) && a->type == b->type)
+        return ray_vec_concat(a, b);
     /* Concat typed vec + boxed list or boxed list + typed vec -> boxed list */
     if ((ray_is_vec(a) && b->type == RAY_LIST) || (a->type == RAY_LIST && ray_is_vec(b))) {
         ray_t* la = (a->type == RAY_LIST) ? a : NULL;

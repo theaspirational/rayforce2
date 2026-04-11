@@ -3745,7 +3745,8 @@ static MunitResult test_rf_distinct(const void* params, void* fixture) {
     ASSERT_EQ("(distinct \"test\")", "\"est\"");
     ASSERT_EQ("(distinct \"\")", "\"\"");
     ASSERT_EQ("(distinct [1h 2h 2h])", "[1 2]");
-    ASSERT_EQ("(distinct [1i 0Ni 1i])", "[1i]");
+    ASSERT_EQ("(count (distinct [1i 0Ni 1i]))", "2");  /* nulls preserved — 2 distinct values */
+    ASSERT_EQ("(nil? (at (distinct [1i 0Ni 1i]) 0))", "true");  /* null is first */
     ASSERT_EQ("(distinct [2012.12.12 2012.12.12])", "[2012.12.12]");
     ASSERT_EQ("(distinct [10:00:00.000 20:10:10.500 10:00:00.000])", "[10:00:00.000 20:10:10.500]");
     ASSERT_EQ("(distinct [1 1 1 2 3 4 2 3 4 2 3 4])", "[1 2 3 4]");
@@ -3754,6 +3755,58 @@ static MunitResult test_rf_distinct(const void* params, void* fixture) {
     ASSERT_EQ("(distinct ['a 'b 'ab 'aa 'a 'aa])", "['a 'b 'ab 'aa]");
     ASSERT_EQ("(set l (guid 2)) (set l (concat l l)) (count (distinct l))", "2");
     ASSERT_EQ("(distinct (list [3i 3i] 2i [3i 3i] 2i))", "(list 2i [3i 3i])");
+
+    // ========== NULL BITMAP PROPAGATION ==========
+    // distinct preserves one null
+    ASSERT_EQ("(distinct [1 0Nl 2 0Nl 1])", "[0Nl 1 2]");
+    // concat preserves null bitmaps
+    ASSERT_EQ("(nil? (at (concat [1 0Nl 3] [0Nl 5 6]) 1))", "true");
+    ASSERT_EQ("(nil? (at (concat [1 0Nl 3] [0Nl 5 6]) 3))", "true");
+    ASSERT_EQ("(nil? (at (concat [1 0Nl 3] [0Nl 5 6]) 0))", "false");
+    ASSERT_EQ("(nil? (at (concat [1 0Nl 3] [0Nl 5 6]) 4))", "false");
+    // cast preserves null bitmaps
+    ASSERT_EQ("(nil? (at (as 'F64 [1 0Nl 3]) 1))", "true");
+    ASSERT_EQ("(nil? (at (as 'I32 [1 0Nl 3]) 1))", "true");
+    ASSERT_EQ("(at (as 'F64 [1 0Nl 3]) 0)", "1.0");
+    ASSERT_EQ("(at (as 'F64 [1 0Nl 3]) 2)", "3.0");
+    // cast to I16/U8/BOOL preserves nulls
+    ASSERT_EQ("(nil? (at (as 'I16 [1 0Nl 3]) 1))", "true");
+    ASSERT_EQ("(nil? (at (as 'U8 [1 0Nl 3]) 1))", "true");
+    // cast non-null values survive
+    ASSERT_EQ("(at (as 'I32 [10 0Nl 30]) 0)", "10i");
+    ASSERT_EQ("(at (as 'I32 [10 0Nl 30]) 2)", "30i");
+    // concat: all-null + non-null
+    ASSERT_EQ("(nil? (at (concat [0Nl 0Nl] [1 2]) 0))", "true");
+    ASSERT_EQ("(nil? (at (concat [0Nl 0Nl] [1 2]) 1))", "true");
+    ASSERT_EQ("(at (concat [0Nl 0Nl] [1 2]) 2)", "1");
+    // distinct: all nulls → one null
+    ASSERT_EQ("(count (distinct [0Nl 0Nl 0Nl]))", "1");
+    ASSERT_EQ("(nil? (at (distinct [0Nl 0Nl 0Nl]) 0))", "true");
+    // distinct: no nulls unchanged
+    ASSERT_EQ("(distinct [3 1 2 1])", "[1 2 3]");
+    // cast from list preserves nulls
+    ASSERT_EQ("(nil? (at (as 'I64 (list 1 0Nl 3)) 1))", "true");
+    ASSERT_EQ("(at (as 'I64 (list 1 0Nl 3)) 0)", "1");
+    // xasc preserves null bitmaps
+    ASSERT_EQ("(set st (xasc (table [a b] (list [1 0Nl 2] [10 20 30])) 'a)) (nil? (at (at st 'a) 0))", "true");
+    ASSERT_EQ("(at (at st 'b) 0)", "20");  /* null row's b value gathered correctly */
+    ASSERT_EQ("(at (at st 'a) 1)", "1");
+    ASSERT_EQ("(at (at st 'a) 2)", "2");
+    // xasc/xdesc with multi-column nulls
+    ASSERT_EQ("(set mt (table [a b c] (list [3 0Nl 1] [30 0Nl 10] [300 0Nl 100]))) (nil? (at (at (xasc mt 'a) 'a) 0))", "true");
+    ASSERT_EQ("(nil? (at (at (xasc mt 'a) 'b) 0))", "true");
+    ASSERT_EQ("(nil? (at (at (xasc mt 'a) 'c) 0))", "true");
+    ASSERT_EQ("(at (at (xasc mt 'a) 'a) 1)", "1");
+    ASSERT_EQ("(at (at (xasc mt 'a) 'b) 1)", "10");
+    ASSERT_EQ("(at (at (xasc mt 'a) 'c) 1)", "100");
+    // xdesc with nulls
+    ASSERT_EQ("(nil? (at (at (xdesc mt 'a) 'a) 2))", "true");
+    ASSERT_EQ("(at (at (xdesc mt 'a) 'a) 0)", "3");
+    // multi-key sort with nulls
+    ASSERT_EQ("(set mk (table [x y z] (list [1 1 0Nl 2] [20 10 0Nl 30] [200 100 0Nl 300]))) (nil? (at (at (xasc mk ['x 'y]) 'x) 0))", "true");
+    ASSERT_EQ("(nil? (at (at (xasc mk ['x 'y]) 'z) 0))", "true");
+    ASSERT_EQ("(at (at (xasc mk ['x 'y]) 'y) 1)", "10");
+    ASSERT_EQ("(at (at (xasc mk ['x 'y]) 'y) 2)", "20");
     return MUNIT_OK;
 }
 

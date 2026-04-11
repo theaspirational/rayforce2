@@ -758,6 +758,21 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
         return result;
     }
 
+    /* LIST: pointer gather with retain */
+    if (type == RAY_LIST) {
+        ray_t* result = ray_alloc(n * sizeof(ray_t*));
+        if (!result || RAY_IS_ERR(result)) return result ? result : ray_error("oom", NULL);
+        result->type = type;
+        result->len = n;
+        ray_t** src_ptrs = (ray_t**)ray_data(vec);
+        ray_t** dst_ptrs = (ray_t**)ray_data(result);
+        for (int64_t i = 0; i < n; i++) {
+            dst_ptrs[i] = src_ptrs[idx[i]];
+            if (dst_ptrs[i]) ray_retain(dst_ptrs[i]);
+        }
+        return result;
+    }
+
     ray_t* result = ray_vec_new(type, n);
     if (RAY_IS_ERR(result)) return result;
     result->len = n;

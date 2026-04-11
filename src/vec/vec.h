@@ -34,4 +34,8 @@
 
 #include <rayforce.h>
 
+/* Copy null bitmap from src to dst (handles slices, inline, external).
+ * dst and src must have the same length. Internal helper. */
+ray_err_t ray_vec_copy_nulls(ray_t* dst, const ray_t* src);
+
 #endif /* RAY_VEC_H */

@@ -873,3 +873,33 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
     int bit_idx = (int)(idx % 8);
     return (vec->nullmap[byte_idx] >> bit_idx) & 1;
 }
+
+/* --------------------------------------------------------------------------
+ * ray_vec_copy_nulls — bulk-copy null bitmap from src to dst
+ *
+ * dst must have the same len as src (or at least as many elements).
+ * Handles inline, external, and slice source bitmaps.
+ * -------------------------------------------------------------------------- */
+
+ray_err_t ray_vec_copy_nulls(ray_t* dst, const ray_t* src) {
+    if (!dst || !src) return RAY_ERR_TYPE;
+
+    /* Use ray_vec_is_null which handles slices, inline, and external bitmaps
+     * transparently. For non-null sources this returns immediately. */
+    bool has_any = false;
+    if (src->attrs & RAY_ATTR_SLICE) {
+        const ray_t* parent = src->slice_parent;
+        if (parent && (parent->attrs & RAY_ATTR_HAS_NULLS)) has_any = true;
+    } else {
+        if (src->attrs & RAY_ATTR_HAS_NULLS) has_any = true;
+    }
+    if (!has_any) return RAY_OK;
+
+    for (int64_t i = 0; i < dst->len && i < src->len; i++) {
+        if (ray_vec_is_null((ray_t*)src, i)) {
+            ray_err_t err = ray_vec_set_null_checked(dst, i, true);
+            if (err != RAY_OK) return err;
+        }
+    }
+    return RAY_OK;
+}

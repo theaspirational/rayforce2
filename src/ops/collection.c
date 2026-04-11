@@ -442,12 +442,19 @@ ray_t* ray_distinct_fn(ray_t* x) {
         ray_t** out = (ray_t**)ray_data(result);
         int64_t count = 0;
 
+        bool seen_null = false;
         for (int64_t i = 0; i < len; i++) {
-            /* Skip null values */
-            if (RAY_ATOM_IS_NULL(elems[i])) continue;
+            if (RAY_ATOM_IS_NULL(elems[i])) {
+                if (!seen_null) {
+                    seen_null = true;
+                    ray_retain(elems[i]);
+                    out[count++] = elems[i];
+                }
+                continue;
+            }
             int dup = 0;
             for (int64_t j = 0; j < count; j++) {
-                if (atom_eq(out[j], elems[i])) { dup = 1; break; }
+                if (!RAY_ATOM_IS_NULL(out[j]) && atom_eq(out[j], elems[i])) { dup = 1; break; }
             }
             if (!dup) {
                 ray_retain(elems[i]);
