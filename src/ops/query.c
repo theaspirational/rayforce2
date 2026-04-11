@@ -450,7 +450,10 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     }
                     if (!src_col_val) {
                         src_col_val = ray_eval(agg_col_expr);
-                        if (RAY_IS_ERR(src_col_val)) { ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return src_col_val; }
+                        if (RAY_IS_ERR(src_col_val)) {
+                            for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
+                            ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return src_col_val;
+                        }
                     }
 
                     /* For each group, compute aggregation */
@@ -486,7 +489,11 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     /* Non-aggregation expression (lambda, arithmetic, etc.):
                      * bind table columns into scope, evaluate the expression
                      * on the full table, then gather the last value per group. */
-                    ray_env_push_scope();
+                    if (ray_env_push_scope() != RAY_OK) {
+                        for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
+                        ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                        return ray_error("oom", NULL);
+                    }
                     int64_t enc = ray_table_ncols(eval_tbl);
                     for (int64_t ci = 0; ci < enc; ci++) {
                         int64_t cn = ray_table_col_name(eval_tbl, ci);
@@ -495,7 +502,10 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     }
                     ray_t* full_val = ray_eval(val_expr_item);
                     ray_env_pop_scope();
-                    if (RAY_IS_ERR(full_val)) { ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return full_val; }
+                    if (RAY_IS_ERR(full_val)) {
+                        for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
+                        ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return full_val;
+                    }
 
                     ray_t* agg_vec = NULL;
                     ray_t** grp_items = (ray_t**)ray_data(groups);
