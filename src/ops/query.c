@@ -498,7 +498,12 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     for (int64_t ci = 0; ci < enc; ci++) {
                         int64_t cn = ray_table_col_name(eval_tbl, ci);
                         ray_t* cv = ray_table_get_col_idx(eval_tbl, ci);
-                        if (cv) ray_env_set_local(cn, cv);
+                        if (cv && ray_env_set_local(cn, cv) != RAY_OK) {
+                            ray_env_pop_scope();
+                            for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
+                            ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                            return ray_error("limit", "too many columns for grouped expression");
+                        }
                     }
                     ray_t* full_val = ray_eval(val_expr_item);
                     ray_env_pop_scope();
