@@ -281,6 +281,23 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     return NULL;
 }
 
+/* Walk an expression tree and bind any name-symbols that match table columns
+ * into the current local scope. Recurses into list sub-expressions. */
+static void expr_bind_table_names(ray_t* expr, ray_t* tbl) {
+    if (!expr) return;
+    if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
+        ray_t* col = ray_table_get_col(tbl, expr->i64);
+        if (col) ray_env_set_local(expr->i64, col);
+        return;
+    }
+    if (expr->type == RAY_LIST && !(expr->attrs & RAY_ATTR_DICT)) {
+        ray_t** elems = (ray_t**)ray_data(expr);
+        int64_t n = ray_len(expr);
+        for (int64_t i = 0; i < n; i++)
+            expr_bind_table_names(elems[i], tbl);
+    }
+}
+
 /* Check if an expression is an aggregation call (head is an agg function) */
 static int is_agg_expr(ray_t* expr) {
     if (!expr || expr->type != RAY_LIST) return 0;
@@ -489,22 +506,15 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     /* Non-aggregation expression (lambda, arithmetic, etc.):
                      * bind table columns into scope, evaluate the expression
                      * on the full table, then gather the last value per group. */
+                    /* Bind only columns referenced as names in the expression,
+                     * not all table columns — avoids overflowing the 64-slot
+                     * scope frame for wide tables. */
                     if (ray_env_push_scope() != RAY_OK) {
                         for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
                         ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
                         return ray_error("oom", NULL);
                     }
-                    int64_t enc = ray_table_ncols(eval_tbl);
-                    for (int64_t ci = 0; ci < enc; ci++) {
-                        int64_t cn = ray_table_col_name(eval_tbl, ci);
-                        ray_t* cv = ray_table_get_col_idx(eval_tbl, ci);
-                        if (cv && ray_env_set_local(cn, cv) != RAY_OK) {
-                            ray_env_pop_scope();
-                            for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
-                            ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
-                            return ray_error("limit", "too many columns for grouped expression");
-                        }
-                    }
+                    expr_bind_table_names(val_expr_item, eval_tbl);
                     ray_t* full_val = ray_eval(val_expr_item);
                     ray_env_pop_scope();
                     if (RAY_IS_ERR(full_val)) {
