@@ -417,6 +417,21 @@ static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
     case RAY_GUID:
         fmt_guid(b, ((uint8_t*)ray_data(vec)) + idx * 16);
         break;
+    case RAY_LIST: {
+        ray_t* child = ((ray_t**)ray_data(vec))[idx];
+        if (child) {
+            ray_t* s = ray_fmt(child, 1);
+            if (s && !RAY_IS_ERR(s)) {
+                fmt_putn(b, ray_str_ptr(s), (int32_t)ray_str_len(s));
+                ray_release(s);
+            } else {
+                fmt_puts(b, "?");
+            }
+        } else {
+            fmt_puts(b, "null");
+        }
+        break;
+    }
     default:
         fmt_puts(b, "?");
         break;

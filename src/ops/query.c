@@ -503,12 +503,9 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     agg_results[n_agg_out] = agg_vec;
                     n_agg_out++;
                 } else {
-                    /* Non-aggregation expression (lambda, arithmetic, etc.):
-                     * bind table columns into scope, evaluate the expression
-                     * on the full table, then gather the last value per group. */
-                    /* Bind only columns referenced as names in the expression,
-                     * not all table columns — avoids overflowing the 64-slot
-                     * scope frame for wide tables. */
+                    /* Non-aggregation expression: evaluate on full table,
+                     * then gather per-group subsets into a LIST column
+                     * (kdb+ semantics: non-agg produces list-of-vectors). */
                     if (ray_env_push_scope() != RAY_OK) {
                         for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
                         ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
@@ -522,37 +519,32 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                         ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return full_val;
                     }
 
-                    ray_t* agg_vec = NULL;
-                    ray_t** grp_items = (ray_t**)ray_data(groups);
+                    /* Build LIST column: one vector per group */
+                    ray_t* list_col = ray_list_new(n_groups);
+                    if (!list_col || RAY_IS_ERR(list_col)) {
+                        ray_release(full_val);
+                        for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
+                        ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
+                        return ray_error("oom", NULL);
+                    }
                     for (int64_t gi = 0; gi < n_groups; gi++) {
-                        ray_t* idx_list = grp_items[gi * 2 + 1];
-                        /* Take last index in each group */
-                        ray_t* last_val = NULL;
+                        ray_t** gi_items = (ray_t**)ray_data(groups);
+                        ray_t* idx_list = gi_items[gi * 2 + 1];
+                        ray_t* grp_vec = NULL;
                         if (ray_is_vec(full_val)) {
-                            ray_t* subset = ray_at_fn(full_val, idx_list);
-                            if (subset && !RAY_IS_ERR(subset)) {
-                                last_val = ray_last_fn(subset);
-                                ray_release(subset);
-                            }
+                            int64_t* grp_idx = (int64_t*)ray_data(idx_list);
+                            int64_t grp_len = idx_list->len;
+                            grp_vec = gather_by_idx(full_val, grp_idx, grp_len);
                         } else {
-                            /* Scalar expression — replicate for each group */
-                            last_val = full_val;
-                            ray_retain(last_val);
+                            ray_retain(full_val);
+                            grp_vec = full_val;
                         }
-                        if (!last_val || RAY_IS_ERR(last_val)) continue;
-
-                        if (!agg_vec) {
-                            int8_t vt = ray_is_atom(last_val) ? -(last_val->type) : last_val->type;
-                            agg_vec = ray_vec_new(vt, n_groups);
-                            if (RAY_IS_ERR(agg_vec)) { ray_release(last_val); break; }
-                            agg_vec->len = n_groups;
-                        }
-                        store_typed_elem(agg_vec, gi, last_val);
-                        ray_release(last_val);
+                        list_col = ray_list_append(list_col, grp_vec);
+                        if (grp_vec) ray_release(grp_vec);
                     }
                     ray_release(full_val);
                     agg_names[n_agg_out] = kid;
-                    agg_results[n_agg_out] = agg_vec;
+                    agg_results[n_agg_out] = list_col;
                     n_agg_out++;
                 }
             }
