@@ -584,6 +584,8 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                         key_vec = ray_vec_new(ktype, n_groups);
                     if (key_vec && !RAY_IS_ERR(key_vec)) {
                         key_vec->len = n_groups;
+                        /* Zero-fill data region so skipped GUID/null slots are safe */
+                        memset(ray_data(key_vec), 0, (size_t)n_groups * ray_elem_size(ktype));
                         for (int64_t gi = 0; gi < n_groups; gi++)
                             store_typed_elem(key_vec, gi, grp_items[gi * 2]);
                     }
