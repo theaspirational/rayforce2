@@ -564,7 +564,23 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             /* Key column: unique keys from groups */
             ray_t** grp_items = (ray_t**)ray_data(groups);
             ray_t* key_col_src = ray_table_get_col(eval_tbl, by_expr->i64);
-            if (key_col_src && key_col_src->type == RAY_STR) {
+            if (key_col_src && (key_col_src->type == RAY_SYM || RAY_IS_PARTED(key_col_src->type))) {
+                /* SYM key column: build a proper SYM vector from group keys */
+                uint8_t sym_attrs = RAY_IS_PARTED(key_col_src->type)
+                    ? parted_first_attrs((ray_t**)ray_data(key_col_src), key_col_src->len)
+                    : key_col_src->attrs;
+                ray_t* key_vec = ray_sym_vec_new(sym_attrs & RAY_SYM_W_MASK, n_groups);
+                if (key_vec && !RAY_IS_ERR(key_vec)) {
+                    key_vec->len = n_groups;
+                    for (int64_t gi = 0; gi < n_groups; gi++) {
+                        ray_t* k = grp_items[gi * 2];
+                        /* k is a SYM atom — k->i64 is the sym intern ID */
+                        store_typed_elem(key_vec, gi, k);
+                    }
+                    result = ray_table_add_col(result, by_expr->i64, key_vec);
+                    ray_release(key_vec);
+                }
+            } else if (key_col_src && key_col_src->type == RAY_STR) {
                 ray_t* key_vec = ray_vec_new(RAY_STR, n_groups);
                 for (int64_t gi = 0; gi < n_groups && key_vec && !RAY_IS_ERR(key_vec); gi++) {
                     ray_t* k = grp_items[gi * 2];
