@@ -115,7 +115,7 @@ static bool eval_const_numeric_expr(ray_graph_t* g, ray_op_t* op,
             case OP_SUB: r = lv - rv; break;
             case OP_MUL: r = lv * rv; break;
             case OP_DIV: r = rv != 0.0 ? lv / rv : NAN; break;
-            case OP_MOD: r = rv != 0.0 ? fmod(lv, rv) : NAN; break;
+            case OP_MOD: r = rv != 0.0 ? ({ double _m = fmod(lv, rv); (_m && ((_m > 0) != (rv > 0))) ? _m + rv : _m; }) : NAN; break;
             case OP_MIN2: r = lv < rv ? lv : rv; break;
             case OP_MAX2: r = lv > rv ? lv : rv; break;
             default: return false;
@@ -128,17 +128,16 @@ static bool eval_const_numeric_expr(ray_graph_t* g, ray_op_t* op,
 
     int64_t r = 0;
     switch (op->opcode) {
-        /* Use uint64_t casts to get defined wrapping on overflow; propagate INT64_MIN null */
-        case OP_ADD: r = (li==INT64_MIN||ri==INT64_MIN) ? INT64_MIN : (int64_t)((uint64_t)li + (uint64_t)ri); break;
-        case OP_SUB: r = (li==INT64_MIN||ri==INT64_MIN) ? INT64_MIN : (int64_t)((uint64_t)li - (uint64_t)ri); break;
-        case OP_MUL: r = (li==INT64_MIN||ri==INT64_MIN) ? INT64_MIN : (int64_t)((uint64_t)li * (uint64_t)ri); break;
+        case OP_ADD: r = (int64_t)((uint64_t)li + (uint64_t)ri); break;
+        case OP_SUB: r = (int64_t)((uint64_t)li - (uint64_t)ri); break;
+        case OP_MUL: r = (int64_t)((uint64_t)li * (uint64_t)ri); break;
         case OP_DIV:
-            if (ri==0||li==INT64_MIN||ri==INT64_MIN) { r = INT64_MIN; }
-            else { r = li/ri; if ((li^ri)<0 && r*ri!=li) r--; }
+            if (ri==0) return false;
+            r = li/ri; if ((li^ri)<0 && r*ri!=li) r--;
             break;
         case OP_MOD:
-            if (ri==0||li==INT64_MIN||ri==INT64_MIN) { r = INT64_MIN; }
-            else { r = li%ri; if (r && (r^ri)<0) r+=ri; }
+            if (ri==0) return false;
+            r = li%ri; if (r && (r^ri)<0) r+=ri;
             break;
         case OP_MIN2: r = li < ri ? li : ri; break;
         case OP_MAX2: r = li > ri ? li : ri; break;
@@ -649,35 +648,90 @@ static void expr_exec_binary(uint8_t opcode, int8_t dt, void* dp,
             case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = a[j] + b[j]; break;
             case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = a[j] - b[j]; break;
             case OP_MUL: for (int64_t j = 0; j < n; j++) d[j] = a[j] * b[j]; break;
-            case OP_DIV: for (int64_t j = 0; j < n; j++) d[j] = b[j] != 0 ? a[j] / b[j] : NAN; break;
-            case OP_MOD: for (int64_t j = 0; j < n; j++) d[j] = b[j] != 0 ? fmod(a[j], b[j]) : NAN; break;
+            case OP_DIV: for (int64_t j = 0; j < n; j++) d[j] = b[j] != 0.0 ? a[j] / b[j] : NAN; break;
+            case OP_MOD: for (int64_t j = 0; j < n; j++) {
+                if (b[j] == 0.0) { d[j] = NAN; continue; }
+                double m = fmod(a[j], b[j]);
+                d[j] = (m && ((m > 0) != (b[j] > 0))) ? m + b[j] : m;
+            } break;
             case OP_MIN2: for (int64_t j = 0; j < n; j++) d[j] = a[j] < b[j] ? a[j] : b[j]; break;
             case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
             default: break;
         }
-    } else if (dt == RAY_I64) {
+    } else if (dt == RAY_I64 || dt == RAY_TIMESTAMP) {
         int64_t* d = (int64_t*)dp;
         const int64_t* a = (const int64_t*)ap;
         const int64_t* b = (const int64_t*)bp;
         switch (opcode) {
-            /* Use uint64_t casts to get defined wrapping on overflow; propagate INT64_MIN null */
-            case OP_ADD: { int64_t N = INT64_MIN; for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N||b[j]==N) ? N : (int64_t)((uint64_t)a[j] + (uint64_t)b[j]); } break;
-            case OP_SUB: { int64_t N = INT64_MIN; for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N||b[j]==N) ? N : (int64_t)((uint64_t)a[j] - (uint64_t)b[j]); } break;
-            case OP_MUL: { int64_t N = INT64_MIN; for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N||b[j]==N) ? N : (int64_t)((uint64_t)a[j] * (uint64_t)b[j]); } break;
-            case OP_DIV: { int64_t N = INT64_MIN; for (int64_t j = 0; j < n; j++) {
-                if (b[j]==0||a[j]==N||b[j]==N) { d[j]=N; continue; }
+            case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] + (uint64_t)b[j]); break;
+            case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] - (uint64_t)b[j]); break;
+            case OP_MUL: for (int64_t j = 0; j < n; j++) d[j] = (int64_t)((uint64_t)a[j] * (uint64_t)b[j]); break;
+            case OP_DIV: for (int64_t j = 0; j < n; j++) {
+                if (b[j]==0 || (b[j]==-1 && a[j]==((int64_t)1<<63))) { d[j]=0; continue; }
                 int64_t q = a[j]/b[j];
                 if ((a[j]^b[j])<0 && q*b[j]!=a[j]) q--;
                 d[j] = q;
-            } } break;
-            case OP_MOD: { int64_t N = INT64_MIN; for (int64_t j = 0; j < n; j++) {
-                if (b[j]==0||a[j]==N||b[j]==N) { d[j]=N; continue; }
+            } break;
+            case OP_MOD: for (int64_t j = 0; j < n; j++) {
+                if (b[j]==0 || (b[j]==-1 && a[j]==((int64_t)1<<63))) { d[j]=0; continue; }
                 int64_t m = a[j]%b[j];
                 if (m && (m^b[j])<0) m+=b[j];
                 d[j] = m;
-            } } break;
+            } break;
             case OP_MIN2: for (int64_t j = 0; j < n; j++) d[j] = a[j] < b[j] ? a[j] : b[j]; break;
             case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
+            default: break;
+        }
+    } else if (dt == RAY_I32 || dt == RAY_DATE || dt == RAY_TIME) {
+        int32_t* d = (int32_t*)dp;
+        const int32_t* a = (const int32_t*)ap;
+        const int32_t* b = (const int32_t*)bp;
+        switch (opcode) {
+            case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = (int32_t)((uint32_t)a[j] + (uint32_t)b[j]); break;
+            case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = (int32_t)((uint32_t)a[j] - (uint32_t)b[j]); break;
+            case OP_MUL: for (int64_t j = 0; j < n; j++) d[j] = (int32_t)((uint32_t)a[j] * (uint32_t)b[j]); break;
+            case OP_DIV: for (int64_t j = 0; j < n; j++) {
+                if (b[j]==0 || (b[j]==-1 && a[j]==((int32_t)1<<31))) { d[j]=0; continue; }
+                int32_t q = a[j]/b[j];
+                if ((a[j]^b[j])<0 && q*b[j]!=a[j]) q--;
+                d[j] = q;
+            } break;
+            case OP_MOD: for (int64_t j = 0; j < n; j++) {
+                if (b[j]==0 || (b[j]==-1 && a[j]==((int32_t)1<<31))) { d[j]=0; continue; }
+                int32_t m = a[j]%b[j];
+                if (m && (m^b[j])<0) m+=b[j];
+                d[j] = m;
+            } break;
+            case OP_MIN2: for (int64_t j = 0; j < n; j++) d[j] = a[j] < b[j] ? a[j] : b[j]; break;
+            case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
+            default: break;
+        }
+    } else if (dt == RAY_I16) {
+        int16_t* d = (int16_t*)dp;
+        const int16_t* a = (const int16_t*)ap;
+        const int16_t* b = (const int16_t*)bp;
+        switch (opcode) {
+            case OP_ADD: for (int64_t j = 0; j < n; j++) d[j] = (int16_t)((uint16_t)a[j] + (uint16_t)b[j]); break;
+            case OP_SUB: for (int64_t j = 0; j < n; j++) d[j] = (int16_t)((uint16_t)a[j] - (uint16_t)b[j]); break;
+            case OP_MUL: for (int64_t j = 0; j < n; j++) d[j] = (int16_t)((uint16_t)a[j] * (uint16_t)b[j]); break;
+            case OP_DIV: for (int64_t j = 0; j < n; j++) { d[j] = b[j] ? a[j] / b[j] : 0; } break;
+            case OP_MOD: for (int64_t j = 0; j < n; j++) { d[j] = b[j] ? a[j] % b[j] : 0; } break;
+            case OP_MIN2: for (int64_t j = 0; j < n; j++) d[j] = a[j] < b[j] ? a[j] : b[j]; break;
+            case OP_MAX2: for (int64_t j = 0; j < n; j++) d[j] = a[j] > b[j] ? a[j] : b[j]; break;
+            default: break;
+        }
+    } else if (dt == RAY_U8) {
+        uint8_t* d2 = (uint8_t*)dp;
+        const uint8_t* a2 = (const uint8_t*)ap;
+        const uint8_t* b2 = (const uint8_t*)bp;
+        switch (opcode) {
+            case OP_ADD: for (int64_t j = 0; j < n; j++) d2[j] = a2[j] + b2[j]; break;
+            case OP_SUB: for (int64_t j = 0; j < n; j++) d2[j] = a2[j] - b2[j]; break;
+            case OP_MUL: for (int64_t j = 0; j < n; j++) d2[j] = a2[j] * b2[j]; break;
+            case OP_DIV: for (int64_t j = 0; j < n; j++) { d2[j] = b2[j] ? a2[j] / b2[j] : 0; } break;
+            case OP_MOD: for (int64_t j = 0; j < n; j++) { d2[j] = b2[j] ? a2[j] % b2[j] : 0; } break;
+            case OP_MIN2: for (int64_t j = 0; j < n; j++) d2[j] = a2[j] < b2[j] ? a2[j] : b2[j]; break;
+            case OP_MAX2: for (int64_t j = 0; j < n; j++) d2[j] = a2[j] > b2[j] ? a2[j] : b2[j]; break;
             default: break;
         }
     } else if (dt == RAY_BOOL) {
@@ -701,14 +755,17 @@ static void expr_exec_binary(uint8_t opcode, int8_t dt, void* dp,
         } else if (t1 == RAY_I64) {
             const int64_t* a = (const int64_t*)ap;
             const int64_t* b = (const int64_t*)bp;
-            int64_t N = INT64_MIN;
+            /* Plain comparison — null handling via bitmap post-pass.
+             * Values at null positions are zero (from vector init), which
+             * compares correctly for null-as-minimum semantics when both
+             * input null bitmaps are propagated to the result. */
             switch (opcode) {
-                case OP_EQ: for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N&&b[j]==N) ? 1 : (a[j]==N||b[j]==N) ? 0 : a[j]==b[j]; break;
-                case OP_NE: for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N&&b[j]==N) ? 0 : (a[j]==N||b[j]==N) ? 1 : a[j]!=b[j]; break;
-                case OP_LT: for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N&&b[j]==N) ? 0 : a[j]==N ? 1 : b[j]==N ? 0 : a[j]<b[j]; break;
-                case OP_LE: for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N&&b[j]==N) ? 1 : a[j]==N ? 1 : b[j]==N ? 0 : a[j]<=b[j]; break;
-                case OP_GT: for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N&&b[j]==N) ? 0 : b[j]==N ? 1 : a[j]==N ? 0 : a[j]>b[j]; break;
-                case OP_GE: for (int64_t j = 0; j < n; j++) d[j] = (a[j]==N&&b[j]==N) ? 1 : b[j]==N ? 1 : a[j]==N ? 0 : a[j]>=b[j]; break;
+                case OP_EQ: for (int64_t j = 0; j < n; j++) d[j] = a[j]==b[j]; break;
+                case OP_NE: for (int64_t j = 0; j < n; j++) d[j] = a[j]!=b[j]; break;
+                case OP_LT: for (int64_t j = 0; j < n; j++) d[j] = a[j]<b[j]; break;
+                case OP_LE: for (int64_t j = 0; j < n; j++) d[j] = a[j]<=b[j]; break;
+                case OP_GT: for (int64_t j = 0; j < n; j++) d[j] = a[j]>b[j]; break;
+                case OP_GE: for (int64_t j = 0; j < n; j++) d[j] = a[j]>=b[j]; break;
                 default: break;
             }
         } else { /* both bool */
@@ -1039,24 +1096,34 @@ static void* resolve_vec_data(ray_t* v, int64_t* offset) {
 }
 
 /* For comparisons: force result to false for any element where either input is null. */
-static void clear_null_comparisons(ray_t* lhs, ray_t* rhs, ray_t* result,
-                                   bool l_scalar, bool r_scalar, int64_t len) {
+/* Fix comparison results at null positions using null-as-minimum semantics.
+ * null == null → true, null < x → true, x > null → true, etc. */
+static void fix_null_comparisons(ray_t* lhs, ray_t* rhs, ray_t* result,
+                                  bool l_scalar, bool r_scalar, int64_t len,
+                                  uint16_t opcode) {
     uint8_t* dst = (uint8_t*)ray_data(result);
-    if (l_scalar && scalar_is_null(lhs)) {
-        memset(dst, 0, (size_t)len);
-        return;
-    }
-    if (r_scalar && scalar_is_null(rhs)) {
-        memset(dst, 0, (size_t)len);
-        return;
-    }
+    bool ln_s = l_scalar && scalar_is_null(lhs);
+    bool rn_s = r_scalar && scalar_is_null(rhs);
     bool l_has = !l_scalar && vec_may_have_nulls(lhs);
     bool r_has = !r_scalar && vec_may_have_nulls(rhs);
-    if (!l_has && !r_has) return;
+    if (!ln_s && !rn_s && !l_has && !r_has) return;
+
     for (int64_t i = 0; i < len; i++) {
-        if ((l_has && ray_vec_is_null(lhs, i)) ||
-            (r_has && ray_vec_is_null(rhs, i)))
-            dst[i] = 0;
+        bool ln = ln_s || (l_has && ray_vec_is_null(lhs, i));
+        bool rn = rn_s || (r_has && ray_vec_is_null(rhs, i));
+        if (!ln && !rn) continue;
+        /* Both null */
+        if (ln && rn) {
+            dst[i] = (opcode == OP_EQ || opcode == OP_LE || opcode == OP_GE) ? 1 : 0;
+            continue;
+        }
+        /* Left null only (null = minimum) */
+        if (ln) {
+            dst[i] = (opcode == OP_LT || opcode == OP_LE || opcode == OP_NE) ? 1 : 0;
+            continue;
+        }
+        /* Right null only */
+        dst[i] = (opcode == OP_GT || opcode == OP_GE || opcode == OP_NE) ? 1 : 0;
     }
 }
 
@@ -1314,7 +1381,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         else if (lp_u32)  lv = (double)lp_u32[i];
         else if (lp_i16)  lv = (double)lp_i16[i];
         else if (lp_bool) lv = (double)lp_bool[i];
-        else if (l_scalar && (lhs->type == -RAY_F64 || lhs->type == -RAY_F64 || lhs->type == RAY_F64)) lv = l_f64;
+        else if (l_scalar && (lhs->type == -RAY_F64 || lhs->type == RAY_F64)) lv = l_f64;
         else              lv = (double)l_i64;
 
         if (rp_f64)       rv = rp_f64[i];
@@ -1323,7 +1390,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
         else if (rp_u32)  rv = (double)rp_u32[i];
         else if (rp_i16)  rv = (double)rp_i16[i];
         else if (rp_bool) rv = (double)rp_bool[i];
-        else if (r_scalar && (rhs->type == -RAY_F64 || rhs->type == -RAY_F64 || rhs->type == RAY_F64)) rv = r_f64;
+        else if (r_scalar && (rhs->type == -RAY_F64 || rhs->type == RAY_F64)) rv = r_f64;
         else              rv = (double)r_i64;
 
         if (out_type == RAY_F64) {
@@ -1333,27 +1400,25 @@ static void binary_range(ray_op_t* op, int8_t out_type,
                 case OP_SUB: r = lv - rv; break;
                 case OP_MUL: r = lv * rv; break;
                 case OP_DIV: r = rv != 0.0 ? lv / rv : NAN; break;
-                case OP_MOD: r = rv != 0.0 ? fmod(lv, rv) : NAN; break;
+                case OP_MOD: r = rv != 0.0 ? ({ double _m = fmod(lv, rv); (_m && ((_m > 0) != (rv > 0))) ? _m + rv : _m; }) : NAN; break;
                 case OP_MIN2: r = lv < rv ? lv : rv; break;
                 case OP_MAX2: r = lv > rv ? lv : rv; break;
                 default: r = 0.0; break;
             }
             ((double*)dst)[i] = r;
-        } else if (out_type == RAY_I64) {
+        } else if (out_type == RAY_I64 || out_type == RAY_TIMESTAMP) {
             int64_t li = (int64_t)lv, ri = (int64_t)rv;
-            int64_t N = INT64_MIN;
             int64_t r;
             switch (op->opcode) {
-                /* Null propagation + uint64_t wrapping for defined overflow */
-                case OP_ADD: r = (li==N||ri==N) ? N : (int64_t)((uint64_t)li + (uint64_t)ri); break;
-                case OP_SUB: r = (li==N||ri==N) ? N : (int64_t)((uint64_t)li - (uint64_t)ri); break;
-                case OP_MUL: r = (li==N||ri==N) ? N : (int64_t)((uint64_t)li * (uint64_t)ri); break;
+                case OP_ADD: r = (int64_t)((uint64_t)li + (uint64_t)ri); break;
+                case OP_SUB: r = (int64_t)((uint64_t)li - (uint64_t)ri); break;
+                case OP_MUL: r = (int64_t)((uint64_t)li * (uint64_t)ri); break;
                 case OP_DIV:
-                    if (ri==0||li==N||ri==N) { r = N; }
+                    if (ri==0 || ri==-1) { r = (ri==-1) ? (int64_t)(-(uint64_t)li) : 0; }
                     else { r = li/ri; if ((li^ri)<0 && r*ri!=li) r--; }
                     break;
                 case OP_MOD:
-                    if (ri==0||li==N||ri==N) { r = N; }
+                    if (ri==0 || ri==-1) { r = 0; }
                     else { r = li%ri; if (r && (r^ri)<0) r+=ri; }
                     break;
                 case OP_MIN2: r = li < ri ? li : ri; break;
@@ -1361,6 +1426,55 @@ static void binary_range(ray_op_t* op, int8_t out_type,
                 default: r = 0; break;
             }
             ((int64_t*)dst)[i] = r;
+        } else if (out_type == RAY_I32 || out_type == RAY_DATE || out_type == RAY_TIME) {
+            int32_t li = (int32_t)lv, ri = (int32_t)rv;
+            int32_t r;
+            switch (op->opcode) {
+                case OP_ADD: r = (int32_t)((uint32_t)li + (uint32_t)ri); break;
+                case OP_SUB: r = (int32_t)((uint32_t)li - (uint32_t)ri); break;
+                case OP_MUL: r = (int32_t)((uint32_t)li * (uint32_t)ri); break;
+                case OP_DIV:
+                    if (ri==0) { r = 0; }
+                    else if (ri==-1) { r = (int32_t)(-(uint32_t)li); }
+                    else { r = li/ri; if ((li^ri)<0 && r*ri!=li) r--; }
+                    break;
+                case OP_MOD:
+                    if (ri==0 || ri==-1) { r = 0; }
+                    else { r = li%ri; if (r && (r^ri)<0) r+=ri; }
+                    break;
+                case OP_MIN2: r = li < ri ? li : ri; break;
+                case OP_MAX2: r = li > ri ? li : ri; break;
+                default: r = 0; break;
+            }
+            ((int32_t*)dst)[i] = r;
+        } else if (out_type == RAY_I16) {
+            int16_t li = (int16_t)lv, ri = (int16_t)rv;
+            int16_t r;
+            switch (op->opcode) {
+                case OP_ADD: r = (int16_t)((uint16_t)li + (uint16_t)ri); break;
+                case OP_SUB: r = (int16_t)((uint16_t)li - (uint16_t)ri); break;
+                case OP_MUL: r = (int16_t)((uint16_t)li * (uint16_t)ri); break;
+                case OP_DIV: r = ri ? li / ri : 0; break;
+                case OP_MOD: r = ri ? li % ri : 0; break;
+                case OP_MIN2: r = li < ri ? li : ri; break;
+                case OP_MAX2: r = li > ri ? li : ri; break;
+                default: r = 0; break;
+            }
+            ((int16_t*)dst)[i] = r;
+        } else if (out_type == RAY_U8) {
+            uint8_t li = (uint8_t)lv, ri = (uint8_t)rv;
+            uint8_t r;
+            switch (op->opcode) {
+                case OP_ADD: r = li + ri; break;
+                case OP_SUB: r = li - ri; break;
+                case OP_MUL: r = li * ri; break;
+                case OP_DIV: r = ri ? li / ri : 0; break;
+                case OP_MOD: r = ri ? li % ri : 0; break;
+                case OP_MIN2: r = li < ri ? li : ri; break;
+                case OP_MAX2: r = li > ri ? li : ri; break;
+                default: r = 0; break;
+            }
+            ((uint8_t*)dst)[i] = r;
         } else if (out_type == RAY_BOOL) {
             /* Read raw I64 values directly for null-aware comparison
              * when both operands are I64/I32-family (not F64). */
@@ -1368,17 +1482,17 @@ static void binary_range(ray_op_t* op, int8_t out_type,
                               (l_scalar && lhs->type != -RAY_F64 && lhs->type != RAY_F64)) &&
                              (rp_i64 || rp_i32 || rp_u32 || rp_i16 ||
                               (r_scalar && rhs->type != -RAY_F64 && rhs->type != RAY_F64));
-            int64_t N = INT64_MIN;
             int64_t li64 = (int64_t)lv, ri64 = (int64_t)rv;
             uint8_t r;
             if (src_is_i64) {
+                /* No sentinel nulls — fix_null_comparisons handles null positions */
                 switch (op->opcode) {
-                    case OP_EQ: r = (li64==N&&ri64==N) ? 1 : (li64==N||ri64==N) ? 0 : li64==ri64; break;
-                    case OP_NE: r = (li64==N&&ri64==N) ? 0 : (li64==N||ri64==N) ? 1 : li64!=ri64; break;
-                    case OP_LT: r = (li64==N&&ri64==N) ? 0 : li64==N ? 1 : ri64==N ? 0 : li64<ri64; break;
-                    case OP_LE: r = (li64==N&&ri64==N) ? 1 : li64==N ? 1 : ri64==N ? 0 : li64<=ri64; break;
-                    case OP_GT: r = (li64==N&&ri64==N) ? 0 : ri64==N ? 1 : li64==N ? 0 : li64>ri64; break;
-                    case OP_GE: r = (li64==N&&ri64==N) ? 1 : ri64==N ? 1 : li64==N ? 0 : li64>=ri64; break;
+                    case OP_EQ: r = li64==ri64; break;
+                    case OP_NE: r = li64!=ri64; break;
+                    case OP_LT: r = li64<ri64; break;
+                    case OP_LE: r = li64<=ri64; break;
+                    case OP_GT: r = li64>ri64; break;
+                    case OP_GE: r = li64>=ri64; break;
                     case OP_AND: r = (uint8_t)lv && (uint8_t)rv; break;
                     case OP_OR:  r = (uint8_t)lv || (uint8_t)rv; break;
                     default: r = 0; break;
@@ -1479,11 +1593,11 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
                     .l_scalar = l_scalar, .r_scalar = r_scalar,
                 };
                 ray_pool_dispatch(pool, par_binary_str_fn, &ctx, len);
-                clear_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len);
+                fix_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len, op->opcode);
                 return result;
             }
             binary_range_str(op, lhs, rhs, result, l_scalar, r_scalar, 0, len);
-            clear_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len);
+            fix_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len, op->opcode);
             return result;
         }
     }
@@ -1514,6 +1628,10 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             l_i64_val = resolved_sym_id;
         else if (ray_is_atom(lhs)) {
             if (lhs->type == -RAY_F64) l_f64_val = lhs->f64;
+            else if (lhs->type == -RAY_I32 || lhs->type == -RAY_DATE || lhs->type == -RAY_TIME)
+                l_i64_val = (int64_t)lhs->i32;
+            else if (lhs->type == -RAY_I16) l_i64_val = (int64_t)lhs->i16;
+            else if (lhs->type == -RAY_U8 || lhs->type == -RAY_BOOL) l_i64_val = (int64_t)lhs->u8;
             else l_i64_val = lhs->i64;
         } else {
             int8_t t = lhs->type;
@@ -1528,6 +1646,10 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             r_i64_val = resolved_sym_id;
         else if (ray_is_atom(rhs)) {
             if (rhs->type == -RAY_F64) r_f64_val = rhs->f64;
+            else if (rhs->type == -RAY_I32 || rhs->type == -RAY_DATE || rhs->type == -RAY_TIME)
+                r_i64_val = (int64_t)rhs->i32;
+            else if (rhs->type == -RAY_I16) r_i64_val = (int64_t)rhs->i16;
+            else if (rhs->type == -RAY_U8 || rhs->type == -RAY_BOOL) r_i64_val = (int64_t)rhs->u8;
             else r_i64_val = rhs->i64;
         } else {
             int8_t t = rhs->type;
@@ -1548,21 +1670,48 @@ ray_t* exec_elementwise_binary(ray_graph_t* g, ray_op_t* op, ray_t* lhs, ray_t* 
             .l_i64 = l_i64_val, .r_i64 = r_i64_val,
         };
         ray_pool_dispatch(pool, par_binary_fn, &ctx, len);
-        if (op_propagates_null(op->opcode))
-            propagate_nulls_binary(lhs, rhs, result, l_scalar, r_scalar, len);
-        else
-            clear_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len);
-        return result;
+    } else {
+        binary_range(op, out_type, lhs, rhs, result,
+                     l_scalar, r_scalar,
+                     l_f64_val, r_f64_val, l_i64_val, r_i64_val,
+                     0, len);
     }
 
-    /* Sequential fallback */
-    binary_range(op, out_type, lhs, rhs, result,
-                 l_scalar, r_scalar,
-                 l_f64_val, r_f64_val, l_i64_val, r_i64_val,
-                 0, len);
+    /* Null propagation from inputs */
     if (op_propagates_null(op->opcode))
         propagate_nulls_binary(lhs, rhs, result, l_scalar, r_scalar, len);
     else
-        clear_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len);
+        fix_null_comparisons(lhs, rhs, result, l_scalar, r_scalar, len, op->opcode);
+
+    /* Div/mod: mark zero-divisor positions as null.
+     * The morsel loop writes 0 for b==0 but can't set bitmap nulls. */
+    uint16_t opc = op->opcode;
+    if (opc == OP_DIV || opc == OP_MOD) {
+        if (!r_scalar) {
+            int8_t rt = rhs->type;
+            if (rt == RAY_I64 || rt == RAY_TIMESTAMP) {
+                const int64_t* b = (const int64_t*)ray_data(rhs);
+                for (int64_t i = 0; i < len; i++)
+                    if (b[i] == 0) ray_vec_set_null(result, i, true);
+            } else if (rt == RAY_I32 || rt == RAY_DATE || rt == RAY_TIME) {
+                const int32_t* b = (const int32_t*)ray_data(rhs);
+                for (int64_t i = 0; i < len; i++)
+                    if (b[i] == 0) ray_vec_set_null(result, i, true);
+            }
+            /* F64 div-by-zero produces NaN which is handled by propagate_nulls */
+        } else {
+            /* Scalar divisor: check for zero using the correct type */
+            bool is_zero = false;
+            if (rhs->type == -RAY_F64 || rhs->type == RAY_F64)
+                is_zero = (r_f64_val == 0.0);
+            else
+                is_zero = (r_i64_val == 0);
+            if (is_zero) {
+                for (int64_t i = 0; i < len; i++)
+                    ray_vec_set_null(result, i, true);
+            }
+        }
+    }
+
     return result;
 }

@@ -14,6 +14,7 @@
 #include "lang/format.h"
 #include "core/types.h"
 #include "mem/heap.h"
+#include "table/sym.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -238,7 +239,7 @@ static inline ray_t* collection_elem(ray_t* coll, int64_t i, int *allocated) {
         case RAY_I32:       return ray_i32(((int32_t*)d)[i]);
         case RAY_I16:       return ray_i16(((int16_t*)d)[i]);
         case RAY_BOOL:      return ray_bool(((bool*)d)[i]);
-        case RAY_SYM:       return ray_sym(((int64_t*)d)[i]);
+        case RAY_SYM:       return ray_sym(ray_read_sym(d, i, coll->type, coll->attrs));
         case RAY_U8:        return ray_u8(((uint8_t*)d)[i]);
         case RAY_DATE:      return ray_date((int64_t)((int32_t*)d)[i]);
         case RAY_TIME:      return ray_time((int64_t)((int32_t*)d)[i]);
@@ -289,7 +290,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
         case RAY_DATE:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIME:      ((int32_t*)ray_data(vec))[i]   = (int32_t)elem_as_i64(elem); return 0;
         case RAY_TIMESTAMP: ((int64_t*)ray_data(vec))[i]   = elem_as_i64(elem); return 0;
-        case RAY_SYM:       ((int64_t*)ray_data(vec))[i]   = elem->i64; return 0;
+        case RAY_SYM:       ray_write_sym(ray_data(vec), i, (uint64_t)elem->i64, vec->type, vec->attrs); return 0;
         case RAY_GUID:      if (elem->obj) memcpy(((uint8_t*)ray_data(vec)) + i * 16, ray_data(elem->obj), 16); return 0;
         default: return -1;
     }

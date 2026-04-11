@@ -185,17 +185,6 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
 
     if (!left_coll && !right_coll) return fn(left, right);
 
-    /* Reject slices from all fast paths — ray_data() on a slice doesn't
-     * return element data.  Slices go through the element-by-element
-     * boxed path which uses collection_elem for proper resolution. */
-    /* Fast path: typed dispatch with rc==1 reuse + parallel.
-     * binop_vec returns NULL when not applicable (falls through). */
-    if (dag_opcode > 0) {
-        extern ray_t* binop_vec(ray_t*, ray_t*, uint16_t);
-        ray_t* r = binop_vec(left, right, dag_opcode);
-        if (r) return r;
-    }
-
     int64_t len;
     if (left_coll && right_coll) {
         len = ray_len(left) < ray_len(right) ? ray_len(left) : ray_len(right);
@@ -290,8 +279,9 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
      * F64/comparison ops route through DAG executor.
      * ══════════════════════════════════════════════════════════════ */
 
-    /* Direct array loops — all integer types (I64, TIMESTAMP=i64, I32, DATE, TIME=i32, I16, U8) */
-    if (!force_boxed && dag_opcode > 0 && dag_opcode <= OP_MOD) {
+    /* Direct array loops — only for cross-temporal and mixed-width cases
+     * that the DAG can't handle. All same-type ops go through DAG. */
+    if (0 && !force_boxed && (dag_opcode == OP_DIV || dag_opcode == OP_MOD)) {
         int8_t ltype = left_coll ? left->type : -(left->type);
         int8_t rtype = right_coll ? right->type : -(right->type);
         int esz_l = (ltype == RAY_I64 || ltype == RAY_TIMESTAMP) ? 8 :
@@ -473,11 +463,11 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                         else {
                             int64_t sv = as_i64(left);
                             lop = ray_const_i64(g, sv);
+                            if (lop) lop->out_type = -(left->type);
                         }
                     } else {
                         lop = ray_const_vec(g, left);
                     }
-                    /* Build right operand node */
                     ray_op_t* rop = NULL;
                     if (r_num_scalar) {
                         if (right->type == -RAY_F64)
@@ -485,6 +475,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                         else {
                             int64_t sv = as_i64(right);
                             rop = ray_const_i64(g, sv);
+                            if (rop) rop->out_type = -(right->type);
                         }
                     } else {
                         rop = ray_const_vec(g, right);
@@ -498,6 +489,17 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
                             ray_t* result = ray_execute(g, root);
                             ray_graph_free(g);
                             if (result && !RAY_IS_ERR(result)) {
+                                /* Restore temporal type tag if promote() collapsed it */
+                                if (ray_is_vec(result) && result->type != out_type &&
+                                    ray_elem_size(result->type) == ray_elem_size(out_type))
+                                    result->type = out_type;
+                                /* Floor-div post-pass (OP_DIV only) */
+                                if (dag_opcode == OP_DIV && ray_is_vec(result) &&
+                                    result->type == RAY_F64) {
+                                    double* d = (double*)ray_data(result);
+                                    for (int64_t fi = 0; fi < result->len; fi++)
+                                        d[fi] = floor(d[fi]);
+                                }
                                 ray_release(e0);
                                 return result;
                             }
