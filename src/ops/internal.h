@@ -220,7 +220,7 @@ static inline bool parted_str_single_pool(ray_t** segs, int64_t n_segs) {
 static inline ray_t* parted_str_append_elem(ray_t* out, ray_t* seg,
                                             int64_t local_idx,
                                             const char* pool_base) {
-    if (seg->attrs & RAY_ATTR_HAS_NULLS && ray_vec_is_null(seg, local_idx)) {
+    if ((seg->attrs & RAY_ATTR_HAS_NULLS) && ray_vec_is_null(seg, local_idx)) {
         out = ray_str_vec_append(out, "", 0);
         if (!RAY_IS_ERR(out))
             ray_vec_set_null(out, out->len - 1, true);
