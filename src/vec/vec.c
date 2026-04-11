@@ -112,6 +112,7 @@ ray_t* ray_vec_append(ray_t* vec, const void* elem) {
     if (vec->type == RAY_STR) return ray_error("type", NULL);
 
     /* COW: if shared, copy first */
+    ray_t* original = vec;
     vec = ray_cow(vec);
     if (!vec || RAY_IS_ERR(vec)) return vec;
 
@@ -126,13 +127,16 @@ ray_t* ray_vec_append(ray_t* vec, const void* elem) {
         else {
             size_t s = 32;
             while (s < new_data_size) {
-                if (s > SIZE_MAX / 2) return ray_error("oom", NULL);
+                if (s > SIZE_MAX / 2) goto fail;
                 s *= 2;
             }
             new_data_size = s;
         }
         ray_t* new_vec = ray_scratch_realloc(vec, new_data_size);
-        if (!new_vec || RAY_IS_ERR(new_vec)) return new_vec;
+        if (!new_vec || RAY_IS_ERR(new_vec)) {
+            if (vec != original) ray_release(vec);
+            return new_vec ? new_vec : ray_error("oom", NULL);
+        }
         vec = new_vec;
     }
 
@@ -142,6 +146,10 @@ ray_t* ray_vec_append(ray_t* vec, const void* elem) {
     vec->len++;
 
     return vec;
+
+fail:
+    if (vec != original) ray_release(vec);
+    return ray_error("oom", NULL);
 }
 
 /* --------------------------------------------------------------------------

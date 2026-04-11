@@ -212,6 +212,11 @@ int64_t ray_poll_run(ray_poll_t* poll)
                         break;
                     if (!sel->rx.read_fn) break;
                     ray_t* obj = sel->rx.read_fn(poll, sel);
+
+                    /* Re-validate: read_fn may have deregistered this selector */
+                    if (eid >= poll->n_sels || !poll->sels[eid]) goto next_event;
+                    sel = poll->sels[eid];
+
                     if (obj && sel->data_fn)
                         sel->data_fn(poll, sel, obj);
                     if (eid >= poll->n_sels || !poll->sels[eid]) goto next_event;

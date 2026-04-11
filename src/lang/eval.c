@@ -1370,7 +1370,7 @@ static ray_t* vm_exec(ray_t* lambda, ray_t** call_args, int64_t argc) {
     ray_t *vm_err_obj = NULL;
 
 #define DISPATCH() goto *dispatch[code[ip++]]
-#define PUSH(v)    (vm.ps[vm.sp++] = (v))
+#define PUSH(v)    do { if (vm.sp >= VM_STACK_SIZE) goto vm_error_limit; vm.ps[vm.sp++] = (v); } while(0)
 #define POP()      (vm.ps[--vm.sp])
 #define PEEK()     (vm.ps[vm.sp - 1])
 #define LOCAL(s)   (vm.ps[vm.fp + (s)])
@@ -1596,12 +1596,14 @@ op_callf: {
         switch (fn_obj->type) {
         case RAY_UNARY:
             if (fn_is_restricted(fn_obj)) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("access", "restricted"); break; }
+            if (n < 1) { result = ray_error("arity", "expected 1 arg, got 0"); break; }
             result = ((ray_unary_fn)(uintptr_t)fn_obj->i64)(fn_args[0]);
             ray_release(fn_args[0]);
             for (int32_t i = 1; i < n; i++) ray_release(fn_args[i]);
             break;
         case RAY_BINARY:
             if (fn_is_restricted(fn_obj)) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("access", "restricted"); break; }
+            if (n < 2) { for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]); result = ray_error("arity", "expected 2 args, got %d", n); break; }
             result = ((ray_binary_fn)(uintptr_t)fn_obj->i64)(fn_args[0], fn_args[1]);
             ray_release(fn_args[0]);
             ray_release(fn_args[1]);
@@ -1858,7 +1860,7 @@ vm_error_cleanup: {
 static void register_binary(const char* name, uint8_t attrs, ray_binary_fn fn) {
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_binary(name, attrs, fn);
-    ray_env_set(sym, obj);
+    assert(ray_env_set(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
@@ -1867,14 +1869,14 @@ static void register_binary_op(const char* name, uint8_t attrs, ray_binary_fn fn
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_binary(name, attrs, fn);
     RAY_FN_SET_OPCODE(obj, opcode);
-    ray_env_set(sym, obj);
+    assert(ray_env_set(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
 static void register_unary(const char* name, uint8_t attrs, ray_unary_fn fn) {
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_unary(name, attrs, fn);
-    ray_env_set(sym, obj);
+    assert(ray_env_set(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
@@ -1882,14 +1884,14 @@ static void register_unary_op(const char* name, uint8_t attrs, ray_unary_fn fn, 
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_unary(name, attrs, fn);
     RAY_FN_SET_OPCODE(obj, opcode);
-    ray_env_set(sym, obj);
+    assert(ray_env_set(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
 static void register_vary(const char* name, uint8_t attrs, ray_vary_fn fn) {
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_vary(name, attrs, fn);
-    ray_env_set(sym, obj);
+    assert(ray_env_set(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 

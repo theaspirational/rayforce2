@@ -64,6 +64,7 @@ ray_t* ray_list_append(ray_t* list, ray_t* item) {
     if (!list || RAY_IS_ERR(list)) return list;
 
     /* COW if shared */
+    ray_t* original = list;
     list = ray_cow(list);
     if (!list || RAY_IS_ERR(list)) return list;
 
@@ -76,13 +77,19 @@ ray_t* ray_list_append(ray_t* list, ray_t* item) {
         else {
             size_t s = 32;
             while (s < new_data_size) {
-                if (s > SIZE_MAX / 2) return ray_error("oom", NULL);
+                if (s > SIZE_MAX / 2) {
+                    if (list != original) ray_release(list);
+                    return ray_error("oom", NULL);
+                }
                 s *= 2;
             }
             new_data_size = s;
         }
         ray_t* new_list = ray_scratch_realloc(list, new_data_size);
-        if (!new_list || RAY_IS_ERR(new_list)) return new_list;
+        if (!new_list || RAY_IS_ERR(new_list)) {
+            if (list != original) ray_release(list);
+            return new_list ? new_list : ray_error("oom", NULL);
+        }
         list = new_list;
     }
 

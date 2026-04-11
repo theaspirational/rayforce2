@@ -584,7 +584,7 @@ ray_err_t ray_sym_save(const char* path) {
     uint32_t count = g_sym.str_count;
     size_t snap_sz = count * sizeof(ray_t*);
     ray_t* snap_block = ray_alloc(snap_sz);
-    if (!snap_block) {
+    if (!snap_block || RAY_IS_ERR(snap_block)) {
         sym_unlock();
         ray_file_unlock(lock_fd);
         ray_file_close(lock_fd);

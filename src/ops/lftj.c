@@ -212,12 +212,11 @@ void lftj_enumerate(lftj_enum_ctx_t* ctx, uint8_t depth) {
          * Use the first rel's fwd CSR to determine node range. */
         if (depth != 0) return;  /* non-root var must have bindings */
 
-        /* Find max n_nodes across all CSRs referenced in deeper vars' bindings */
+        /* Find max n_nodes across all CSRs in the query */
         int64_t n_nodes = 0;
-        for (uint8_t v = 1; v < ctx->n_vars; v++) {
+        for (uint8_t v = 0; v < ctx->n_vars; v++) {
             for (uint8_t b = 0; b < ctx->var_plans[v].n_bindings; b++) {
-                if (ctx->var_plans[v].bindings[b].bound_var == 0
-                    && ctx->var_plans[v].bindings[b].csr) {
+                if (ctx->var_plans[v].bindings[b].csr) {
                     int64_t nn = ctx->var_plans[v].bindings[b].csr->n_nodes;
                     if (nn > n_nodes) n_nodes = nn;
                 }

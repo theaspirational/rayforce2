@@ -592,9 +592,14 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 /* Concat parted segments into flat vector (cold path) */
                 int8_t base = (int8_t)RAY_PARTED_BASETYPE(col->type);
                 ray_t** sps = (ray_t**)ray_data(col);
-                uint8_t sba = (base == RAY_SYM && col->len > 0 && sps[0])
-                            ? sps[0]->attrs : 0;
                 int64_t total = ray_parted_nrows(col);
+
+                /* RAY_STR: deep-copy to handle multi-pool segments */
+                if (base == RAY_STR)
+                    return parted_flatten_str(sps, col->len, total);
+
+                uint8_t sba = (base == RAY_SYM)
+                            ? parted_first_attrs(sps, col->len) : 0;
                 ray_t* flat = typed_vec_new(base, sba, total);
                 if (!flat || RAY_IS_ERR(flat)) return ray_error("oom", NULL);
                 flat->len = total;
@@ -602,9 +607,14 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 size_t esz = (size_t)ray_sym_elem_size(base, sba);
                 int64_t off = 0;
                 for (int64_t s = 0; s < col->len; s++) {
-                    if (segs[s] && segs[s]->len > 0) {
+                    if (segs[s] && segs[s]->len > 0 &&
+                        parted_seg_esz_ok(segs[s], base, (uint8_t)esz)) {
                         memcpy((char*)ray_data(flat) + off * esz,
                                ray_data(segs[s]), (size_t)segs[s]->len * esz);
+                        off += segs[s]->len;
+                    } else if (segs[s] && segs[s]->len > 0) {
+                        memset((char*)ray_data(flat) + off * esz, 0,
+                               (size_t)segs[s]->len * esz);
                         off += segs[s]->len;
                     }
                 }
@@ -1059,22 +1069,33 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         /* Copy first n rows from parted segments */
                         int8_t base = (int8_t)RAY_PARTED_BASETYPE(col->type);
                         ray_t** sp = (ray_t**)ray_data(col);
-                        uint8_t ba = (base == RAY_SYM && col->len > 0 && sp[0])
-                                   ? sp[0]->attrs : 0;
-                        uint8_t esz = ray_sym_elem_size(base, ba);
-                        ray_t* head_vec = typed_vec_new(base, ba, n);
-                        if (head_vec && !RAY_IS_ERR(head_vec)) {
-                            head_vec->len = n;
-                            ray_t** segs = (ray_t**)ray_data(col);
-                            int64_t remaining = n;
-                            int64_t dst_off = 0;
-                            for (int64_t s = 0; s < col->len && remaining > 0; s++) {
-                                int64_t take = segs[s]->len;
-                                if (take > remaining) take = remaining;
-                                memcpy((char*)ray_data(head_vec) + dst_off * esz,
-                                       ray_data(segs[s]), (size_t)take * esz);
-                                dst_off += take;
-                                remaining -= take;
+                        ray_t* head_vec;
+                        if (base == RAY_STR) {
+                            head_vec = parted_head_str(sp, col->len, n);
+                        } else {
+                            uint8_t ba = (base == RAY_SYM)
+                                       ? parted_first_attrs(sp, col->len) : 0;
+                            uint8_t esz = ray_sym_elem_size(base, ba);
+                            head_vec = typed_vec_new(base, ba, n);
+                            if (head_vec && !RAY_IS_ERR(head_vec)) {
+                                head_vec->len = n;
+                                ray_t** segs = (ray_t**)ray_data(col);
+                                int64_t remaining = n;
+                                int64_t dst_off = 0;
+                                for (int64_t s = 0; s < col->len && remaining > 0; s++) {
+                                    if (!segs[s]) continue;
+                                    int64_t take = segs[s]->len;
+                                    if (take > remaining) take = remaining;
+                                    if (parted_seg_esz_ok(segs[s], base, esz)) {
+                                        memcpy((char*)ray_data(head_vec) + dst_off * esz,
+                                               ray_data(segs[s]), (size_t)take * esz);
+                                    } else {
+                                        memset((char*)ray_data(head_vec) + dst_off * esz,
+                                               0, (size_t)take * esz);
+                                    }
+                                    dst_off += take;
+                                    remaining -= take;
+                                }
                             }
                         }
                         result = ray_table_add_col(result, name_id, head_vec);
@@ -1155,23 +1176,34 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                         /* Copy last N rows from parted segments */
                         int8_t base = (int8_t)RAY_PARTED_BASETYPE(col->type);
                         ray_t** tsp = (ray_t**)ray_data(col);
-                        uint8_t tba = (base == RAY_SYM && col->len > 0 && tsp[0])
-                                    ? tsp[0]->attrs : 0;
-                        uint8_t esz = ray_sym_elem_size(base, tba);
-                        ray_t* tail_vec = typed_vec_new(base, tba, n);
-                        if (tail_vec && !RAY_IS_ERR(tail_vec)) {
-                            tail_vec->len = n;
-                            ray_t** segs = (ray_t**)ray_data(col);
-                            int64_t remaining = n;
-                            int64_t dst = n;
-                            for (int64_t s = col->len - 1; s >= 0 && remaining > 0; s--) {
-                                int64_t take = segs[s]->len;
-                                if (take > remaining) take = remaining;
-                                dst -= take;
-                                memcpy((char*)ray_data(tail_vec) + (size_t)dst * esz,
-                                       (char*)ray_data(segs[s]) + (size_t)(segs[s]->len - take) * esz,
-                                       (size_t)take * esz);
-                                remaining -= take;
+                        ray_t* tail_vec;
+                        if (base == RAY_STR) {
+                            tail_vec = parted_tail_str(tsp, col->len, n);
+                        } else {
+                            uint8_t tba = (base == RAY_SYM)
+                                        ? parted_first_attrs(tsp, col->len) : 0;
+                            uint8_t esz = ray_sym_elem_size(base, tba);
+                            tail_vec = typed_vec_new(base, tba, n);
+                            if (tail_vec && !RAY_IS_ERR(tail_vec)) {
+                                tail_vec->len = n;
+                                ray_t** segs = (ray_t**)ray_data(col);
+                                int64_t remaining = n;
+                                int64_t dst = n;
+                                for (int64_t s = col->len - 1; s >= 0 && remaining > 0; s--) {
+                                    if (!segs[s]) continue;
+                                    int64_t take = segs[s]->len;
+                                    if (take > remaining) take = remaining;
+                                    dst -= take;
+                                    if (parted_seg_esz_ok(segs[s], base, esz)) {
+                                        memcpy((char*)ray_data(tail_vec) + (size_t)dst * esz,
+                                               (char*)ray_data(segs[s]) + (size_t)(segs[s]->len - take) * esz,
+                                               (size_t)take * esz);
+                                    } else {
+                                        memset((char*)ray_data(tail_vec) + (size_t)dst * esz,
+                                               0, (size_t)take * esz);
+                                    }
+                                    remaining -= take;
+                                }
                             }
                         }
                         result = ray_table_add_col(result, name_id, tail_vec);
@@ -1724,12 +1756,18 @@ static bool subtree_has_default_scan(ray_graph_t* g, ray_op_t* op, bool* ok,
 static bool dag_can_stream(ray_graph_t* g, ray_op_t* root) {
     uint32_t n_words = (g->node_count + 63) / 64;
     uint64_t  stack_buf[16];                  /* covers DAGs up to 1024 nodes */
-    uint64_t* visited = (n_words <= 16) ? stack_buf : (uint64_t*)ray_sys_alloc(n_words * 8);
-    if (!visited) return false;
+    ray_t* visited_hdr = NULL;
+    uint64_t* visited;
+    if (n_words <= 16) {
+        visited = stack_buf;
+    } else {
+        visited = (uint64_t*)scratch_alloc(&visited_hdr, n_words * 8);
+        if (!visited) return false;
+    }
     memset(visited, 0, n_words * 8);
     bool ok = true;
     bool has_default_scan = subtree_has_default_scan(g, root, &ok, visited);
-    if (visited != stack_buf) ray_sys_free(visited);
+    if (visited_hdr) scratch_free(visited_hdr);
     return ok && has_default_scan;
 }
 

@@ -115,7 +115,7 @@ static bool eval_const_numeric_expr(ray_graph_t* g, ray_op_t* op,
             case OP_SUB: r = lv - rv; break;
             case OP_MUL: r = lv * rv; break;
             case OP_DIV: r = rv != 0.0 ? lv / rv : NAN; break;
-            case OP_MOD: r = rv != 0.0 ? ({ double _m = fmod(lv, rv); (_m && ((_m > 0) != (rv > 0))) ? _m + rv : _m; }) : NAN; break;
+            case OP_MOD: { if (rv != 0.0) { r = fmod(lv, rv); if (r && ((r > 0) != (rv > 0))) r += rv; } else { r = NAN; } } break;
             case OP_MIN2: r = lv < rv ? lv : rv; break;
             case OP_MAX2: r = lv > rv ? lv : rv; break;
             default: return false;
@@ -946,22 +946,36 @@ static ray_t* expr_eval_full_parted(const ray_expr_t* expr, int64_t nrows) {
     if (!ref_parted) { ray_release(out); return ray_error("nyi", NULL); }
 
     int64_t n_segs = ref_parted->len;
-    ray_t** ref_segs = (ray_t**)ray_data(ref_parted);
     uint8_t esz = ray_elem_size(expr->out_type);
     ray_pool_t* pool = ray_pool_get();
     int64_t global_off = 0;
 
     for (int64_t s = 0; s < n_segs; s++) {
-        int64_t seg_len = ref_segs[s]->len;
+        /* Determine segment length from any non-NULL parted register */
+        int64_t seg_len = 0;
+        for (uint8_t r = 0; r < expr->n_regs; r++) {
+            if (expr->regs[r].is_parted) {
+                ray_t** segs = (ray_t**)ray_data(expr->regs[r].parted_col);
+                if (segs[s]) { seg_len = segs[s]->len; break; }
+            }
+        }
         if (seg_len <= 0) continue;
 
         /* Stack-copy expr, rebind parted registers to this segment's data */
         ray_expr_t seg_expr = *expr;
+        bool seg_ok = true;
         for (uint8_t r = 0; r < seg_expr.n_regs; r++) {
             if (seg_expr.regs[r].is_parted) {
                 ray_t** segs = (ray_t**)ray_data(seg_expr.regs[r].parted_col);
+                if (!segs[s]) { seg_ok = false; break; }
                 seg_expr.regs[r].data = ray_data(segs[s]);
             }
+        }
+        if (!seg_ok) {
+            memset((char*)ray_data(out) + global_off * esz, 0,
+                   (size_t)seg_len * esz);
+            global_off += seg_len;
+            continue;
         }
 
         expr_full_ctx_t ctx = {
@@ -1400,7 +1414,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
                 case OP_SUB: r = lv - rv; break;
                 case OP_MUL: r = lv * rv; break;
                 case OP_DIV: r = rv != 0.0 ? lv / rv : NAN; break;
-                case OP_MOD: r = rv != 0.0 ? ({ double _m = fmod(lv, rv); (_m && ((_m > 0) != (rv > 0))) ? _m + rv : _m; }) : NAN; break;
+                case OP_MOD: { if (rv != 0.0) { r = fmod(lv, rv); if (r && ((r > 0) != (rv > 0))) r += rv; } else { r = NAN; } } break;
                 case OP_MIN2: r = lv < rv ? lv : rv; break;
                 case OP_MAX2: r = lv > rv ? lv : rv; break;
                 default: r = 0.0; break;
@@ -1414,11 +1428,11 @@ static void binary_range(ray_op_t* op, int8_t out_type,
                 case OP_SUB: r = (int64_t)((uint64_t)li - (uint64_t)ri); break;
                 case OP_MUL: r = (int64_t)((uint64_t)li * (uint64_t)ri); break;
                 case OP_DIV:
-                    if (ri==0 || ri==-1) { r = (ri==-1) ? (int64_t)(-(uint64_t)li) : 0; }
+                    if (ri==0 || (ri==-1 && li==((int64_t)1<<63))) { r = 0; }
                     else { r = li/ri; if ((li^ri)<0 && r*ri!=li) r--; }
                     break;
                 case OP_MOD:
-                    if (ri==0 || ri==-1) { r = 0; }
+                    if (ri==0 || (ri==-1 && li==((int64_t)1<<63))) { r = 0; }
                     else { r = li%ri; if (r && (r^ri)<0) r+=ri; }
                     break;
                 case OP_MIN2: r = li < ri ? li : ri; break;
@@ -1434,12 +1448,11 @@ static void binary_range(ray_op_t* op, int8_t out_type,
                 case OP_SUB: r = (int32_t)((uint32_t)li - (uint32_t)ri); break;
                 case OP_MUL: r = (int32_t)((uint32_t)li * (uint32_t)ri); break;
                 case OP_DIV:
-                    if (ri==0) { r = 0; }
-                    else if (ri==-1) { r = (int32_t)(-(uint32_t)li); }
+                    if (ri==0 || (ri==-1 && li==((int32_t)1<<31))) { r = 0; }
                     else { r = li/ri; if ((li^ri)<0 && r*ri!=li) r--; }
                     break;
                 case OP_MOD:
-                    if (ri==0 || ri==-1) { r = 0; }
+                    if (ri==0 || (ri==-1 && li==((int32_t)1<<31))) { r = 0; }
                     else { r = li%ri; if (r && (r^ri)<0) r+=ri; }
                     break;
                 case OP_MIN2: r = li < ri ? li : ri; break;

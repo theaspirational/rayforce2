@@ -30,17 +30,20 @@ ray_t* ray_nfo_create(const char* filename, size_t fname_len,
     if (RAY_IS_ERR(fname)) return fname;
 
     ray_t* src = ray_str(source, src_len);
-    if (RAY_IS_ERR(src)) return src;
+    if (RAY_IS_ERR(src)) { ray_release(fname); return src; }
 
     ray_t* keys = ray_vec_new(RAY_I64, 0);
-    if (RAY_IS_ERR(keys)) return keys;
+    if (RAY_IS_ERR(keys)) { ray_release(fname); ray_release(src); return keys; }
 
     ray_t* vals = ray_vec_new(RAY_I64, 0);
-    if (RAY_IS_ERR(vals)) return vals;
+    if (RAY_IS_ERR(vals)) { ray_release(fname); ray_release(src); ray_release(keys); return vals; }
 
     /* Build the nfo list: alloc 4-slot list, set elements directly. */
     ray_t* nfo = ray_alloc(4 * sizeof(ray_t*));
-    if (!nfo || RAY_IS_ERR(nfo)) return ray_error("oom", NULL);
+    if (!nfo || RAY_IS_ERR(nfo)) {
+        ray_release(fname); ray_release(src); ray_release(keys); ray_release(vals);
+        return ray_error("oom", NULL);
+    }
     nfo->type = RAY_LIST;
     nfo->len = 4;
     ray_t** elems = (ray_t**)ray_data(nfo);

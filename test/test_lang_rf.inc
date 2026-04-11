@@ -5004,7 +5004,7 @@ static MunitResult test_rf_cast(const void* params, void* fixture) {
 
     // ========== PARALLEL CAST (large vectors) ==========
     // i64 -> i32 (large vector triggers parallel processing)
-    ASSERT_EQ("(sum (as 'I32 (til 100000)))", "704982704i");  // sum of 0..99999 as i32
+    ASSERT_EQ("(sum (as 'I32 (til 100000)))", "4999950000");  // sum of i32 vec → i64 result (no truncation)
     // i64 -> f64
     ASSERT_EQ("(sum (as 'F64 (til 100000)))", "4999950000.0");
     // i32 -> i64

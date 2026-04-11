@@ -248,7 +248,7 @@ static inline ray_t* ray_buddy_of(ray_t* v, uint8_t order, uintptr_t pool_base) 
  * Slab cache for small blocks (orders 6-10, i.e., 64B-1024B)
  * -------------------------------------------------------------------------- */
 typedef struct {
-    int64_t  count;
+    uint32_t count;
     ray_t*    stack[RAY_SLAB_CACHE_SIZE];
 } ray_slab_t;
 

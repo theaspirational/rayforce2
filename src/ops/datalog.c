@@ -89,8 +89,9 @@ int dl_add_edb(dl_program_t* prog, const char* name, ray_t* table, int arity) {
     ray_t* new_tbl = ray_table_new(arity);
     for (int c = 0; c < arity; c++) {
         ray_t* col = ray_table_get_col_idx(table, c);
-        if (col)
-            new_tbl = ray_table_add_col(new_tbl, rel->col_names[c], col);
+        if (!col) { ray_release(new_tbl); return -1; }
+        new_tbl = ray_table_add_col(new_tbl, rel->col_names[c], col);
+        if (RAY_IS_ERR(new_tbl)) return -1;
     }
     rel->table = new_tbl;
 
@@ -309,6 +310,17 @@ int dl_rule_add_builtin(dl_rule_t* rule, int builtin_id, int arity) {
     return idx;
 }
 
+static int dl_expr_max_var(const dl_expr_t* e) {
+    if (!e) return -1;
+    if (e->kind == DL_EXPR_VAR) return e->var_idx;
+    if (e->kind == DL_EXPR_BINOP) {
+        int l = dl_expr_max_var(e->left);
+        int r = dl_expr_max_var(e->right);
+        return l > r ? l : r;
+    }
+    return -1;
+}
+
 int dl_rule_add_cmp_expr(dl_rule_t* rule, int cmp_op, dl_expr_t* lhs, dl_expr_t* rhs) {
     if (rule->n_body >= DL_MAX_BODY) return -1;
     int idx = rule->n_body++;
@@ -318,8 +330,11 @@ int dl_rule_add_cmp_expr(dl_rule_t* rule, int cmp_op, dl_expr_t* lhs, dl_expr_t*
     b->cmp_op = cmp_op;
     b->cmp_lhs_expr = lhs;
     b->cmp_rhs_expr = rhs;
-    /* n_vars may need updating from the expression trees.
-     * Walk the trees to find max var_idx. */
+    /* Update n_vars from the expression trees */
+    int mv = dl_expr_max_var(lhs);
+    int rv = dl_expr_max_var(rhs);
+    if (rv > mv) mv = rv;
+    if (mv + 1 > rule->n_vars) rule->n_vars = mv + 1;
     return idx;
 }
 

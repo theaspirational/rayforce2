@@ -1000,6 +1000,10 @@ ray_t* ray_ipc_send(int64_t handle, ray_t* msg)
         ray_ipc_close(handle);
         return ray_error("io", "ipc bad response header");
     }
+    if (hdr.size > 256 * 1024 * 1024) {
+        ray_ipc_close(handle);
+        return ray_error("io", "ipc response too large");
+    }
 
     uint8_t* payload = (uint8_t*)ray_sys_alloc((size_t)hdr.size);
     if (!payload) return ray_error("oom", NULL);

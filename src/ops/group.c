@@ -1973,23 +1973,38 @@ static ray_t* exec_group_parted(ray_graph_t* g, ray_op_t* op, ray_t* parted_tbl,
 
             int8_t base_type = (int8_t)RAY_PARTED_BASETYPE(col->type);
             ray_t** segs = (ray_t**)ray_data(col);
-            uint8_t base_attrs = (base_type == RAY_SYM && col->len > 0 && segs[0])
-                               ? segs[0]->attrs : 0;
-            ray_t* flat = typed_vec_new(base_type, base_attrs, total_rows);
+            ray_t* flat;
+
+            if (base_type == RAY_STR) {
+                flat = parted_flatten_str(segs, col->len, total_rows);
+            } else {
+                uint8_t base_attrs = (base_type == RAY_SYM)
+                                   ? parted_first_attrs(segs, col->len) : 0;
+                flat = typed_vec_new(base_type, base_attrs, total_rows);
+                if (!flat || RAY_IS_ERR(flat)) {
+                    ray_release(flat_tbl);
+                    return ray_error("oom", NULL);
+                }
+                flat->len = total_rows;
+
+                size_t elem_size = (size_t)ray_sym_elem_size(base_type, base_attrs);
+                int64_t offset = 0;
+                for (int32_t p = 0; p < n_parts; p++) {
+                    ray_t* seg = segs[p];
+                    if (!seg || seg->len <= 0) continue;
+                    if (parted_seg_esz_ok(seg, base_type, (uint8_t)elem_size)) {
+                        memcpy((char*)ray_data(flat) + (size_t)offset * elem_size,
+                               ray_data(seg), (size_t)seg->len * elem_size);
+                    } else {
+                        memset((char*)ray_data(flat) + (size_t)offset * elem_size,
+                               0, (size_t)seg->len * elem_size);
+                    }
+                    offset += seg->len;
+                }
+            }
             if (!flat || RAY_IS_ERR(flat)) {
                 ray_release(flat_tbl);
                 return ray_error("oom", NULL);
-            }
-            flat->len = total_rows;
-
-            size_t elem_size = (size_t)ray_sym_elem_size(base_type, base_attrs);
-            int64_t offset = 0;
-            for (int32_t p = 0; p < n_parts; p++) {
-                ray_t* seg = segs[p];
-                if (!seg || seg->len <= 0) continue;
-                memcpy((char*)ray_data(flat) + (size_t)offset * elem_size,
-                       ray_data(seg), (size_t)seg->len * elem_size);
-                offset += seg->len;
             }
 
             flat_tbl = ray_table_add_col(flat_tbl, name_id, flat);

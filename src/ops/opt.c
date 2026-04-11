@@ -65,6 +65,15 @@ static int8_t promote_type(int8_t a, int8_t b) {
 
 static void infer_type_for_node(ray_op_t* node) {
     if (node->out_type == 0 && node->opcode != OP_SCAN && node->opcode != OP_CONST) {
+        /* Comparison and boolean ops always produce BOOL */
+        if (node->opcode >= OP_EQ && node->opcode <= OP_GE) {
+            node->out_type = RAY_BOOL;
+            return;
+        }
+        if (node->opcode == OP_AND || node->opcode == OP_OR) {
+            node->out_type = RAY_BOOL;
+            return;
+        }
         if (node->arity >= 2 && node->inputs[0] && node->inputs[1]) {
             node->out_type = promote_type(node->inputs[0]->out_type,
                                            node->inputs[1]->out_type);

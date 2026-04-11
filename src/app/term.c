@@ -399,6 +399,14 @@ void ray_hist_add(ray_hist_t* hist, const char* buf, int32_t len) {
         if ((int32_t)strlen(last) == len && memcmp(last, buf, (size_t)len) == 0)
             goto reset;
     }
+    /* Evict oldest if at max entries */
+    if (hist->count >= HIST_MAX_ENTRIES) {
+        ray_t* old = RAY_BLOCK_FROM_DATA(hist->entries[0]);
+        ray_free(old);
+        memmove(hist->entries, hist->entries + 1,
+                (size_t)(hist->count - 1) * sizeof(char*));
+        hist->count--;
+    }
     /* Grow if needed */
     if (hist->count >= hist->capacity) {
         int32_t new_cap = hist->capacity * 2;

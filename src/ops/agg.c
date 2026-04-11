@@ -50,7 +50,7 @@ ray_t* ray_sum_fn(ray_t* x) {
                 int32_t* d = (int32_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
                 else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
-                return make_i32((int32_t)sum);
+                return make_i64(sum);
             } else if (x->type == RAY_I16) {
                 int16_t* d = (int16_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }

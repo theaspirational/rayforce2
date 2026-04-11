@@ -33,6 +33,25 @@
 #include <ctype.h>
 
 /* ══════════════════════════════════════════
+ * Parted segment helpers
+ * ══════════════════════════════════════════ */
+
+/* Return attrs of the first non-NULL segment (for SYM width). */
+static inline uint8_t parted_first_attrs(ray_t** segs, int64_t n_segs) {
+    for (int64_t i = 0; i < n_segs; i++)
+        if (segs[i]) return segs[i]->attrs;
+    return 0;
+}
+
+/* Check whether a parted segment's SYM width matches the expected esz.
+ * For non-SYM types this always returns true (attrs don't affect esz). */
+static inline bool parted_seg_esz_ok(ray_t* seg, int8_t base, uint8_t expected_esz) {
+    if (!seg) return false;
+    if (base != RAY_SYM) return true;
+    return ray_sym_elem_size(base, seg->attrs) == expected_esz;
+}
+
+/* ══════════════════════════════════════════
  * Global profiler
  * ══════════════════════════════════════════ */
 
@@ -170,6 +189,156 @@ static inline void col_propagate_str_pool(ray_t* dst, const ray_t* src) {
         ray_retain(owner->str_pool);
         dst->str_pool = owner->str_pool;
     }
+}
+
+/* Propagate str_pool from parted segments to gathered result.
+ * All segments must share the same pool for memcpy-gathered results
+ * to be valid. For multi-pool cases, callers must use the deep-copy
+ * gather path (parted_gather_str_col) instead. */
+static inline void col_propagate_str_pool_parted(ray_t* dst, ray_t** segs, int64_t n_segs) {
+    if (dst->type != RAY_STR) return;
+    for (int64_t i = 0; i < n_segs; i++) {
+        if (segs[i] && segs[i]->type == RAY_STR && segs[i]->str_pool) {
+            col_propagate_str_pool(dst, segs[i]);
+            return;
+        }
+    }
+}
+
+/* Check if all non-NULL STR segments share the same str_pool pointer. */
+static inline bool parted_str_single_pool(ray_t** segs, int64_t n_segs) {
+    ray_t* pool = NULL;
+    for (int64_t i = 0; i < n_segs; i++) {
+        if (!segs[i] || segs[i]->type != RAY_STR || !segs[i]->str_pool) continue;
+        if (!pool) pool = segs[i]->str_pool;
+        else if (segs[i]->str_pool != pool) return false;
+    }
+    return true;
+}
+
+/* Append one string element from a parted segment, preserving nulls. */
+static inline ray_t* parted_str_append_elem(ray_t* out, ray_t* seg,
+                                            int64_t local_idx,
+                                            const char* pool_base) {
+    if (seg->attrs & RAY_ATTR_HAS_NULLS && ray_vec_is_null(seg, local_idx)) {
+        out = ray_str_vec_append(out, "", 0);
+        if (!RAY_IS_ERR(out))
+            ray_vec_set_null(out, out->len - 1, true);
+    } else {
+        ray_str_t* elems = (ray_str_t*)ray_data(seg);
+        const char* str = ray_str_t_ptr(&elems[local_idx], pool_base);
+        out = ray_str_vec_append(out, str, elems[local_idx].len);
+    }
+    return out;
+}
+
+/* Deep-copy gather from parted RAY_STR segments by row index.
+ * Resolves each string from its source segment's pool and appends
+ * into the output vector's own pool. Safe for multi-pool segments. */
+static inline ray_t* parted_gather_str_rows(ray_t** segs, int64_t n_segs,
+                                            const int64_t* row_indices,
+                                            int64_t count) {
+    /* Build prefix-sum segment boundaries */
+    int64_t cumul = 0;
+    int64_t stack_ends[64];
+    int64_t* seg_ends = (n_segs <= 64) ? stack_ends : NULL;
+    ray_t* ends_hdr = NULL;
+    if (!seg_ends) {
+        seg_ends = (int64_t*)scratch_alloc(&ends_hdr, (size_t)n_segs * sizeof(int64_t));
+        if (!seg_ends) return ray_error("oom", NULL);
+    }
+    for (int64_t i = 0; i < n_segs; i++) {
+        cumul += (segs[i]) ? segs[i]->len : 0;
+        seg_ends[i] = cumul;
+    }
+
+    ray_t* out = ray_vec_new(RAY_STR, count);
+    if (!out || RAY_IS_ERR(out)) { if (ends_hdr) scratch_free(ends_hdr); return out; }
+
+    int64_t seg = 0;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t row = row_indices[i];
+        while (seg < n_segs - 1 && row >= seg_ends[seg]) seg++;
+        if (!segs[seg]) {
+            out = ray_str_vec_append(out, "", 0);
+            if (!RAY_IS_ERR(out))
+                ray_vec_set_null(out, out->len - 1, true);
+        } else {
+            int64_t seg_start = (seg > 0) ? seg_ends[seg - 1] : 0;
+            int64_t local = row - seg_start;
+            const char* pool_base = segs[seg]->str_pool
+                                  ? (const char*)ray_data(segs[seg]->str_pool) : NULL;
+            out = parted_str_append_elem(out, segs[seg], local, pool_base);
+        }
+        if (RAY_IS_ERR(out)) { if (ends_hdr) scratch_free(ends_hdr); return out; }
+    }
+    if (ends_hdr) scratch_free(ends_hdr);
+    return out;
+}
+
+/* Deep-copy head (first n rows) from parted RAY_STR segments. */
+static inline ray_t* parted_head_str(ray_t** segs, int64_t n_segs, int64_t n) {
+    ray_t* out = ray_vec_new(RAY_STR, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    int64_t remaining = n;
+    for (int64_t s = 0; s < n_segs && remaining > 0; s++) {
+        if (!segs[s]) continue;
+        int64_t seg_len = segs[s]->len;
+        int64_t take = (seg_len > remaining) ? remaining : seg_len;
+        const char* pool_base = segs[s]->str_pool
+                              ? (const char*)ray_data(segs[s]->str_pool) : NULL;
+        for (int64_t i = 0; i < take; i++) {
+            out = parted_str_append_elem(out, segs[s], i, pool_base);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        remaining -= take;
+    }
+    return out;
+}
+
+/* Deep-copy tail (last n rows) from parted RAY_STR segments. */
+static inline ray_t* parted_tail_str(ray_t** segs, int64_t n_segs, int64_t n) {
+    /* First pass: count total rows to find start offset */
+    int64_t total = 0;
+    for (int64_t s = 0; s < n_segs; s++)
+        if (segs[s]) total += segs[s]->len;
+    int64_t skip = total - n;
+    if (skip < 0) { skip = 0; n = total; }
+
+    ray_t* out = ray_vec_new(RAY_STR, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    int64_t skipped = 0;
+    for (int64_t s = 0; s < n_segs; s++) {
+        if (!segs[s]) continue;
+        int64_t seg_len = segs[s]->len;
+        int64_t seg_start = 0;
+        if (skipped + seg_len <= skip) { skipped += seg_len; continue; }
+        if (skipped < skip) { seg_start = skip - skipped; skipped = skip; }
+        const char* pool_base = segs[s]->str_pool
+                              ? (const char*)ray_data(segs[s]->str_pool) : NULL;
+        for (int64_t i = seg_start; i < seg_len; i++) {
+            out = parted_str_append_elem(out, segs[s], i, pool_base);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        skipped += seg_len;
+    }
+    return out;
+}
+
+/* Deep-copy flatten all rows from parted RAY_STR segments. */
+static inline ray_t* parted_flatten_str(ray_t** segs, int64_t n_segs, int64_t total) {
+    ray_t* out = ray_vec_new(RAY_STR, total);
+    if (!out || RAY_IS_ERR(out)) return out;
+    for (int64_t s = 0; s < n_segs; s++) {
+        if (!segs[s] || segs[s]->len <= 0) continue;
+        const char* pool_base = segs[s]->str_pool
+                              ? (const char*)ray_data(segs[s]->str_pool) : NULL;
+        for (int64_t i = 0; i < segs[s]->len; i++) {
+            out = parted_str_append_elem(out, segs[s], i, pool_base);
+            if (RAY_IS_ERR(out)) return out;
+        }
+    }
+    return out;
 }
 
 /* Same but from explicit type + attrs (for parted base type, etc.) */

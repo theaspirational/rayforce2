@@ -1214,7 +1214,9 @@ void ray_heap_merge(ray_heap_t* src) {
             dst->pools[dst->pool_count++] = src->pools[i];
         } else {
             /* Pool overflow: only triggers at RAY_MAX_POOLS (512 pools = 16GB+).
-             * Assert in debug builds to catch unexpected growth. */
+             * Fix ownership so blocks free to the correct heap. */
+            ray_pool_hdr_t* hdr = (ray_pool_hdr_t*)src->pools[i].base;
+            hdr->heap_id = dst->id;
             assert(0 && "ray_heap_merge: pool overflow at RAY_MAX_POOLS");
         }
     }

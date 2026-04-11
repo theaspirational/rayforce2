@@ -160,6 +160,9 @@ int64_t ray_serde_size(ray_t* obj) {
     /* Vectors — format: type(1) + attrs(1) + len(8) + data + nullmap */
     int64_t nbm = null_bitmap_size(obj);
 
+    /* Overflow guard: worst case is GUID at 16 bytes/elem */
+    if (obj->len > (INT64_MAX - 32) / 16) return -1;
+
     switch (type) {
     case RAY_BOOL:
     case RAY_U8:        return 1 + 1 + 8 + obj->len + nbm;
@@ -838,7 +841,7 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
 
 ray_t* ray_ser(ray_t* obj) {
     int64_t payload = ray_serde_size(obj);
-    if (payload <= 0) return ray_error("domain", NULL);
+    if (payload <= 0) return ray_error("domain", payload < 0 ? "serialization overflow" : NULL);
 
     int64_t total = (int64_t)sizeof(ray_ipc_header_t) + payload;
     ray_t* buf = ray_vec_new(RAY_U8, total);

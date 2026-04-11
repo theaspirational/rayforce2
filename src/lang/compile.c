@@ -209,8 +209,9 @@ static void init_sf_syms(void) {
 static void compile_list(compiler_t *c, ray_t *ast) {
     if (c->error) return;
     EMIT_DBG(c, ast);
-    ray_t **elems = (ray_t **)ray_data(ast);
     int64_t n = ray_len(ast);
+    if (n == 0) { c->error = true; return; }
+    ray_t **elems = (ray_t **)ray_data(ast);
     ray_t *head = elems[0];
 
     init_sf_syms();

@@ -601,7 +601,8 @@ static ray_t* parse_vector(ray_parser_t *p) {
                     size_t slen = ray_str_len(elems[i]);
                     svec = ray_str_vec_append(svec, s, slen);
                     if (RAY_IS_ERR(svec)) {
-                        for (int32_t j = i; j < count; j++) ray_release(elems[j]);
+                        for (int32_t j = 0; j < count; j++) ray_release(elems[j]);
+                        ray_free(vec);
                         return svec;
                     }
                 }
@@ -609,7 +610,7 @@ static ray_t* parse_vector(ray_parser_t *p) {
                 for (int32_t i = 0; i < count; i++) ray_release(elems[i]);
                 return svec;
             }
-            default: goto boxed_list;
+            default: ray_free(vec); goto boxed_list;
         }
         vec->len = count;
         for (int32_t i = 0; i < count; i++) {
