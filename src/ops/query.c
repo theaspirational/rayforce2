@@ -561,32 +561,32 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             ray_t* result = ray_table_new(1 + n_agg_out);
             if (RAY_IS_ERR(result)) { ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return result; }
 
-            /* Key column: unique keys from groups */
+            /* Key column: build a typed vector matching the source column type */
             ray_t** grp_items = (ray_t**)ray_data(groups);
             ray_t* key_col_src = ray_table_get_col(eval_tbl, by_expr->i64);
-            if (key_col_src && (key_col_src->type == RAY_SYM || RAY_IS_PARTED(key_col_src->type))) {
-                /* SYM key column: build a proper SYM vector from group keys */
-                uint8_t sym_attrs = RAY_IS_PARTED(key_col_src->type)
-                    ? parted_first_attrs((ray_t**)ray_data(key_col_src), key_col_src->len)
-                    : key_col_src->attrs;
-                ray_t* key_vec = ray_sym_vec_new(sym_attrs & RAY_SYM_W_MASK, n_groups);
-                if (key_vec && !RAY_IS_ERR(key_vec)) {
-                    key_vec->len = n_groups;
-                    for (int64_t gi = 0; gi < n_groups; gi++) {
+            {
+                int8_t ktype = key_col_src ? key_col_src->type : RAY_I64;
+                if (RAY_IS_PARTED(ktype)) ktype = (int8_t)RAY_PARTED_BASETYPE(ktype);
+                ray_t* key_vec;
+                if (ktype == RAY_STR) {
+                    key_vec = ray_vec_new(RAY_STR, n_groups);
+                    for (int64_t gi = 0; gi < n_groups && key_vec && !RAY_IS_ERR(key_vec); gi++) {
                         ray_t* k = grp_items[gi * 2];
-                        /* k is a SYM atom — k->i64 is the sym intern ID */
-                        store_typed_elem(key_vec, gi, k);
+                        const char* sp = ray_str_ptr(k);
+                        size_t slen = ray_str_len(k);
+                        key_vec = ray_str_vec_append(key_vec, sp ? sp : "", sp ? slen : 0);
                     }
-                    result = ray_table_add_col(result, by_expr->i64, key_vec);
-                    ray_release(key_vec);
-                }
-            } else if (key_col_src && key_col_src->type == RAY_STR) {
-                ray_t* key_vec = ray_vec_new(RAY_STR, n_groups);
-                for (int64_t gi = 0; gi < n_groups && key_vec && !RAY_IS_ERR(key_vec); gi++) {
-                    ray_t* k = grp_items[gi * 2];
-                    const char* sp = ray_str_ptr(k);
-                    size_t slen = ray_str_len(k);
-                    key_vec = ray_str_vec_append(key_vec, sp ? sp : "", sp ? slen : 0);
+                } else {
+                    uint8_t kattrs = key_col_src ? key_col_src->attrs : 0;
+                    if (ktype == RAY_SYM)
+                        key_vec = ray_sym_vec_new(kattrs & RAY_SYM_W_MASK, n_groups);
+                    else
+                        key_vec = ray_vec_new(ktype, n_groups);
+                    if (key_vec && !RAY_IS_ERR(key_vec)) {
+                        key_vec->len = n_groups;
+                        for (int64_t gi = 0; gi < n_groups; gi++)
+                            store_typed_elem(key_vec, gi, grp_items[gi * 2]);
+                    }
                 }
                 if (!key_vec || RAY_IS_ERR(key_vec)) {
                     for (int i = 0; i < n_agg_out; i++) { if (agg_results[i]) ray_release(agg_results[i]); }
@@ -595,21 +595,6 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 }
                 result = ray_table_add_col(result, by_expr->i64, key_vec);
                 ray_release(key_vec);
-            } else {
-                ray_t* key_list = ray_alloc(n_groups * sizeof(ray_t*));
-                if (!key_list) {
-                    for (int i = 0; i < n_agg_out; i++) { if (agg_results[i]) ray_release(agg_results[i]); }
-                    ray_release(result); ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return ray_error("oom", NULL);
-                }
-                key_list->type = RAY_LIST;
-                key_list->len = n_groups;
-                ray_t** key_out = (ray_t**)ray_data(key_list);
-                for (int64_t gi = 0; gi < n_groups; gi++) {
-                    ray_retain(grp_items[gi * 2]);
-                    key_out[gi] = grp_items[gi * 2];
-                }
-                result = ray_table_add_col(result, by_expr->i64, key_list);
-                ray_release(key_list);
             }
 
             for (int i = 0; i < n_agg_out; i++) {
