@@ -155,20 +155,20 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
             root = ray_sort_op(g, root, sort_keys, sort_descs, NULL, n_sort);
     }
 
-    /* Take (atom → DAG head/tail, vector → post-execute ray_take_fn) */
-    ray_t* take_range = NULL;
+    /* Take: always use the ray_take_fn builtin (not a DAG head/tail
+     * op).  The result table may contain LIST columns (from a non-agg
+     * scatter) that the DAG head/tail path cannot handle.  ray_take_fn
+     * recursively handles all column types including RAY_LIST. */
+    ray_t* take_val = NULL;
     if (take_val_expr) {
-        ray_t* tv = ray_eval(take_val_expr);
-        if (!tv || RAY_IS_ERR(tv)) { ray_graph_free(g); ray_release(result); return tv ? tv : ray_error("domain", NULL); }
-        if (ray_is_atom(tv) && (tv->type == -RAY_I64 || tv->type == -RAY_I32)) {
-            int64_t n_take = (tv->type == -RAY_I64) ? tv->i64 : tv->i32;
-            ray_release(tv);
-            if (n_take >= 0) root = ray_head(g, root, n_take);
-            else             root = ray_tail(g, root, -n_take);
-        } else if (ray_is_vec(tv) && (tv->type == RAY_I64 || tv->type == RAY_I32) && tv->len == 2) {
-            take_range = tv;
-        } else {
-            ray_release(tv); ray_graph_free(g); ray_release(result);
+        take_val = ray_eval(take_val_expr);
+        if (!take_val || RAY_IS_ERR(take_val)) {
+            ray_graph_free(g); ray_release(result);
+            return take_val ? take_val : ray_error("domain", NULL);
+        }
+        if (!ray_is_atom(take_val) &&
+            !(ray_is_vec(take_val) && (take_val->type == RAY_I64 || take_val->type == RAY_I32) && take_val->len == 2)) {
+            ray_release(take_val); ray_graph_free(g); ray_release(result);
             return ray_error("domain", NULL);
         }
     }
@@ -178,13 +178,13 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
     ray_graph_free(g);
     ray_release(result);
 
-    if (take_range && sorted && !RAY_IS_ERR(sorted)) {
-        ray_t* sliced = ray_take_fn(sorted, take_range);
+    if (take_val && sorted && !RAY_IS_ERR(sorted)) {
+        ray_t* sliced = ray_take_fn(sorted, take_val);
         ray_release(sorted);
-        ray_release(take_range);
+        ray_release(take_val);
         return sliced;
     }
-    if (take_range) ray_release(take_range);
+    if (take_val) ray_release(take_val);
     return sorted;
 }
 
@@ -1387,17 +1387,15 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         }
     }
 
-    /* Post-process: apply sort/take for group-by queries (output schema
-     * differs from input, so these can't be added to the original DAG).
-     * apply_sort_take builds a temporary scalar DAG, so it must run
-     * BEFORE non-agg LIST columns are added. */
-    if (by_expr && (has_sort || take_expr))
-        result = apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
-
     /* Post-process: scatter non-agg expressions into LIST columns.
-     * Runs last so apply_sort_take operates on a pure scalar table.
-     * Reads group keys from the (possibly sort/taken) result and
-     * builds row→group_id against the original tbl. */
+     * Must run BEFORE apply_sort_take so the sort clause can
+     * reference non-agg output columns (and so the take clause
+     * slices the fully-populated result).  apply_sort_take handles
+     * LIST columns in the result table (same path used by the
+     * eval_group branch).
+     *
+     * Reads group keys from the DAG result and builds row→group_id
+     * against the original tbl. */
     if (n_nonaggs > 0 && by_expr && result && !RAY_IS_ERR(result)) {
         if (ray_is_lazy(result)) result = ray_lazy_materialize(result);
         if (result && !RAY_IS_ERR(result) && result->type == RAY_TABLE) {
@@ -1661,6 +1659,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     }
 
     ray_release(tbl);
+
+    /* Post-process: apply sort/take for group-by queries.  Runs
+     * last so non-agg LIST columns are already in the result,
+     * allowing sort clauses to reference non-agg output columns. */
+    if (by_expr && (has_sort || take_expr))
+        result = apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
+
     return result;
 }
 

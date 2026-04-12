@@ -1357,6 +1357,65 @@ static MunitResult test_eval_select_by_mixed_naming(const void* params, void* fi
     return MUNIT_OK;
 }
 
+/* ---- Test: sort + take on grouped non-agg output ----
+ * Regression: apply_sort_take used the DAG ray_head op for atom
+ * take, which errors on tables containing LIST columns (the scatter
+ * output).  And scatter was ordered after apply_sort_take, so sort
+ * by non-agg output columns fell through with "nyi".  Both fixed by
+ * (a) running scatter before apply_sort_take, (b) using ray_take_fn
+ * instead of the DAG head/tail op. */
+static MunitResult test_eval_select_by_nonagg_sort_take(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* take: 1 with non-agg LIST column */
+    ray_t* r1 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s m: (+ p p) take: 1}))");
+    munit_assert_ptr_not_null(r1);
+    munit_assert_false(RAY_IS_ERR(r1));
+    munit_assert_int(r1->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(r1), ==, 1);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m1 = ray_table_get_col(r1, m_id);
+    munit_assert_ptr_not_null(m1);
+    munit_assert_int(m1->type, ==, RAY_LIST);
+    ray_release(r1);
+
+    /* desc by agg column still reorders groups correctly with a
+     * non-agg LIST column present. */
+    ray_t* r2 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s tot: (sum p) m: (+ p p) desc: 'tot}))");
+    munit_assert_ptr_not_null(r2);
+    munit_assert_false(RAY_IS_ERR(r2));
+    munit_assert_int(r2->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(r2), ==, 2);
+    int64_t s_id = ray_sym_intern("s", 1);
+    ray_t* s_col = ray_table_get_col(r2, s_id);
+    int64_t* sd = (int64_t*)ray_data(s_col);
+    /* sum(A)=90, sum(B)=120 → desc means B first, A second */
+    int64_t sym_A = ray_sym_intern("A", 1);
+    int64_t sym_B = ray_sym_intern("B", 1);
+    munit_assert_int(sd[0], ==, sym_B);
+    munit_assert_int(sd[1], ==, sym_A);
+    ray_release(r2);
+
+    /* desc by key column works and drags the non-agg LIST column
+     * along consistently. */
+    ray_t* r3 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B C A B C] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s m: (+ p p) desc: 's}))");
+    munit_assert_ptr_not_null(r3);
+    munit_assert_false(RAY_IS_ERR(r3));
+    munit_assert_int(ray_table_nrows(r3), ==, 3);
+    ray_release(r3);
+
+    return MUNIT_OK;
+}
+
 /* ---- Test: agg sub-calls inside non-agg expressions broadcast ----
  * Regression: the classifier that decides "row-aligned required vs
  * broadcast OK" looked at column refs but didn't account for
@@ -2524,6 +2583,7 @@ static MunitTest lang_tests[] = {
     { "/eval/select_by_nonagg_broadcast",    test_eval_select_by_nonagg_broadcast,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_nonagg_colref_vs_const", test_eval_select_by_nonagg_colref_vs_const, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_nonagg_with_agg_subexpr", test_eval_select_by_nonagg_with_agg_subexpr, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_nonagg_sort_take",        test_eval_select_by_nonagg_sort_take,        lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_vec_bool_order", test_eval_select_by_vec_bool_order, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_vec_str_key",    test_eval_select_by_vec_str_key,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_multi_nonagg_nyi", test_eval_select_by_multi_nonagg_nyi, lang_setup, lang_teardown, 0, NULL },
