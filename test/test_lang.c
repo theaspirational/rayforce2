@@ -1008,6 +1008,22 @@ static MunitResult test_eval_select_where_in_sym(const void* params, void* fixtu
     return MUNIT_OK;
 }
 
+/* ---- Test: `in` with mixed numeric types (F64 col vs I64 set) ----
+ * Regression: exec_in originally compared bit patterns which made
+ * `(in price_f64 [1 2 3])` match nothing.  Now we promote to double
+ * when either side is a float type and compare numerically. */
+static MunitResult test_eval_select_where_in_mixed_numeric(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [1.0 2.0 3.0 4.0]))) "
+        "(select {from: t where: (in p [1 2])}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
 /* ---- Test: WHERE with `in` and a literal i64 vector ---- */
 static MunitResult test_eval_select_where_in_i64(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -2744,6 +2760,7 @@ static MunitTest lang_tests[] = {
     { "/eval/select_where",    test_eval_select_where,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_sym",   test_eval_select_where_in_sym,   lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_i64",   test_eval_select_where_in_i64,   lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_where_in_mixed_numeric", test_eval_select_where_in_mixed_numeric, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_in",    test_eval_select_by_where_in,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_if",             test_eval_select_if,             lang_setup, lang_teardown, 0, NULL },

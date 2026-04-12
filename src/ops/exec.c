@@ -541,26 +541,27 @@ ray_t* broadcast_scalar(ray_t* atom, int64_t nrows) {
  * Evaluates each element of `col` against `set`.  Returns a RAY_BOOL
  * vector of col->len.  For OP_NOT_IN the output is inverted.
  *
- * Comparison rules:
- *   - RAY_SYM / RAY_I64 / RAY_I32 / RAY_I16 / RAY_U8 / RAY_BOOL
- *     / RAY_DATE / RAY_TIME / RAY_TIMESTAMP: integer-id equality via
- *     read_col_i64 after converting set elements into a small linear
- *     probe buffer.
- *   - RAY_F64 / RAY_F32: bitwise equality (matches kdb+ hash-equality).
- *   - RAY_STR: pool-aware ray_str_t_eq (deferred; pattern set small).
- *   - Mixed types: coerce set to col's type if possible, else type error.
- *
- * Linear scan of the probe buffer is fine for the typical |set| <= 16
- * case.  For larger sets a hash table would win, but that's a future
- * refinement — the cost is still dominated by col->len.
+ * Type handling:
+ *   - SYM ∈ SYM  → compare interned sym IDs as i64
+ *   - Integer-family (BOOL/U8/I16/I32/I64/DATE/TIME/TIMESTAMP) on both
+ *     sides → compare values as signed int64 (narrow types are
+ *     sign-extended during read).
+ *   - Any float on either side, mixed with each other or with
+ *     integer family → promote both sides to double and compare with
+ *     `==`.  This covers the common case `(in price [1 2 3])` where
+ *     price is F64 and the set literal parses as I64.
+ *   - SYM mixed with anything else → no matches (type-mismatch; we
+ *     don't error because it's a legal Rayfall comparison that
+ *     simply produces false).
+ *   - RAY_STR: deferred (returns nyi).
  * ============================================================================ */
 static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
     (void)g;
     bool negate = (op->opcode == OP_NOT_IN);
 
-    /* Broadcast a scalar `col` to a 1-element probe */
     int64_t col_len = ray_is_atom(col) ? 1 : col->len;
     int64_t set_len = ray_is_atom(set) ? 1 : set->len;
+
     if (col_len == 0 || set_len == 0) {
         ray_t* out = ray_vec_new(RAY_BOOL, col_len);
         if (!out || RAY_IS_ERR(out)) return out;
@@ -572,32 +573,40 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
     int8_t ct = ray_is_atom(col) ? (int8_t)(-col->type) : col->type;
     int8_t st = ray_is_atom(set) ? (int8_t)(-set->type) : set->type;
     if (RAY_IS_PARTED(ct)) ct = (int8_t)RAY_PARTED_BASETYPE(ct);
+    if (RAY_IS_PARTED(st)) st = (int8_t)RAY_PARTED_BASETYPE(st);
 
-    /* RAY_STR handled separately because element extraction is
-     * pool-dependent.  For now error out — STR IN can be added once
-     * the str-pool element reader is wired here. */
     if (ct == RAY_STR || st == RAY_STR)
         return ray_error("nyi", "OP_IN on RAY_STR not yet implemented");
 
-    /* Integer-id path: read col and set as int64_t via the column
-     * reader (ray_read_sym when SYM, direct load otherwise). */
+    /* Classify each side: 0=int-family, 1=float-family, 2=sym. */
+    #define CLASSIFY(t)                                                    \
+        ((t) == RAY_SYM ? 2 :                                              \
+         ((t) == RAY_F32 || (t) == RAY_F64) ? 1 : 0)
+
+    int col_class = CLASSIFY(ct);
+    int set_class = CLASSIFY(st);
+
+    /* Mixed SYM vs non-SYM → always false (type mismatch with no
+     * useful coercion).  A SYM set containing resolved sym IDs has
+     * no meaning when compared to a raw integer column. */
+    if ((col_class == 2) != (set_class == 2)) {
+        ray_t* out = ray_vec_new(RAY_BOOL, col_len);
+        if (!out || RAY_IS_ERR(out)) return out;
+        out->len = col_len;
+        memset(ray_data(out), negate ? 1 : 0, (size_t)col_len);
+        return out;
+    }
+
+    /* Float-promoted path: at least one side is float.  Read both as
+     * double and compare. */
+    int use_double = (col_class == 1 || set_class == 1);
+
     ray_t* out = ray_vec_new(RAY_BOOL, col_len);
     if (!out || RAY_IS_ERR(out)) return out;
     out->len = col_len;
     uint8_t* ob = (uint8_t*)ray_data(out);
 
-    /* Build a flat probe buffer of set values as int64_t (or float
-     * bits for float types). */
-    int64_t set_stack[32];
-    ray_t* sv_hdr = NULL;
-    int64_t* sv = set_stack;
-    if (set_len > 32) {
-        sv_hdr = ray_alloc((size_t)set_len * sizeof(int64_t));
-        if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
-        sv = (int64_t*)ray_data(sv_hdr);
-    }
-
-    #define READ_AS_I64(dst, vec, type, idx) do {                          \
+    #define READ_I64(dst, vec, type, idx) do {                             \
         const void* _d = ray_data(vec);                                    \
         switch (type) {                                                    \
         case RAY_BOOL: case RAY_U8: (dst) = ((const uint8_t*)_d)[idx]; break; \
@@ -606,38 +615,86 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
                        (dst) = ((const int32_t*)_d)[idx]; break;           \
         case RAY_I64:  case RAY_TIMESTAMP:                                 \
                        (dst) = ((const int64_t*)_d)[idx]; break;           \
-        case RAY_F32:  { uint32_t _u;                                      \
-                         memcpy(&_u, &((const float*)_d)[idx], 4);         \
-                         (dst) = (int64_t)_u; break; }                     \
-        case RAY_F64:  { int64_t _u;                                       \
-                         memcpy(&_u, &((const double*)_d)[idx], 8);        \
-                         (dst) = _u; break; }                              \
         case RAY_SYM:  (dst) = ray_read_sym(_d, (idx), (type),             \
                                             (vec)->attrs); break;          \
         default:       (dst) = 0; break;                                   \
         }                                                                  \
     } while (0)
 
-    if (ray_is_atom(set)) {
-        sv[0] = set->i64;
-    } else {
-        for (int64_t i = 0; i < set_len; i++) READ_AS_I64(sv[i], set, st, i);
-    }
+    #define READ_F64(dst, vec, type, idx) do {                             \
+        const void* _d = ray_data(vec);                                    \
+        switch (type) {                                                    \
+        case RAY_BOOL: case RAY_U8: (dst) = (double)((const uint8_t*)_d)[idx]; break; \
+        case RAY_I16:  (dst) = (double)((const int16_t*)_d)[idx]; break;   \
+        case RAY_I32:  case RAY_DATE: case RAY_TIME:                       \
+                       (dst) = (double)((const int32_t*)_d)[idx]; break;   \
+        case RAY_I64:  case RAY_TIMESTAMP:                                 \
+                       (dst) = (double)((const int64_t*)_d)[idx]; break;   \
+        case RAY_F32:  (dst) = (double)((const float*)_d)[idx]; break;     \
+        case RAY_F64:  (dst) = ((const double*)_d)[idx]; break;            \
+        default:       (dst) = 0.0; break;                                 \
+        }                                                                  \
+    } while (0)
 
-    /* Scan col and probe against sv[]. */
-    for (int64_t i = 0; i < col_len; i++) {
-        int64_t cv;
-        if (ray_is_atom(col)) cv = col->i64;
-        else READ_AS_I64(cv, col, ct, i);
-        int found = 0;
-        for (int64_t j = 0; j < set_len; j++) {
-            if (cv == sv[j]) { found = 1; break; }
+    if (use_double) {
+        double sv_stack[32];
+        ray_t* sv_hdr = NULL;
+        double* sv = sv_stack;
+        if (set_len > 32) {
+            sv_hdr = ray_alloc((size_t)set_len * sizeof(double));
+            if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
+            sv = (double*)ray_data(sv_hdr);
         }
-        ob[i] = (uint8_t)(found ^ negate);
+        if (ray_is_atom(set)) {
+            if (st == RAY_F64)  sv[0] = set->f64;
+            else                sv[0] = (double)set->i64;
+        } else {
+            for (int64_t i = 0; i < set_len; i++) READ_F64(sv[i], set, st, i);
+        }
+        for (int64_t i = 0; i < col_len; i++) {
+            double cv;
+            if (ray_is_atom(col)) {
+                if (ct == RAY_F64)  cv = col->f64;
+                else                cv = (double)col->i64;
+            } else {
+                READ_F64(cv, col, ct, i);
+            }
+            int found = 0;
+            for (int64_t j = 0; j < set_len; j++) {
+                if (cv == sv[j]) { found = 1; break; }
+            }
+            ob[i] = (uint8_t)(found ^ negate);
+        }
+        if (sv_hdr) ray_free(sv_hdr);
+    } else {
+        /* Integer-id path: both sides are int-family or both are SYM. */
+        int64_t sv_stack[32];
+        ray_t* sv_hdr = NULL;
+        int64_t* sv = sv_stack;
+        if (set_len > 32) {
+            sv_hdr = ray_alloc((size_t)set_len * sizeof(int64_t));
+            if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
+            sv = (int64_t*)ray_data(sv_hdr);
+        }
+        if (ray_is_atom(set)) sv[0] = set->i64;
+        else for (int64_t i = 0; i < set_len; i++) READ_I64(sv[i], set, st, i);
+
+        for (int64_t i = 0; i < col_len; i++) {
+            int64_t cv;
+            if (ray_is_atom(col)) cv = col->i64;
+            else READ_I64(cv, col, ct, i);
+            int found = 0;
+            for (int64_t j = 0; j < set_len; j++) {
+                if (cv == sv[j]) { found = 1; break; }
+            }
+            ob[i] = (uint8_t)(found ^ negate);
+        }
+        if (sv_hdr) ray_free(sv_hdr);
     }
 
-    #undef READ_AS_I64
-    if (sv_hdr) ray_free(sv_hdr);
+    #undef READ_I64
+    #undef READ_F64
+    #undef CLASSIFY
     return out;
 }
 
