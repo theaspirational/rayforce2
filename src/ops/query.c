@@ -318,14 +318,31 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         return ray_const_str(g, ptr, len);
     }
 
-    /* Name reference → local env first, then column scan.  The
-     * local env holds lambda / let bindings; it takes precedence
-     * over column names so formals shadow columns naturally. */
+    /* Name reference → local env first, then column scan, then
+     * global env (for set-bound constants).  Local env holds lambda
+     * / let bindings and takes precedence so formals shadow columns
+     * naturally.  Global env is a last resort — it catches cases
+     * like `(set threshold 50)` used inside a lambda body. */
     if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
         ray_op_t* bound = cexpr_env_lookup(g, expr->i64);
         if (bound) return bound;
         ray_t* s = ray_sym_str(expr->i64);
         if (!s) return NULL;
+        /* Column names on the bound table shadow global env —
+         * matches eval-level name-resolution order. */
+        if (g->table && g->table->type == RAY_TABLE &&
+            ray_table_get_col(g->table, expr->i64))
+            return ray_scan(g, ray_str_ptr(s));
+        /* Global env: atom literals / typed vectors compile as
+         * const nodes.  Lambdas only make sense as call heads
+         * and are handled in the list branch below. */
+        ray_t* gv = ray_env_get(expr->i64);
+        if (gv) {
+            if (ray_is_atom(gv)) return ray_const_atom(g, gv);
+            if (ray_is_vec(gv))  return ray_const_vec(g, gv);
+        }
+        /* Unknown name — let ray_scan produce a column-not-found
+         * error at exec time, matching prior behavior. */
         return ray_scan(g, ray_str_ptr(s));
     }
 
@@ -406,6 +423,46 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             ray_op_t* result = compile_expr_dag(g, body);
             cexpr_env_pop(g, pushed);
             return result;
+        }
+
+        /* Named-lambda call: `(f a1 a2 …)` where `f` is globally
+         * bound to a RAY_LAMBDA with a single-expression body.
+         * Inline exactly like the literal `((fn …) …)` case.  The
+         * local env takes precedence, so a formal named `f` in an
+         * enclosing lambda still shadows the global. */
+        if (head->type == -RAY_SYM && (head->attrs & RAY_ATTR_NAME) &&
+            cexpr_env_lookup(g, head->i64) == NULL) {
+            ray_t* gv = ray_env_get(head->i64);
+            if (gv && gv->type == RAY_LAMBDA) {
+                ray_t* formals  = LAMBDA_PARAMS(gv);
+                ray_t* body_lst = LAMBDA_BODY(gv);
+                if (formals && body_lst && body_lst->type == RAY_LIST &&
+                    ray_len(body_lst) == 1 &&
+                    ray_is_vec(formals) && formals->type == RAY_SYM) {
+                    int64_t nf = formals->len;
+                    if (n - 1 == nf && nf <= 16 &&
+                        g->cexpr_env_top + (int)nf <= 32) {
+                        ray_t* body = ((ray_t**)ray_data(body_lst))[0];
+                        uint32_t actual_ids[16];
+                        for (int64_t i = 0; i < nf; i++) {
+                            ray_op_t* a = compile_expr_dag(g, elems[i + 1]);
+                            if (!a) return NULL;
+                            actual_ids[i] = a->id;
+                        }
+                        int64_t* fids = (int64_t*)ray_data(formals);
+                        int pushed = 0;
+                        for (int64_t i = 0; i < nf; i++) {
+                            g->cexpr_env[g->cexpr_env_top].sym     = fids[i];
+                            g->cexpr_env[g->cexpr_env_top].node_id = actual_ids[i];
+                            g->cexpr_env_top++;
+                            pushed++;
+                        }
+                        ray_op_t* result = compile_expr_dag(g, body);
+                        cexpr_env_pop(g, pushed);
+                        return result;
+                    }
+                }
+            }
         }
 
         /* Head must be a name referencing a builtin */

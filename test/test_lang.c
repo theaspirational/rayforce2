@@ -1181,6 +1181,44 @@ static MunitResult test_eval_select_where_eq_null_literal(const void* params, vo
     return MUNIT_OK;
 }
 
+/* Named-lambda call inside a SELECT — resolves through the global
+ * env at compile time and inlines the body into the DAG, same as
+ * the literal `((fn ...) ...)` case. */
+static MunitResult test_eval_select_named_lambda(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* r = ray_eval_str(
+        "(do (set t (table [p] (list [10 20 30]))) "
+        "    (set add1 (fn [x] (+ x 1))) "
+        "    (select {from: t m: (add1 p)}))");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    munit_assert_int(ray_table_nrows(r), ==, 3);
+    ray_t* m = ray_table_get_col(r, ray_sym_intern("m", 1));
+    munit_assert_ptr_not_null(m);
+    munit_assert_int(m->type, ==, RAY_I64);
+    int64_t* md = (int64_t*)ray_data(m);
+    munit_assert_int(md[0], ==, 11);
+    munit_assert_int(md[1], ==, 21);
+    munit_assert_int(md[2], ==, 31);
+    ray_release(r);
+    return MUNIT_OK;
+}
+
+/* Global scalar binding used inside a WHERE clause — the
+ * compile-time name resolver folds `threshold` to a const node. */
+static MunitResult test_eval_select_global_scalar(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* r = ray_eval_str(
+        "(do (set t (table [p] (list [10 20 30 40 50]))) "
+        "    (set threshold 25) "
+        "    (select {from: t where: (> p threshold)}))");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    munit_assert_int(ray_table_nrows(r), ==, 3);
+    ray_release(r);
+    return MUNIT_OK;
+}
+
 /* Multi-index pivot with mixed-type composite key: (sym, i64) index,
  * sym pivot col, i64 value col.  Regression against an older bug where
  * composite-key grouping dropped or duplicated rows.  Verify each
@@ -3092,6 +3130,8 @@ static MunitTest lang_tests[] = {
     { "/eval/select_where_in_sym_vs_atom_mismatch", test_eval_select_where_in_sym_vs_atom_mismatch, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_eq_null_literal", test_eval_select_where_eq_null_literal, lang_setup, lang_teardown, 0, NULL },
     { "/eval/pivot_multi_index", test_eval_pivot_multi_index, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_named_lambda", test_eval_select_named_lambda, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_global_scalar", test_eval_select_global_scalar, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_lambda_nonagg",        test_eval_select_lambda_nonagg,        lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_lambda_where",         test_eval_select_lambda_where,         lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_lambda_agg",           test_eval_select_lambda_agg,           lang_setup, lang_teardown, 0, NULL },
