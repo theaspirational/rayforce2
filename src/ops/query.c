@@ -92,12 +92,16 @@ static dag_unary_ctor resolve_unary_dag(int64_t sym_id) {
         if (memcmp(name, "round", 5) == 0) return ray_round_op;
         if (memcmp(name, "upper", 5) == 0) return ray_upper;
         if (memcmp(name, "lower", 5) == 0) return ray_lower;
-        if (memcmp(name, "null?", 5) == 0) return ray_isnull;
     } else if (len == 6) {
         if (memcmp(name, "strlen", 6) == 0) return ray_strlen;
-    } else if (len == 7) {
-        if (memcmp(name, "is-null", 7) == 0) return ray_isnull;
     }
+    /* NOTE: no DAG wiring for nil?/isnull yet.  The eval-level
+     * builtin `nil?` (src/lang/eval.c:2029) is atom-only — it
+     * returns false when applied to a column vec.  OP_ISNULL in
+     * the DAG is per-element.  Wiring `nil?` here would diverge
+     * from the eval fallback.  A proper pass should first add an
+     * element-wise null-check builtin at eval level, then map it
+     * here. */
     return NULL;
 }
 
