@@ -560,6 +560,106 @@ static MunitResult test_partition_pruning_in(const void* params, void* data) {
 }
 
 /*
+ * Test: partition pruning must NOT fire when the key type class and
+ * the literal type class differ (SYM vs int-family).  Raw bit
+ * comparison across namespaces would produce random spurious
+ * matches — safer to skip pruning entirely and let the per-row
+ * executor filter handle it.
+ *
+ * Setup: SYM-keyed partitions with a literal i64 set.  After
+ * optimization, the scan's seg_mask must remain unset (no pruning).
+ */
+static MunitResult test_partition_pruning_in_type_mismatch(const void* params, void* data) {
+    (void)params; (void)data;
+    ray_heap_init();
+    (void)ray_sym_init();
+
+    /* Partition keys are SYM IDs (interned). */
+    int64_t s_aapl = ray_sym_intern("AAPL", 4);
+    int64_t s_goog = ray_sym_intern("GOOG", 4);
+    int64_t s_msft = ray_sym_intern("MSFT", 4);
+    int64_t s_ibm  = ray_sym_intern("IBM",  3);
+
+    ray_t* key_values = ray_vec_new(RAY_SYM, 4);
+    key_values->len = 4;
+    int64_t* kd = (int64_t*)ray_data(key_values);
+    kd[0] = s_aapl; kd[1] = s_goog; kd[2] = s_msft; kd[3] = s_ibm;
+
+    ray_t* row_counts = ray_vec_new(RAY_I64, 4);
+    row_counts->len = 4;
+    int64_t counts[] = {5, 5, 5, 5};
+    memcpy(ray_data(row_counts), counts, sizeof(counts));
+
+    ray_t* mapcommon = ray_alloc(2 * sizeof(ray_t*));
+    mapcommon->type = RAY_MAPCOMMON;
+    mapcommon->len = 2;
+    ((ray_t**)ray_data(mapcommon))[0] = key_values;
+    ((ray_t**)ray_data(mapcommon))[1] = row_counts;
+
+    ray_t* segs[4];
+    for (int i = 0; i < 4; i++) {
+        segs[i] = ray_vec_new(RAY_I64, 5);
+        segs[i]->len = 5;
+        int64_t* d = (int64_t*)ray_data(segs[i]);
+        for (int j = 0; j < 5; j++) d[j] = (i + 1) * 10 + j;
+    }
+
+    ray_t* val_parted = ray_alloc(4 * sizeof(ray_t*));
+    val_parted->type = RAY_PARTED_BASE + RAY_I64;
+    val_parted->len = 4;
+    for (int i = 0; i < 4; i++)
+        ((ray_t**)ray_data(val_parted))[i] = segs[i];
+
+    int64_t sym_pkey = ray_sym_intern("pkey", 4);
+    int64_t sym_val  = ray_sym_intern("val", 3);
+
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, sym_pkey, mapcommon);
+    tbl = ray_table_add_col(tbl, sym_val, val_parted);
+
+    ray_graph_t* g = ray_graph_new(tbl);
+    ray_op_t* scan_val  = ray_scan(g, "val");
+    ray_op_t* scan_pkey = ray_scan(g, "pkey");
+
+    /* TYPE-MISMATCH SET: sym-keyed partition, int literal set.
+     * The sym IDs for AAPL/GOOG/MSFT/IBM could randomly equal 1, 2,
+     * or 3 — and even if they don't, comparing sym IDs to raw ints
+     * is nonsensical.  Pruning must skip this predicate entirely. */
+    ray_t* set_vec = ray_vec_new(RAY_I64, 3);
+    set_vec->len = 3;
+    ((int64_t*)ray_data(set_vec))[0] = 1;
+    ((int64_t*)ray_data(set_vec))[1] = 2;
+    ((int64_t*)ray_data(set_vec))[2] = 3;
+    ray_op_t* set_const = ray_const_vec(g, set_vec);
+    ray_release(set_vec);
+
+    ray_op_t* in_pred = ray_in(g, scan_pkey, set_const);
+    ray_op_t* filt    = ray_filter(g, scan_val, in_pred);
+
+    ray_op_t* opt = ray_optimize(g, filt);
+    munit_assert_ptr_not_null(opt);
+
+    ray_op_ext_t* val_ext = NULL;
+    for (uint32_t i = 0; i < g->ext_count; i++) {
+        if (g->ext_nodes[i] && g->ext_nodes[i]->base.id == scan_val->id) {
+            val_ext = g->ext_nodes[i];
+            break;
+        }
+    }
+    munit_assert_ptr_not_null(val_ext);
+    /* Pruning must NOT have fired — seg_mask stays NULL. */
+    munit_assert_ptr_equal(val_ext->seg_mask, NULL);
+
+    ray_graph_free(g);
+    ray_release(mapcommon);
+    ray_release(val_parted);
+    ray_release(tbl);
+    ray_sym_destroy();
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/*
  * Test: partition pruning for OP_NOT_IN is the complement.
  * pkey NOT IN [100, 300] → bits 1,3 set (keys 200 and 400).
  */
@@ -655,6 +755,7 @@ static MunitTest tests[] = {
     { "/partition_pruning_mask", test_partition_pruning_mask, NULL, NULL, 0, NULL },
     { "/partition_pruning_in",   test_partition_pruning_in,   NULL, NULL, 0, NULL },
     { "/partition_pruning_not_in", test_partition_pruning_not_in, NULL, NULL, 0, NULL },
+    { "/partition_pruning_in_type_mismatch", test_partition_pruning_in_type_mismatch, NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL }
 };
 

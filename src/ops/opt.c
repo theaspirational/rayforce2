@@ -1774,6 +1774,22 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
         int64_t n_parts = key_values->len;
         if (n_parts <= 0) continue;
 
+        /* Type-class check: partition keys and the literal must live in
+         * the same value namespace, otherwise comparisons are nonsense.
+         *   - SYM keys are interned IDs; they can only be compared to
+         *     SYM set elements.
+         *   - int-family keys (I16/I32/I64/DATE/TIME/TIMESTAMP/BOOL/U8)
+         *     compare only to other int-family values.
+         *   - mixing the two is always wrong at the raw-bits level,
+         *     so skip pruning (the executor filter still runs). */
+        int8_t pkey_t = key_values->type;
+        int8_t lit_base = lit->type < 0 ? (int8_t)(-lit->type) : lit->type;
+        bool pkey_is_sym = (pkey_t == RAY_SYM);
+        bool lit_is_sym  = (lit_base == RAY_SYM);
+        if (pkey_is_sym != lit_is_sym) {
+            continue;
+        }
+
         /* Allocate seg_mask bitmap */
         uint32_t n_words = (uint32_t)((n_parts + 63) / 64);
         uint64_t* mask = (uint64_t*)ray_sys_alloc(n_words * sizeof(uint64_t));
