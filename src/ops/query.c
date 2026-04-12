@@ -287,6 +287,15 @@ static void cexpr_env_pop(ray_graph_t* g, int n) {
     if (g->cexpr_env_top < 0) g->cexpr_env_top = 0;  /* defensive */
 }
 
+/* Re-resolve a ray_op_t* by its stable node ID.  Use this whenever
+ * a pointer to an op node has been held across another DAG-building
+ * call (which may grow g->nodes via graph_alloc_node and invalidate
+ * all previously-returned pointers).  The ID is stable; only the
+ * backing address may change. */
+static inline ray_op_t* cexpr_node_by_id(ray_graph_t* g, uint32_t id) {
+    return &g->nodes[id];
+}
+
 /* Compile a Rayfall AST expression into a DAG node */
 static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     if (!expr) return NULL;
@@ -411,10 +420,16 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         if (fname_len == 4 && memcmp(fname, "xbar", 4) == 0) {
             if (n != 3) return NULL;
             ray_op_t* col = compile_expr_dag(g, elems[1]);
+            if (!col) return NULL;
+            uint32_t col_id = col->id;
             ray_op_t* bucket = compile_expr_dag(g, elems[2]);
-            if (!col || !bucket) return NULL;
+            if (!bucket) return NULL;
+            col = &g->nodes[col_id];
             /* xbar(x, b) = x - (x % b)  (stays in integer domain) */
-            return ray_sub(g, col, ray_mod(g, col, bucket));
+            ray_op_t* m = ray_mod(g, col, bucket);
+            if (!m) return NULL;
+            col = &g->nodes[col_id];
+            return ray_sub(g, col, m);
         }
 
         /* (if cond then else) — 4 elements (fn + 3 args).  Compiles
@@ -423,9 +438,15 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         if (fname_len == 2 && memcmp(fname, "if", 2) == 0) {
             if (n != 4) return NULL;
             ray_op_t* c = compile_expr_dag(g, elems[1]);
+            if (!c) return NULL;
+            uint32_t c_id = c->id;
             ray_op_t* t = compile_expr_dag(g, elems[2]);
+            if (!t) return NULL;
+            uint32_t t_id = t->id;
             ray_op_t* e = compile_expr_dag(g, elems[3]);
-            if (!c || !t || !e) return NULL;
+            if (!e) return NULL;
+            c = &g->nodes[c_id];
+            t = &g->nodes[t_id];
             return ray_if(g, c, t, e);
         }
 
@@ -433,9 +454,15 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         if (fname_len == 6 && memcmp(fname, "substr", 6) == 0) {
             if (n != 4) return NULL;
             ray_op_t* str = compile_expr_dag(g, elems[1]);
+            if (!str) return NULL;
+            uint32_t str_id = str->id;
             ray_op_t* start = compile_expr_dag(g, elems[2]);
+            if (!start) return NULL;
+            uint32_t start_id = start->id;
             ray_op_t* ln = compile_expr_dag(g, elems[3]);
-            if (!str || !start || !ln) return NULL;
+            if (!ln) return NULL;
+            str = &g->nodes[str_id];
+            start = &g->nodes[start_id];
             return ray_substr(g, str, start, ln);
         }
 
@@ -443,20 +470,30 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         if (fname_len == 7 && memcmp(fname, "replace", 7) == 0) {
             if (n != 4) return NULL;
             ray_op_t* str = compile_expr_dag(g, elems[1]);
+            if (!str) return NULL;
+            uint32_t str_id = str->id;
             ray_op_t* from = compile_expr_dag(g, elems[2]);
+            if (!from) return NULL;
+            uint32_t from_id = from->id;
             ray_op_t* to = compile_expr_dag(g, elems[3]);
-            if (!str || !from || !to) return NULL;
+            if (!to) return NULL;
+            str = &g->nodes[str_id];
+            from = &g->nodes[from_id];
             return ray_replace(g, str, from, to);
         }
 
         /* (concat a b ...) — variadic string concat. */
         if (fname_len == 6 && memcmp(fname, "concat", 6) == 0) {
             if (n < 2 || n - 1 > 16) return NULL;
-            ray_op_t* args[16];
+            uint32_t arg_ids[16];
             for (int64_t i = 1; i < n; i++) {
-                args[i - 1] = compile_expr_dag(g, elems[i]);
-                if (!args[i - 1]) return NULL;
+                ray_op_t* a = compile_expr_dag(g, elems[i]);
+                if (!a) return NULL;
+                arg_ids[i - 1] = a->id;
             }
+            ray_op_t* args[16];
+            for (int64_t i = 0; i < n - 1; i++)
+                args[i] = &g->nodes[arg_ids[i]];
             return ray_concat(g, args, (int)(n - 1));
         }
 
@@ -535,12 +572,11 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             if (n < 2) return NULL;
             /* Walk right-to-left, building an OP_IF chain.  The last
              * clause must be an `else` form. */
-            ray_op_t* chain = NULL;
+            uint32_t chain_id = UINT32_MAX;
             for (int64_t i = n - 1; i >= 1; i--) {
                 ray_t* clause = elems[i];
                 if (clause->type != RAY_LIST || ray_len(clause) != 2) return NULL;
                 ray_t** cpair = (ray_t**)ray_data(clause);
-                /* `else` tag matches name "else" */
                 int is_else = 0;
                 if (cpair[0]->type == -RAY_SYM) {
                     ray_t* ns = ray_sym_str(cpair[0]->i64);
@@ -549,18 +585,26 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
                         is_else = 1;
                 }
                 if (is_else) {
-                    if (i != n - 1) return NULL;  /* else must be last */
-                    chain = compile_expr_dag(g, cpair[1]);
-                    if (!chain) return NULL;
+                    if (i != n - 1) return NULL;
+                    ray_op_t* c = compile_expr_dag(g, cpair[1]);
+                    if (!c) return NULL;
+                    chain_id = c->id;
                 } else {
+                    if (chain_id == UINT32_MAX) return NULL;
                     ray_op_t* pred = compile_expr_dag(g, cpair[0]);
+                    if (!pred) return NULL;
+                    uint32_t pred_id = pred->id;
                     ray_op_t* body = compile_expr_dag(g, cpair[1]);
-                    if (!pred || !body || !chain) return NULL;
-                    chain = ray_if(g, pred, body, chain);
-                    if (!chain) return NULL;
+                    if (!body) return NULL;
+                    pred = &g->nodes[pred_id];
+                    ray_op_t* chain = &g->nodes[chain_id];
+                    ray_op_t* r = ray_if(g, pred, body, chain);
+                    if (!r) return NULL;
+                    chain_id = r->id;
                 }
             }
-            return chain;
+            if (chain_id == UINT32_MAX) return NULL;
+            return &g->nodes[chain_id];
         }
 
         /* Binary op? */
@@ -568,8 +612,11 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             dag_binary_ctor ctor = resolve_binary_dag(fn_sym);
             if (ctor) {
                 ray_op_t* left = compile_expr_dag(g, elems[1]);
+                if (!left) return NULL;
+                uint32_t left_id = left->id;
                 ray_op_t* right = compile_expr_dag(g, elems[2]);
-                if (!left || !right) return NULL;
+                if (!right) return NULL;
+                left = &g->nodes[left_id];
                 return ctor(g, left, right);
             }
         }
