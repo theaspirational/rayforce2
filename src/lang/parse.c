@@ -213,7 +213,7 @@ static ray_t* parse_number(ray_parser_t *p) {
         return ray_u8((uint8_t)v);
     }
 
-    /* Null literal: 0N{h,i,d,t,p,l,f,s} */
+    /* Null literal: 0N{h,i,d,t,p,l,f,s} or bare 0N (defaults to i64 null). */
     if (!is_neg && p->pos[0] == '0' && p->pos[1] == 'N') {
         switch (p->pos[2]) {
         case 'h': p->pos += 3; return ray_typed_null(-RAY_I16);
@@ -224,6 +224,14 @@ static ray_t* parse_number(ray_parser_t *p) {
         case 'l': p->pos += 3; return ray_typed_null(-RAY_I64);
         case 'f': p->pos += 3; return ray_typed_null(-RAY_F64);
         case 's': p->pos += 3; return ray_typed_null(-RAY_SYM);
+        }
+        /* Bare 0N: only if the next char is not an identifier continuation
+         * (letter/digit/underscore), else fall through to plain number. */
+        char c2 = p->pos[2];
+        if (!((c2 >= 'a' && c2 <= 'z') || (c2 >= 'A' && c2 <= 'Z') ||
+              (c2 >= '0' && c2 <= '9') || c2 == '_')) {
+            p->pos += 2;
+            return ray_typed_null(-RAY_I64);
         }
     }
 

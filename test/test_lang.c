@@ -1169,6 +1169,14 @@ static MunitResult test_eval_select_where_eq_null_literal(const void* params, vo
     munit_assert_false(RAY_IS_ERR(r2));
     munit_assert_int(ray_table_nrows(r2), ==, 3);
     ray_release(r2);
+    /* Bare `0N` (no suffix) must parse as i64 null — same match as 0Nl. */
+    ray_t* r3 = ray_eval_str(
+        "(do (set t (table ['k] (list [1 0N 3 0N 5]))) "
+        "(select {from: t where: (== k 0N)}))");
+    munit_assert_ptr_not_null(r3);
+    munit_assert_false(RAY_IS_ERR(r3));
+    munit_assert_int(ray_table_nrows(r3), ==, 2);
+    ray_release(r3);
     return MUNIT_OK;
 }
 
