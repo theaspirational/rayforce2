@@ -250,10 +250,15 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
 /* --------------------------------------------------------------------------
  * Compile-time local env helpers for lambda / let inlining.
  *
- * compile_expr_dag hangs a small stack of {formal_sym_id → op_node}
+ * compile_expr_dag hangs a small stack of {formal_sym_id → node_id}
  * bindings on the graph.  When the recursive walker encounters a
  * name reference, it checks the env first; if the name is bound,
- * return the pre-compiled op — otherwise fall through to ray_scan.
+ * return &g->nodes[node_id] — otherwise fall through to ray_scan.
+ *
+ * Store IDs, not pointers: g->nodes is a dynamically-resized array,
+ * and any realloc between push and lookup would dangle stored
+ * pointers.  IDs are stable across reallocs; we re-resolve
+ * &g->nodes[id] on every lookup.
  *
  * Shadowing is automatic: nested lambda / let pushes appear later in
  * the stack, and cexpr_env_lookup walks top-down so the innermost
@@ -265,14 +270,14 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
 static ray_op_t* cexpr_env_lookup(ray_graph_t* g, int64_t sym) {
     for (int i = g->cexpr_env_top - 1; i >= 0; i--)
         if (g->cexpr_env[i].sym == sym)
-            return g->cexpr_env[i].node;
+            return &g->nodes[g->cexpr_env[i].node_id];
     return NULL;
 }
 
 static bool cexpr_env_push(ray_graph_t* g, int64_t sym, ray_op_t* node) {
     if (g->cexpr_env_top >= 32) return false;
-    g->cexpr_env[g->cexpr_env_top].sym  = sym;
-    g->cexpr_env[g->cexpr_env_top].node = node;
+    g->cexpr_env[g->cexpr_env_top].sym     = sym;
+    g->cexpr_env[g->cexpr_env_top].node_id = node->id;
     g->cexpr_env_top++;
     return true;
 }
@@ -366,19 +371,27 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             if (nf > 16) return NULL;                  /* too many formals */
             if (g->cexpr_env_top + (int)nf > 32) return NULL; /* env overflow */
 
-            /* Compile actuals in the CURRENT env, before pushing. */
-            ray_op_t* actuals[16];
+            /* Compile actuals in the CURRENT env, before pushing.
+             * Snapshot IDs, not pointers — g->nodes can realloc
+             * between successive compile_expr_dag calls so any
+             * raw ray_op_t* saved from an earlier iteration may
+             * dangle by the time we push it. */
+            uint32_t actual_ids[16];
             for (int64_t i = 0; i < nf; i++) {
-                actuals[i] = compile_expr_dag(g, elems[i + 1]);
-                if (!actuals[i]) return NULL;
+                ray_op_t* a = compile_expr_dag(g, elems[i + 1]);
+                if (!a) return NULL;
+                actual_ids[i] = a->id;
             }
             int64_t* fids = (int64_t*)ray_data(formals);
             int pushed = 0;
             for (int64_t i = 0; i < nf; i++) {
-                if (!cexpr_env_push(g, fids[i], actuals[i])) {
+                if (g->cexpr_env_top >= 32) {
                     cexpr_env_pop(g, pushed);
                     return NULL;
                 }
+                g->cexpr_env[g->cexpr_env_top].sym     = fids[i];
+                g->cexpr_env[g->cexpr_env_top].node_id = actual_ids[i];
+                g->cexpr_env_top++;
                 pushed++;
             }
             ray_op_t* result = compile_expr_dag(g, body);
@@ -499,9 +512,9 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         }
 
         /* (let var val body) — compile `val` in the current env,
-         * push {var → val_op}, compile `body` with the extended
-         * env, pop.  Same β-reduction mechanism as lambda inlining,
-         * just with a single binding and simpler surface syntax. */
+         * bind var → val_op by ID (pointer-safe across reallocs),
+         * compile `body`, pop.  Same β-reduction mechanism as
+         * lambda inlining, just with a single binding. */
         if (fname_len == 3 && memcmp(fname, "let", 3) == 0) {
             if (n != 4) return NULL;
             ray_t* var_expr = elems[1];
@@ -509,6 +522,8 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
             int64_t var_sym = var_expr->i64;
             ray_op_t* val_op = compile_expr_dag(g, elems[2]);
             if (!val_op) return NULL;
+            /* cexpr_env_push already snapshots node->id, which is
+             * stable across subsequent graph reallocations. */
             if (!cexpr_env_push(g, var_sym, val_op)) return NULL;
             ray_op_t* body_op = compile_expr_dag(g, elems[3]);
             cexpr_env_pop(g, 1);
@@ -620,7 +635,17 @@ static int is_agg_expr(ray_t* expr);  /* defined below */
  *
  * The walker stops recursing when it hits an aggregation call: any
  * column refs inside get reduced to a scalar, so they don't drive the
- * row-alignment expectation. */
+ * row-alignment expectation.
+ *
+ * Lambda call forms `((fn ...) actuals)` are also treated as
+ * "unknown shape" — even if the actuals reference columns, the
+ * body may reduce them via an enclosed aggregation.  Returning 0
+ * here means the scatter will rely purely on the runtime shape
+ * check (row-aligned → gather, else broadcast) instead of
+ * erroring.  This loses a bug-catching net for lambda calls whose
+ * body IS row-preserving but returns a mismatched-length result,
+ * but that's a niche case compared to the common "lambda wrapping
+ * an agg" pattern users actually write. */
 static int expr_refs_row_column(ray_t* expr, ray_t* tbl) {
     if (!expr) return 0;
     if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
@@ -633,6 +658,11 @@ static int expr_refs_row_column(ray_t* expr, ray_t* tbl) {
         if (is_agg_expr(expr)) return 0;
         ray_t** elems = (ray_t**)ray_data(expr);
         int64_t n = ray_len(expr);
+        if (n == 0) return 0;
+        /* Lambda call form: head is itself a LIST.  We can't tell
+         * from the outside whether the body is row-preserving or
+         * aggregating, so surrender row-alignment enforcement. */
+        if (elems[0]->type == RAY_LIST) return 0;
         /* Skip elems[0] — it's the function name, not a column. */
         for (int64_t i = 1; i < n; i++)
             if (expr_refs_row_column(elems[i], tbl)) return 1;

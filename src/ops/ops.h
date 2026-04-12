@@ -373,13 +373,17 @@ typedef struct ray_graph {
 
     /* Compile-time local env for lambda / let inlining in
      * compile_expr_dag (src/ops/query.c).  Stack of
-     * {formal_sym_id → compiled op_node}.  Pushed on lambda
-     * call / let entry, popped on exit.  Looked up BEFORE
-     * ray_scan so formals shadow column names naturally.
-     * Weak references — ops live in g->nodes. */
+     * {formal_sym_id → node_id}.  Pushed on lambda call / let
+     * entry, popped on exit.  Looked up BEFORE ray_scan so
+     * formals shadow column names naturally.
+     *
+     * Stores node IDs (uint32_t), not raw ray_op_t* — the
+     * g->nodes array is dynamically resized, so any realloc
+     * between push and lookup would dangle stored pointers.
+     * Lookup re-resolves &g->nodes[id] on every call. */
     struct {
         int64_t    sym;
-        ray_op_t*  node;
+        uint32_t   node_id;
     } cexpr_env[32];
     int             cexpr_env_top;
 } ray_graph_t;
