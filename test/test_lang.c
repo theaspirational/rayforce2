@@ -24,6 +24,7 @@
 #include "munit.h"
 #include <rayforce.h>
 #include "mem/heap.h"
+#include "table/sym.h"
 #include <string.h>
 
 /* Forward declarations for lang modules */
@@ -1197,11 +1198,38 @@ static MunitResult test_eval_pivot_multi_index(const void* params, void* fixture
     munit_assert_false(RAY_IS_ERR(r));
     /* Expect 4 distinct (a, b) rows: (A,10), (A,20), (B,10), (B,20). */
     munit_assert_int(ray_table_nrows(r), ==, 4);
-    /* Expect 4 columns: a, b, x, y. */
+    ray_t* a_col = ray_table_get_col(r, ray_sym_intern("a", 1));
+    ray_t* b_col = ray_table_get_col(r, ray_sym_intern("b", 1));
     ray_t* x_col = ray_table_get_col(r, ray_sym_intern("x", 1));
     ray_t* y_col = ray_table_get_col(r, ray_sym_intern("y", 1));
+    munit_assert_ptr_not_null(a_col);
+    munit_assert_ptr_not_null(b_col);
     munit_assert_ptr_not_null(x_col);
     munit_assert_ptr_not_null(y_col);
+    munit_assert_int(a_col->type, ==, RAY_SYM);
+    munit_assert_int(b_col->type, ==, RAY_I64);
+    munit_assert_int(x_col->type, ==, RAY_I64);
+    munit_assert_int(y_col->type, ==, RAY_I64);
+    /* Expected per-row: (A,10)→x=100,y=0; (A,20)→x=500,y=200;
+     *                   (B,10)→x=300,y=600; (B,20)→x=0,y=400.
+     * Build a lookup (a_sym, b) → (x, y) so we're independent of
+     * group-output row order. */
+    int64_t sym_A = ray_sym_intern("A", 1);
+    int64_t sym_B = ray_sym_intern("B", 1);
+    int64_t* bd = (int64_t*)ray_data(b_col);
+    int64_t* xd = (int64_t*)ray_data(x_col);
+    int64_t* yd = (int64_t*)ray_data(y_col);
+    int seen_A10 = 0, seen_A20 = 0, seen_B10 = 0, seen_B20 = 0;
+    for (int64_t i = 0; i < 4; i++) {
+        int64_t a = (int64_t)ray_read_sym(ray_data(a_col), i, a_col->type, a_col->attrs);
+        int64_t b = bd[i];
+        if (a == sym_A && b == 10) { seen_A10 = 1; munit_assert_int(xd[i], ==, 100); munit_assert_int(yd[i], ==, 0);   }
+        else if (a == sym_A && b == 20) { seen_A20 = 1; munit_assert_int(xd[i], ==, 500); munit_assert_int(yd[i], ==, 200); }
+        else if (a == sym_B && b == 10) { seen_B10 = 1; munit_assert_int(xd[i], ==, 300); munit_assert_int(yd[i], ==, 600); }
+        else if (a == sym_B && b == 20) { seen_B20 = 1; munit_assert_int(xd[i], ==, 0);   munit_assert_int(yd[i], ==, 400); }
+        else munit_assert_true(false);
+    }
+    munit_assert_true(seen_A10 && seen_A20 && seen_B10 && seen_B20);
     ray_release(r);
     return MUNIT_OK;
 }
