@@ -1180,6 +1180,32 @@ static MunitResult test_eval_select_where_eq_null_literal(const void* params, vo
     return MUNIT_OK;
 }
 
+/* Multi-index pivot with mixed-type composite key: (sym, i64) index,
+ * sym pivot col, i64 value col.  Regression against an older bug where
+ * composite-key grouping dropped or duplicated rows.  Verify each
+ * cell is the correct sum for its (a, b, c) combination. */
+static MunitResult test_eval_pivot_multi_index(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* r = ray_eval_str(
+        "(do (set t (table [a b c v] (list "
+        "  ['A 'A 'B 'B 'A 'B] "
+        "  [10 20 10 20 20 10] "
+        "  ['x 'y 'x 'y 'x 'y] "
+        "  [100 200 300 400 500 600]))) "
+        "(pivot t ['a 'b] 'c 'v sum))");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    /* Expect 4 distinct (a, b) rows: (A,10), (A,20), (B,10), (B,20). */
+    munit_assert_int(ray_table_nrows(r), ==, 4);
+    /* Expect 4 columns: a, b, x, y. */
+    ray_t* x_col = ray_table_get_col(r, ray_sym_intern("x", 1));
+    ray_t* y_col = ray_table_get_col(r, ray_sym_intern("y", 1));
+    munit_assert_ptr_not_null(x_col);
+    munit_assert_ptr_not_null(y_col);
+    ray_release(r);
+    return MUNIT_OK;
+}
+
 static MunitResult test_eval_select_where_in_sym_vs_atom_mismatch(const void* params, void* fixture) {
     (void)params; (void)fixture;
 
@@ -3037,6 +3063,7 @@ static MunitTest lang_tests[] = {
     { "/eval/select_where_in_empty_set_nulls", test_eval_select_where_in_empty_set_nulls, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_sym_vs_atom_mismatch", test_eval_select_where_in_sym_vs_atom_mismatch, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_eq_null_literal", test_eval_select_where_eq_null_literal, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/pivot_multi_index", test_eval_pivot_multi_index, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_lambda_nonagg",        test_eval_select_lambda_nonagg,        lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_lambda_where",         test_eval_select_lambda_where,         lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_lambda_agg",           test_eval_select_lambda_agg,           lang_setup, lang_teardown, 0, NULL },
