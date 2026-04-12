@@ -1223,6 +1223,451 @@ static MunitResult test_eval_select_groupby_sort(const void* params, void* fixtu
     return MUNIT_OK;
 }
 
+/* ---- Test: select groupby + non-aggregation expression (I64 key) ----
+ * Regression: the post-DAG scatter path used ray_read_sym (SYM-only)
+ * to read plain i64 key elements, which read 1 byte instead of 8
+ * and produced wrong per-group lists. */
+static MunitResult test_eval_select_by_nonagg_i64_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['k 'p] "
+        "(list [100 200 100 200 100 200] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: k m: (+ p p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+
+    int64_t k_id = ray_sym_intern("k", 1);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* k_col = ray_table_get_col(result, k_id);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(k_col);
+    munit_assert_ptr_not_null(m_col);
+    munit_assert_int(m_col->type, ==, RAY_LIST);
+    munit_assert_int(k_col->type, ==, RAY_I64);
+    int64_t* kd = (int64_t*)ray_data(k_col);
+    munit_assert_int(kd[0], ==, 100);
+    munit_assert_int(kd[1], ==, 200);
+
+    ray_t** mi = (ray_t**)ray_data(m_col);
+    /* group 100 → rows [0 2 4] → p=[10 30 50] → (+ p p) = [20 60 100] */
+    munit_assert_int(mi[0]->len, ==, 3);
+    double* d0 = (double*)ray_data(mi[0]);
+    munit_assert_double(d0[0], ==, 20.0);
+    munit_assert_double(d0[1], ==, 60.0);
+    munit_assert_double(d0[2], ==, 100.0);
+    /* group 200 → rows [1 3 5] → p=[20 40 60] → (+ p p) = [40 80 120] */
+    munit_assert_int(mi[1]->len, ==, 3);
+    double* d1 = (double*)ray_data(mi[1]);
+    munit_assert_double(d1[0], ==, 40.0);
+    munit_assert_double(d1[1], ==, 80.0);
+    munit_assert_double(d1[2], ==, 120.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: select groupby + non-agg with U8 key ----
+ * Regression: KEY_READ macro's default case returned 0, so U8 keys
+ * collapsed every row into a single (wrong) group. */
+static MunitResult test_eval_select_by_nonagg_u8_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['k 'p] "
+        "(list (as 'U8 [100 200 100 200 100 200]) "
+        "      [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: k m: (+ p p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    munit_assert_int(m_col->type, ==, RAY_LIST);
+
+    ray_t** mi = (ray_t**)ray_data(m_col);
+    munit_assert_int(mi[0]->len, ==, 3);
+    munit_assert_int(mi[1]->len, ==, 3);
+    double* d0 = (double*)ray_data(mi[0]);
+    munit_assert_double(d0[0], ==, 20.0);
+    munit_assert_double(d0[1], ==, 60.0);
+    munit_assert_double(d0[2], ==, 100.0);
+    double* d1 = (double*)ray_data(mi[1]);
+    munit_assert_double(d1[0], ==, 40.0);
+    munit_assert_double(d1[1], ==, 80.0);
+    munit_assert_double(d1[2], ==, 120.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: empty groupby non-agg result keeps full schema ----
+ * Regression: when WHERE filters all rows out, the scatter block
+ * skipped adding the non-agg LIST column, producing a table with
+ * only the key column. */
+static MunitResult test_eval_select_by_nonagg_empty(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['k 'p] (list [100 200] [10.0 20.0]))) "
+        "(select {from: t where: (> p 1000.0) by: k m: (+ p p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 0);
+    /* Must still have both key and non-agg columns */
+    munit_assert_int(ray_table_ncols(result), ==, 2);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    munit_assert_int(m_col->type, ==, RAY_LIST);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: mixed agg + non-agg column naming ----
+ * Regression: when a non-agg column was declared before an agg in
+ * the dict, the rename step swapped names because the DAG result
+ * layout is [keys, aggs..., nonaggs...] regardless of dict order. */
+static MunitResult test_eval_select_by_mixed_naming(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Non-agg listed FIRST in the dict */
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s m: (+ p p) tot: (sum p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+
+    int64_t m_id   = ray_sym_intern("m", 1);
+    int64_t tot_id = ray_sym_intern("tot", 3);
+    ray_t* m_col   = ray_table_get_col(result, m_id);
+    ray_t* tot_col = ray_table_get_col(result, tot_id);
+    munit_assert_ptr_not_null(m_col);
+    munit_assert_ptr_not_null(tot_col);
+    /* m must be the LIST (non-agg), tot must be the F64 sum */
+    munit_assert_int(m_col->type,   ==, RAY_LIST);
+    munit_assert_int(tot_col->type, ==, RAY_F64);
+    double* td = (double*)ray_data(tot_col);
+    munit_assert_double(td[0], ==, 90.0);
+    munit_assert_double(td[1], ==, 120.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: agg sub-calls inside non-agg expressions broadcast ----
+ * Regression: the classifier that decides "row-aligned required vs
+ * broadcast OK" looked at column refs but didn't account for
+ * aggregation subexpressions that collapse column refs into scalars.
+ * `(+ 1 (sum p))` references p but (sum p) reduces it to a scalar,
+ * so the overall result is 1-wide and must broadcast. */
+static MunitResult test_eval_select_by_nonagg_with_agg_subexpr(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s m: (+ 1 (sum p))}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    munit_assert_int(m_col->type, ==, RAY_LIST);
+    ray_t** mi = (ray_t**)ray_data(m_col);
+    /* Full-table sum of p is 210; (+ 1 210) = 211.  Broadcast into
+     * every group cell — NOT gathered or errored. */
+    munit_assert_double(mi[0]->f64, ==, 211.0);
+    munit_assert_double(mi[1]->f64, ==, 211.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: non-agg classification — column refs vs constants ----
+ * Regression: the scatter needs to distinguish between expressions
+ * that reference table columns (row-aligned, gather per group) and
+ * pure constants (broadcast as-is).  Broadcasting a row-derived
+ * result whose length doesn't match nrows would hide bugs. */
+static MunitResult test_eval_select_by_nonagg_colref_vs_const(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Case 1: column reference + row-aligned result → gather */
+    ray_t* r1 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s m: (+ p p)}))");
+    munit_assert_false(RAY_IS_ERR(r1));
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m1 = ray_table_get_col(r1, m_id);
+    munit_assert_int(m1->type, ==, RAY_LIST);
+    ray_t** m1i = (ray_t**)ray_data(m1);
+    munit_assert_int(m1i[0]->len, ==, 3);  /* A: 3 rows */
+    munit_assert_int(m1i[1]->len, ==, 3);  /* B: 3 rows */
+    double* ga = (double*)ray_data(m1i[0]);
+    munit_assert_double(ga[0], ==, 20.0);
+    ray_release(r1);
+
+    /* Case 2: constant (list 99 88) → broadcast */
+    ray_t* r2 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s m: (list 99 88)}))");
+    munit_assert_false(RAY_IS_ERR(r2));
+    ray_t* m2 = ray_table_get_col(r2, m_id);
+    munit_assert_int(m2->type, ==, RAY_LIST);
+    ray_t** m2i = (ray_t**)ray_data(m2);
+    /* Each cell holds the full 2-element broadcast */
+    munit_assert_int(m2i[0]->len, ==, 2);
+    munit_assert_int(m2i[1]->len, ==, 2);
+    ray_release(r2);
+
+    /* Case 3: chained column-ref (passthrough LIST col m) → gather */
+    ray_t* r3 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(set r (select {from: t by: s m: (+ p p)})) "
+        "(select {from: r by: s m2: m}))");
+    munit_assert_false(RAY_IS_ERR(r3));
+    int64_t m2_id = ray_sym_intern("m2", 2);
+    ray_t* col3 = ray_table_get_col(r3, m2_id);
+    munit_assert_int(col3->type, ==, RAY_LIST);
+    ray_t** c3i = (ray_t**)ray_data(col3);
+    /* Each cell is a 1-element LIST containing that group's own
+     * inner vec — NOT the full 2-element LIST duplicated. */
+    munit_assert_int(c3i[0]->len, ==, 1);
+    munit_assert_int(c3i[1]->len, ==, 1);
+    ray_t* ia = ((ray_t**)ray_data(c3i[0]))[0];
+    ray_t* ib = ((ray_t**)ray_data(c3i[1]))[0];
+    munit_assert_int(ia->len, ==, 3);  /* group A's inner vec */
+    munit_assert_int(ib->len, ==, 3);  /* group B's inner vec */
+    /* And the two inner vecs must differ */
+    double* a = (double*)ray_data(ia);
+    double* b = (double*)ray_data(ib);
+    munit_assert_double(a[0], ==, 20.0);
+    munit_assert_double(b[0], ==, 40.0);
+    ray_release(r3);
+    return MUNIT_OK;
+}
+
+/* ---- Test: non-agg literal/short vectors broadcast ----
+ * Regression: the over-eager fix that routed all RAY_LIST results
+ * through gather_by_idx also swept up literal lists like `[1 2]`
+ * whose length doesn't match nrows, reading out of bounds.  Correct
+ * semantics: anything whose length doesn't match the input row
+ * count broadcasts as-is into every group cell. */
+static MunitResult test_eval_select_by_nonagg_broadcast(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* DAG path: sym key, literal vector shorter than nrows */
+    ray_t* r1 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s m: [1 2]}))");
+    munit_assert_ptr_not_null(r1);
+    munit_assert_false(RAY_IS_ERR(r1));
+    munit_assert_int(r1->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(r1), ==, 2);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m1 = ray_table_get_col(r1, m_id);
+    munit_assert_int(m1->type, ==, RAY_LIST);
+    ray_t** m1i = (ray_t**)ray_data(m1);
+    /* Each cell holds the whole 2-element literal */
+    munit_assert_int(m1i[0]->len, ==, 2);
+    munit_assert_int(m1i[1]->len, ==, 2);
+    int64_t* a = (int64_t*)ray_data(m1i[0]);
+    int64_t* b = (int64_t*)ray_data(m1i[1]);
+    munit_assert_int(a[0], ==, 1); munit_assert_int(a[1], ==, 2);
+    munit_assert_int(b[0], ==, 1); munit_assert_int(b[1], ==, 2);
+    ray_release(r1);
+
+    /* eval_group path: STR key forces eval-level, literal list */
+    ray_t* r2 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list (as 'STR [\"A\" \"B\" \"A\" \"B\"]) [10.0 20.0 30.0 40.0]))) "
+        "(select {from: t by: s m: [7 8 9]}))");
+    munit_assert_ptr_not_null(r2);
+    munit_assert_false(RAY_IS_ERR(r2));
+    munit_assert_int(ray_table_nrows(r2), ==, 2);
+    ray_t* m2 = ray_table_get_col(r2, m_id);
+    munit_assert_int(m2->type, ==, RAY_LIST);
+    ray_t** m2i = (ray_t**)ray_data(m2);
+    munit_assert_int(m2i[0]->len, ==, 3);
+    munit_assert_int(m2i[1]->len, ==, 3);
+    int64_t* c = (int64_t*)ray_data(m2i[0]);
+    munit_assert_int(c[0], ==, 7);
+    munit_assert_int(c[1], ==, 8);
+    munit_assert_int(c[2], ==, 9);
+    ray_release(r2);
+
+    return MUNIT_OK;
+}
+
+/* ---- Test: eval_group path (STR key) gathers LIST non-agg ----
+ * Regression: the eval_group non-agg branch had its own
+ * `if (ray_is_vec(full_val))` check that excluded RAY_LIST and
+ * duplicated the whole list into every group.  This only surfaced
+ * when the group key column forced use_eval_group (STR/LIST/GUID),
+ * so the earlier fix to the DAG scatter missed it. */
+static MunitResult test_eval_select_by_str_nonagg_list_col(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do "
+        " (set t (table ['s 'p] "
+        "   (list (as 'STR [\"A\" \"B\" \"C\" \"A\" \"B\" \"C\"]) "
+        "         [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        " (set r (select {from: t by: s m: (+ p p)})) "
+        " (select {from: r by: [s] m2: m}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 3);
+    int64_t m2_id = ray_sym_intern("m2", 2);
+    ray_t* m2 = ray_table_get_col(result, m2_id);
+    munit_assert_ptr_not_null(m2);
+    munit_assert_int(m2->type, ==, RAY_LIST);
+    ray_t** m2i = (ray_t**)ray_data(m2);
+    /* Each cell is a 1-element LIST holding that group's own inner
+     * vec — the three cells must have different inner values. */
+    munit_assert_int(m2i[0]->len, ==, 1);
+    munit_assert_int(m2i[1]->len, ==, 1);
+    munit_assert_int(m2i[2]->len, ==, 1);
+    ray_t* ia = ((ray_t**)ray_data(m2i[0]))[0];
+    ray_t* ib = ((ray_t**)ray_data(m2i[1]))[0];
+    ray_t* ic = ((ray_t**)ray_data(m2i[2]))[0];
+    double* a = (double*)ray_data(ia);
+    double* b = (double*)ray_data(ib);
+    double* c = (double*)ray_data(ic);
+    /* A: (+ p p) on rows 0,3 → [20, 80] */
+    munit_assert_int(ia->len, ==, 2);
+    munit_assert_double(a[0], ==, 20.0);
+    munit_assert_double(a[1], ==, 80.0);
+    /* B: rows 1,4 → [40, 100] */
+    munit_assert_int(ib->len, ==, 2);
+    munit_assert_double(b[0], ==, 40.0);
+    munit_assert_double(b[1], ==, 100.0);
+    /* C: rows 2,5 → [60, 120] */
+    munit_assert_int(ic->len, ==, 2);
+    munit_assert_double(c[0], ==, 60.0);
+    munit_assert_double(c[1], ==, 120.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: non-agg scatter gathers LIST columns per group ----
+ * Regression: the scatter's `ray_is_vec` check excluded RAY_LIST
+ * (type 0), so LIST-valued non-agg results were retained and
+ * duplicated into every group instead of gathered. */
+static MunitResult test_eval_select_by_nonagg_list_col(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do "
+        " (set t (table ['s 'p] "
+        "   (list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        " (set r (select {from: t by: s m: (+ p p)})) "
+        " (select {from: r by: s m2: m}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    int64_t m2_id = ray_sym_intern("m2", 2);
+    ray_t* m2 = ray_table_get_col(result, m2_id);
+    munit_assert_ptr_not_null(m2);
+    munit_assert_int(m2->type, ==, RAY_LIST);
+    ray_t** m2i = (ray_t**)ray_data(m2);
+    /* Each cell should be a 1-element LIST holding that group's
+     * original list, NOT the full LIST column duplicated. */
+    munit_assert_int(m2i[0]->type, ==, RAY_LIST);
+    munit_assert_int(m2i[0]->len,  ==, 1);
+    munit_assert_int(m2i[1]->type, ==, RAY_LIST);
+    munit_assert_int(m2i[1]->len,  ==, 1);
+    /* The inner vectors must differ between groups */
+    ray_t* inner_a = ((ray_t**)ray_data(m2i[0]))[0];
+    ray_t* inner_b = ((ray_t**)ray_data(m2i[1]))[0];
+    munit_assert_int(inner_a->len, ==, 3);
+    munit_assert_int(inner_b->len, ==, 3);
+    double* a = (double*)ray_data(inner_a);
+    double* b = (double*)ray_data(inner_b);
+    munit_assert_double(a[0], ==, 20.0);  /* group A: (+ p p) = [20,60,100] */
+    munit_assert_double(a[2], ==, 100.0);
+    munit_assert_double(b[0], ==, 40.0);  /* group B: (+ p p) = [40,80,120] */
+    munit_assert_double(b[2], ==, 120.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: `by: [b]` single-element vector with BOOL key ----
+ * Regression: the BOOL first-occurrence reorder only recognized
+ * scalar `by_expr->type == -RAY_SYM`.  For `by: [b]` the reorder
+ * was skipped and the result came out in radix order (false,true)
+ * instead of first-occurrence order. */
+static MunitResult test_eval_select_by_vec_bool_order(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* First value is true → expect true row first in result */
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['b 'p] "
+        "(list [true false true false true] [10.0 20.0 30.0 40.0 50.0]))) "
+        "(select {from: t by: [b] tot: (sum p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    int64_t b_id = ray_sym_intern("b", 1);
+    ray_t* b_col = ray_table_get_col(result, b_id);
+    munit_assert_ptr_not_null(b_col);
+    munit_assert_int(b_col->type, ==, RAY_BOOL);
+    bool* bd = (bool*)ray_data(b_col);
+    munit_assert_true(bd[0]);   /* true first (first-occurrence) */
+    munit_assert_false(bd[1]);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: `by: [s]` single-element vector with STR key ----
+ * Regression: the use_eval_group check only looked at scalar
+ * -RAY_SYM by_expr, so `by: [s]` slipped through to the DAG path;
+ * the eval_group path then used by_expr->i64 (garbage for vector
+ * form) and crashed inside ray_group_fn. */
+static MunitResult test_eval_select_by_vec_str_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list (as 'STR [\"A\" \"B\" \"A\" \"B\"]) [10.0 20.0 30.0 40.0]))) "
+        "(select {from: t by: [s] m: (+ p p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    /* Result must have both key and non-agg columns */
+    munit_assert_int(ray_table_ncols(result), ==, 2);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    munit_assert_int(m_col->type, ==, RAY_LIST);
+    ray_t** mi = (ray_t**)ray_data(m_col);
+    /* group "A" → rows [0,2] → p=[10,30] → (+ p p)=[20,60] */
+    munit_assert_int(mi[0]->len, ==, 2);
+    double* d0 = (double*)ray_data(mi[0]);
+    munit_assert_double(d0[0], ==, 20.0);
+    munit_assert_double(d0[1], ==, 60.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: multi-key by + non-agg returns nyi error ---- */
+static MunitResult test_eval_select_by_multi_nonagg_nyi(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['a 'b 'p] "
+        "(list [X X Y] [1 2 1] [10.0 20.0 30.0]))) "
+        "(select {from: t by: [a b] m: (+ p p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_true(RAY_IS_ERR(result));
+    ray_release(result);
+    return MUNIT_OK;
+}
+
 /* ---- Test: update ---- */
 static MunitResult test_eval_update(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -2070,6 +2515,18 @@ static MunitTest lang_tests[] = {
     { "/eval/select_combined", test_eval_select_combined, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_asc_multi", test_eval_select_asc_multi, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_groupby_sort", test_eval_select_groupby_sort, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_nonagg_i64_key", test_eval_select_by_nonagg_i64_key, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_nonagg_u8_key",  test_eval_select_by_nonagg_u8_key,  lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_nonagg_empty",   test_eval_select_by_nonagg_empty,   lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_mixed_naming",   test_eval_select_by_mixed_naming,   lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_nonagg_list_col", test_eval_select_by_nonagg_list_col, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_str_nonagg_list_col", test_eval_select_by_str_nonagg_list_col, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_nonagg_broadcast",    test_eval_select_by_nonagg_broadcast,    lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_nonagg_colref_vs_const", test_eval_select_by_nonagg_colref_vs_const, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_nonagg_with_agg_subexpr", test_eval_select_by_nonagg_with_agg_subexpr, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_vec_bool_order", test_eval_select_by_vec_bool_order, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_vec_str_key",    test_eval_select_by_vec_str_key,    lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_multi_nonagg_nyi", test_eval_select_by_multi_nonagg_nyi, lang_setup, lang_teardown, 0, NULL },
     { "/eval/update",          test_eval_update,          lang_setup, lang_teardown, 0, NULL },
     { "/eval/update_no_where", test_eval_update_no_where, lang_setup, lang_teardown, 0, NULL },
     { "/eval/update_str_masked", test_eval_update_str_masked, lang_setup, lang_teardown, 0, NULL },
