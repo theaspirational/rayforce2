@@ -1416,6 +1416,46 @@ static MunitResult test_eval_select_by_nonagg_sort_take(const void* params, void
     return MUNIT_OK;
 }
 
+/* ---- Test: grouped take clamps, not wraps ----
+ * Regression: switching to ray_take_fn for group-by take briefly
+ * brought kdb+-style wrap/pad semantics — `take: 5` with 2 groups
+ * produced 5 rows (A,B,A,B,A).  Group-by must clamp to min(n, nrows). */
+static MunitResult test_eval_select_by_take_clamps(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* agg-only: 2 groups, take: 5 → should clamp to 2 */
+    ray_t* r1 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B] [10.0 20.0 30.0 40.0]))) "
+        "(select {from: t by: s tot: (sum p) take: 5}))");
+    munit_assert_ptr_not_null(r1);
+    munit_assert_false(RAY_IS_ERR(r1));
+    munit_assert_int(r1->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(r1), ==, 2);
+    ray_release(r1);
+
+    /* with non-agg LIST column: same clamp behavior */
+    ray_t* r2 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B] [10.0 20.0 30.0 40.0]))) "
+        "(select {from: t by: s m: (+ p p) take: 5}))");
+    munit_assert_ptr_not_null(r2);
+    munit_assert_false(RAY_IS_ERR(r2));
+    munit_assert_int(ray_table_nrows(r2), ==, 2);
+    ray_release(r2);
+
+    /* take: -3 (tail) with 2 groups → clamp to 2 */
+    ray_t* r3 = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B] [10.0 20.0 30.0 40.0]))) "
+        "(select {from: t by: s tot: (sum p) take: -3}))");
+    munit_assert_ptr_not_null(r3);
+    munit_assert_false(RAY_IS_ERR(r3));
+    munit_assert_int(ray_table_nrows(r3), ==, 2);
+    ray_release(r3);
+
+    return MUNIT_OK;
+}
+
 /* ---- Test: agg sub-calls inside non-agg expressions broadcast ----
  * Regression: the classifier that decides "row-aligned required vs
  * broadcast OK" looked at column refs but didn't account for
@@ -2584,6 +2624,7 @@ static MunitTest lang_tests[] = {
     { "/eval/select_by_nonagg_colref_vs_const", test_eval_select_by_nonagg_colref_vs_const, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_nonagg_with_agg_subexpr", test_eval_select_by_nonagg_with_agg_subexpr, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_nonagg_sort_take",        test_eval_select_by_nonagg_sort_take,        lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_take_clamps",             test_eval_select_by_take_clamps,             lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_vec_bool_order", test_eval_select_by_vec_bool_order, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_vec_str_key",    test_eval_select_by_vec_str_key,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_multi_nonagg_nyi", test_eval_select_by_multi_nonagg_nyi, lang_setup, lang_teardown, 0, NULL },

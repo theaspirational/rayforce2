@@ -155,20 +155,28 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
             root = ray_sort_op(g, root, sort_keys, sort_descs, NULL, n_sort);
     }
 
-    /* Take: always use the ray_take_fn builtin (not a DAG head/tail
-     * op).  The result table may contain LIST columns (from a non-agg
-     * scatter) that the DAG head/tail path cannot handle.  ray_take_fn
-     * recursively handles all column types including RAY_LIST. */
-    ray_t* take_val = NULL;
+    /* Take: avoid the DAG ray_head/ray_tail op — it can't handle
+     * tables with LIST columns (from non-agg scatter).  Use
+     * ray_take_fn, but convert the atom form into a `[start amount]`
+     * range so we get CLAMP semantics (kdb+-style group-by take),
+     * not the wrap/pad behavior of atom-n take on a short table. */
+    ray_t* take_range   = NULL;    /* [start amount] literal form */
+    int    take_is_atom = 0;
+    int64_t atom_n      = 0;
     if (take_val_expr) {
-        take_val = ray_eval(take_val_expr);
-        if (!take_val || RAY_IS_ERR(take_val)) {
+        ray_t* tv = ray_eval(take_val_expr);
+        if (!tv || RAY_IS_ERR(tv)) {
             ray_graph_free(g); ray_release(result);
-            return take_val ? take_val : ray_error("domain", NULL);
+            return tv ? tv : ray_error("domain", NULL);
         }
-        if (!ray_is_atom(take_val) &&
-            !(ray_is_vec(take_val) && (take_val->type == RAY_I64 || take_val->type == RAY_I32) && take_val->len == 2)) {
-            ray_release(take_val); ray_graph_free(g); ray_release(result);
+        if (ray_is_atom(tv) && (tv->type == -RAY_I64 || tv->type == -RAY_I32)) {
+            atom_n = (tv->type == -RAY_I64) ? tv->i64 : tv->i32;
+            take_is_atom = 1;
+            ray_release(tv);
+        } else if (ray_is_vec(tv) && (tv->type == RAY_I64 || tv->type == RAY_I32) && tv->len == 2) {
+            take_range = tv;
+        } else {
+            ray_release(tv); ray_graph_free(g); ray_release(result);
             return ray_error("domain", NULL);
         }
     }
@@ -178,13 +186,41 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
     ray_graph_free(g);
     ray_release(result);
 
-    if (take_val && sorted && !RAY_IS_ERR(sorted)) {
-        ray_t* sliced = ray_take_fn(sorted, take_val);
+    if (take_is_atom && sorted && !RAY_IS_ERR(sorted)) {
+        /* Build [start, amount] so ray_take_fn uses its range
+         * branch, which clamps to the available length. */
+        int64_t nrows = (sorted->type == RAY_TABLE)
+                      ? ray_table_nrows(sorted)
+                      : (ray_is_vec(sorted) ? sorted->len : 0);
+        int64_t start, amount;
+        if (atom_n >= 0) {
+            start  = 0;
+            amount = atom_n < nrows ? atom_n : nrows;
+        } else {
+            int64_t want = -atom_n;
+            amount = want < nrows ? want : nrows;
+            start  = nrows - amount;
+        }
+        ray_t* rng = ray_vec_new(RAY_I64, 2);
+        if (!rng || RAY_IS_ERR(rng)) {
+            ray_release(sorted);
+            return rng ? rng : ray_error("oom", NULL);
+        }
+        ((int64_t*)ray_data(rng))[0] = start;
+        ((int64_t*)ray_data(rng))[1] = amount;
+        rng->len = 2;
+        ray_t* sliced = ray_take_fn(sorted, rng);
         ray_release(sorted);
-        ray_release(take_val);
+        ray_release(rng);
         return sliced;
     }
-    if (take_val) ray_release(take_val);
+    if (take_range && sorted && !RAY_IS_ERR(sorted)) {
+        ray_t* sliced = ray_take_fn(sorted, take_range);
+        ray_release(sorted);
+        ray_release(take_range);
+        return sliced;
+    }
+    if (take_range) ray_release(take_range);
     return sorted;
 }
 
