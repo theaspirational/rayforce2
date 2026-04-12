@@ -1293,12 +1293,18 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                  * result — we only needed the side effect. */
                 ray_t* fres = exec_node(g, root);
                 if (!fres || RAY_IS_ERR(fres)) {
+                    if (g->selection) {
+                        ray_release(g->selection);
+                        g->selection = NULL;
+                    }
                     ray_graph_free(g); ray_release(tbl);
                     return fres ? fres : ray_error("domain", NULL);
                 }
-                /* No pre-materialization — g still owns tbl; root
-                 * is discarded and the group nodes built below
-                 * become the new DAG root. */
+                /* OP_CONST/OP_FILTER both retain, so the returned
+                 * table has an extra refcount we must release.
+                 * g->table still owns tbl via the graph, so this
+                 * only drops the exec-node-side retain. */
+                ray_release(fres);
             } else {
                 root = ray_optimize(g, root);
                 ray_t* fres = ray_execute(g, root);
