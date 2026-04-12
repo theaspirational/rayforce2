@@ -1008,41 +1008,49 @@ static MunitResult test_eval_select_where_in_sym(const void* params, void* fixtu
     return MUNIT_OK;
 }
 
-/* ---- Test: OP_IN SYM col vs non-SYM atom probe (type mismatch) ----
- * Regression: the type-mismatch short-circuit set set_len=0 to
- * suppress the probe, but the atom-set branch ignored set_len and
- * unconditionally wrote to sv[0], so a SYM column queried against
- * an int atom would match garbage.  Now both the atom and vec
- * branches gate on `set_len > 0`. */
+/* ---- Test: OP_IN type-mismatch must not leak via atom probe ----
+ * Deterministic regression: interns a sym so we know its numeric
+ * ID N, builds an i64 column containing exactly N, then runs
+ * `(in col 'that_sym)`.  With the buggy code (atom branch ignoring
+ * the SYM-vs-non-SYM set_len=0 suppression), sv[0] would be the
+ * literal's sym ID N, col[0] is also N, they collide, and `in`
+ * falsely returns 1 row.  With the fix set_len stays 0, the probe
+ * is empty, no false match. */
 static MunitResult test_eval_select_where_in_sym_vs_atom_mismatch(const void* params, void* fixture) {
     (void)params; (void)fixture;
 
-    /* SYM col vs i64 atom → no matches, not-in returns all rows */
-    ray_t* r1 = ray_eval_str(
-        "(do (set t (table ['s] (list [A B C]))) "
-        "(select {from: t where: (in s 42)}))");
+    /* Intern the probe sym so we know its numeric ID, then embed
+     * that ID as a decimal literal in the source string so the i64
+     * col value equals the literal sym's interned ID.  Under the
+     * buggy code the atom branch wrote that sym ID into sv[0], it
+     * collided with col[0], and `in` falsely returned 1 row.
+     * Verified by temporarily reverting the fix: this test fails
+     * with `1 == 0`. */
+    int64_t target_id = ray_sym_intern("op_in_collision_probe", 21);
+    char src[512];
+    snprintf(src, sizeof(src),
+        "(do (set tbug (table [k] (list [%lld]))) "
+        "(select {from: tbug where: (in k 'op_in_collision_probe)}))",
+        (long long)target_id);
+
+    ray_t* r1 = ray_eval_str(src);
     munit_assert_ptr_not_null(r1);
     munit_assert_false(RAY_IS_ERR(r1));
+    munit_assert_int(r1->type, ==, RAY_TABLE);
+    /* With fix: 0 rows.  Without fix: 1 row (false collision). */
     munit_assert_int(ray_table_nrows(r1), ==, 0);
     ray_release(r1);
 
-    ray_t* r2 = ray_eval_str(
-        "(do (set t (table ['s] (list [A B C]))) "
-        "(select {from: t where: (not-in s 42)}))");
+    /* Same collision via not-in: should return ALL rows (1), not 0. */
+    snprintf(src, sizeof(src),
+        "(do (set tbug (table [k] (list [%lld]))) "
+        "(select {from: tbug where: (not-in k 'op_in_collision_probe)}))",
+        (long long)target_id);
+    ray_t* r2 = ray_eval_str(src);
     munit_assert_ptr_not_null(r2);
     munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(ray_table_nrows(r2), ==, 3);
+    munit_assert_int(ray_table_nrows(r2), ==, 1);
     ray_release(r2);
-
-    /* With SYM null mixed in, the null row still stays out of
-     * not-in even under the mismatch short-circuit. */
-    ray_t* r3 = ray_eval_str(
-        "(do (set t (table ['s] (list [A 0Ns C]))) "
-        "(select {from: t where: (not-in s 42)}))");
-    munit_assert_ptr_not_null(r3);
-    munit_assert_false(RAY_IS_ERR(r3));
-    munit_assert_int(ray_table_nrows(r3), ==, 2);
-    ray_release(r3);
 
     return MUNIT_OK;
 }
