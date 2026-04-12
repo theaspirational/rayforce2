@@ -427,11 +427,15 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
 
         /* Named-lambda call: `(f a1 a2 …)` where `f` is globally
          * bound to a RAY_LAMBDA with a single-expression body.
-         * Inline exactly like the literal `((fn …) …)` case.  The
-         * local env takes precedence, so a formal named `f` in an
-         * enclosing lambda still shadows the global. */
+         * Inline exactly like the literal `((fn …) …)` case.
+         * Shadowing order matches the value-position name-ref
+         * branch: local cexpr_env > table columns > globals.  A
+         * column named `f` isn't callable, but we still must honor
+         * shadowing so the exec-time error is consistent. */
         if (head->type == -RAY_SYM && (head->attrs & RAY_ATTR_NAME) &&
-            cexpr_env_lookup(g, head->i64) == NULL) {
+            cexpr_env_lookup(g, head->i64) == NULL &&
+            !(g->table && g->table->type == RAY_TABLE &&
+              ray_table_get_col(g->table, head->i64))) {
             ray_t* gv = ray_env_get(head->i64);
             if (gv && gv->type == RAY_LAMBDA) {
                 ray_t* formals  = LAMBDA_PARAMS(gv);
