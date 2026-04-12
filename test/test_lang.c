@@ -1016,6 +1016,37 @@ static MunitResult test_eval_select_where_in_sym(const void* params, void* fixtu
  * literal's sym ID N, col[0] is also N, they collide, and `in`
  * falsely returns 1 row.  With the fix set_len stays 0, the probe
  * is empty, no false match. */
+
+/* ---- Test: `== 0N` / `!= 0N` null-check idiom ----
+ * Regression: compile_expr_dag routed typed null literals
+ * (`-RAY_I64` with RAY_ATOM_IS_NULL set) through the fast ctors
+ * `ray_const_i64` etc., which carry only the raw value — the
+ * null flag stored in atom->nullmap[0] was dropped.  Downstream
+ * fix_null_comparisons saw a non-null scalar rhs and didn't
+ * apply null semantics, so `(== k 0N)` missed null rows and
+ * `(!= k 0N)` leaked them through.  Now typed null atoms fall
+ * through to `ray_const_atom` which preserves the null flag. */
+static MunitResult test_eval_select_where_eq_null_literal(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* (== k 0Nl) should match the two null rows. */
+    ray_t* r1 = ray_eval_str(
+        "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
+        "(select {from: t where: (== k 0Nl)}))");
+    munit_assert_ptr_not_null(r1);
+    munit_assert_false(RAY_IS_ERR(r1));
+    munit_assert_int(ray_table_nrows(r1), ==, 2);
+    ray_release(r1);
+    /* (!= k 0Nl) should return the 3 non-null rows. */
+    ray_t* r2 = ray_eval_str(
+        "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
+        "(select {from: t where: (!= k 0Nl)}))");
+    munit_assert_ptr_not_null(r2);
+    munit_assert_false(RAY_IS_ERR(r2));
+    munit_assert_int(ray_table_nrows(r2), ==, 3);
+    ray_release(r2);
+    return MUNIT_OK;
+}
+
 static MunitResult test_eval_select_where_in_sym_vs_atom_mismatch(const void* params, void* fixture) {
     (void)params; (void)fixture;
 
@@ -2872,6 +2903,7 @@ static MunitTest lang_tests[] = {
     { "/eval/select_where_in_nulls", test_eval_select_where_in_nulls, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_empty_set_nulls", test_eval_select_where_in_empty_set_nulls, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_sym_vs_atom_mismatch", test_eval_select_where_in_sym_vs_atom_mismatch, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_where_eq_null_literal", test_eval_select_where_eq_null_literal, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_in",    test_eval_select_by_where_in,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_if",             test_eval_select_if,             lang_setup, lang_teardown, 0, NULL },

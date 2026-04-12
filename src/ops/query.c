@@ -251,17 +251,19 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
 static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     if (!expr) return NULL;
 
-    /* Atom literal → const node.  Handle the four "fast" scalar
-     * types via dedicated ctors, and everything else (SYM, DATE,
-     * TIME, TIMESTAMP, GUID, typed null) via the generic
-     * ray_const_atom which stores the ray_t* in ext->literal. */
-    if (expr->type == -RAY_I64)
+    /* Atom literal → const node.  Handle non-null scalar literals
+     * via the dedicated ctors that carry just the raw value; typed
+     * null atoms (e.g. `0Nl`, `0Nf`) must go through ray_const_atom
+     * so the null flag in atom->nullmap rides along — otherwise
+     * downstream comparisons lose the null-ness and fall back to
+     * sentinel-value equality. */
+    if (expr->type == -RAY_I64 && !RAY_ATOM_IS_NULL(expr))
         return ray_const_i64(g, expr->i64);
-    if (expr->type == -RAY_F64)
+    if (expr->type == -RAY_F64 && !RAY_ATOM_IS_NULL(expr))
         return ray_const_f64(g, expr->f64);
-    if (expr->type == -RAY_BOOL)
+    if (expr->type == -RAY_BOOL && !RAY_ATOM_IS_NULL(expr))
         return ray_const_bool(g, expr->b8);
-    if (expr->type == -RAY_STR) {
+    if (expr->type == -RAY_STR && !RAY_ATOM_IS_NULL(expr)) {
         const char *ptr = ray_str_ptr(expr);
         size_t len = ray_str_len(expr);
         return ray_const_str(g, ptr, len);
@@ -278,11 +280,11 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     if (expr->type == -RAY_SYM)
         return ray_const_atom(g, expr);
 
-    /* Other atom literal types → const atom node. */
-    if (expr->type == -RAY_DATE || expr->type == -RAY_TIME ||
-        expr->type == -RAY_TIMESTAMP || expr->type == -RAY_GUID ||
-        expr->type == -RAY_I32 || expr->type == -RAY_I16 ||
-        expr->type == -RAY_U8 || expr->type == -RAY_F32)
+    /* Other atom literal types → const atom node.  Also falls
+     * through to here for typed null I64/F64/BOOL/STR atoms
+     * (which the fast-path branches above rejected via
+     * RAY_ATOM_IS_NULL). */
+    if (ray_is_atom(expr) && !(expr->attrs & RAY_ATTR_NAME))
         return ray_const_atom(g, expr);
 
     /* Typed-vector literal (e.g. [1 2 3], [AAPL MSFT], ["a" "b"]) →
