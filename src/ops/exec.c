@@ -663,12 +663,15 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
             if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
             sv = (double*)ray_data(sv_hdr);
         }
-        if (ray_is_atom(set)) {
+        /* set_len is 0 when we want to suppress the set entirely
+         * (SYM-vs-non-SYM type mismatch).  Respect it in BOTH the
+         * atom and vec branches so the probe stays empty. */
+        if (set_len > 0 && ray_is_atom(set)) {
             if (!RAY_ATOM_IS_NULL(set)) {
                 sv[0] = (st == RAY_F64) ? set->f64 : (double)set->i64;
                 sv_len = 1;
             }
-        } else {
+        } else if (set_len > 0) {
             for (int64_t i = 0; i < set_len; i++) {
                 if (set_has_nulls && ray_vec_is_null(set, i)) continue;
                 READ_F64(sv[sv_len], set, st, i);
@@ -701,9 +704,11 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
             if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
             sv = (int64_t*)ray_data(sv_hdr);
         }
-        if (ray_is_atom(set)) {
+        /* Same suppression check as in the float path — a zeroed
+         * set_len means "don't probe against anything". */
+        if (set_len > 0 && ray_is_atom(set)) {
             if (!RAY_ATOM_IS_NULL(set)) { sv[0] = set->i64; sv_len = 1; }
-        } else {
+        } else if (set_len > 0) {
             for (int64_t i = 0; i < set_len; i++) {
                 if (set_has_nulls && ray_vec_is_null(set, i)) continue;
                 READ_I64(sv[sv_len], set, st, i);

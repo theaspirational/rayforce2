@@ -1008,6 +1008,45 @@ static MunitResult test_eval_select_where_in_sym(const void* params, void* fixtu
     return MUNIT_OK;
 }
 
+/* ---- Test: OP_IN SYM col vs non-SYM atom probe (type mismatch) ----
+ * Regression: the type-mismatch short-circuit set set_len=0 to
+ * suppress the probe, but the atom-set branch ignored set_len and
+ * unconditionally wrote to sv[0], so a SYM column queried against
+ * an int atom would match garbage.  Now both the atom and vec
+ * branches gate on `set_len > 0`. */
+static MunitResult test_eval_select_where_in_sym_vs_atom_mismatch(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* SYM col vs i64 atom → no matches, not-in returns all rows */
+    ray_t* r1 = ray_eval_str(
+        "(do (set t (table ['s] (list [A B C]))) "
+        "(select {from: t where: (in s 42)}))");
+    munit_assert_ptr_not_null(r1);
+    munit_assert_false(RAY_IS_ERR(r1));
+    munit_assert_int(ray_table_nrows(r1), ==, 0);
+    ray_release(r1);
+
+    ray_t* r2 = ray_eval_str(
+        "(do (set t (table ['s] (list [A B C]))) "
+        "(select {from: t where: (not-in s 42)}))");
+    munit_assert_ptr_not_null(r2);
+    munit_assert_false(RAY_IS_ERR(r2));
+    munit_assert_int(ray_table_nrows(r2), ==, 3);
+    ray_release(r2);
+
+    /* With SYM null mixed in, the null row still stays out of
+     * not-in even under the mismatch short-circuit. */
+    ray_t* r3 = ray_eval_str(
+        "(do (set t (table ['s] (list [A 0Ns C]))) "
+        "(select {from: t where: (not-in s 42)}))");
+    munit_assert_ptr_not_null(r3);
+    munit_assert_false(RAY_IS_ERR(r3));
+    munit_assert_int(ray_table_nrows(r3), ==, 2);
+    ray_release(r3);
+
+    return MUNIT_OK;
+}
+
 /* ---- Test: OP_IN with an empty set + null column rows ----
  * Regression: exec_in had an early return for set_len == 0 that did
  * `memset(negate ? 1 : 0, col_len)` — flipping all rows, including
@@ -2824,6 +2863,7 @@ static MunitTest lang_tests[] = {
     { "/eval/select_where_in_mixed_numeric", test_eval_select_where_in_mixed_numeric, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_nulls", test_eval_select_where_in_nulls, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_empty_set_nulls", test_eval_select_where_in_empty_set_nulls, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_where_in_sym_vs_atom_mismatch", test_eval_select_where_in_sym_vs_atom_mismatch, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_in",    test_eval_select_by_where_in,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_if",             test_eval_select_if,             lang_setup, lang_teardown, 0, NULL },
