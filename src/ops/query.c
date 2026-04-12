@@ -1258,29 +1258,60 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             }
         }
 
-        /* If there's a WHERE clause, materialize the filter now before
-         * the DAG GROUP node builds its own inputs.  ray_group builds
-         * a fresh GROUP op whose key_ops / agg_ins are independent
-         * scans over the original table — without pre-materialization
-         * they completely bypass the ray_filter node we added to
-         * `root` earlier.  Pre-materializing also flattens parted
-         * tables and gives the non-agg scatter a consistent row set.
+        /* WHERE + BY handling.  Two paths:
          *
-         * (This was a pre-existing WHERE-vs-by bug: any WHERE clause
-         * on a `select ... by` query was silently ignored.) */
+         *   (A) Fused path — applicable when there are no non-agg
+         *       output expressions and the source table is flat
+         *       (not parted).  Execute the filter node in-place
+         *       via exec_node; OP_FILTER on a TABLE input installs
+         *       a lazy RAY_SEL bitmap on g->selection and returns
+         *       the original uncompacted table.  The subsequent
+         *       ray_group call builds its own key/agg scans over
+         *       g->table, and exec_group honours g->selection in
+         *       the radix / DA / sequential paths — so no rows are
+         *       materialized twice.  This is the fast path for
+         *       `select ... by ... where` queries.
+         *
+         *   (B) Materialize path — applicable when (A) is not.
+         *       Pre-execute the filter and flatten into a new
+         *       table, then rebuild the graph.  Needed because
+         *       the non-agg scatter runs ray_eval over a flat
+         *       single-segment table, and parted tables need
+         *       segment-level flattening before group anyway.
+         *
+         * (This also fixes a pre-existing WHERE-vs-by bug: any
+         * WHERE clause on a `select ... by` query was silently
+         * ignored before the filter was wired through the group
+         * pipeline.) */
         if (where_expr) {
-            root = ray_optimize(g, root);
-            ray_t* fres = ray_execute(g, root);
-            ray_graph_free(g); g = NULL;
-            if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
-            if (ray_is_lazy(fres)) fres = ray_lazy_materialize(fres);
-            if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
-            /* Replace tbl with filtered result — retain semantics for rest of flow */
-            ray_release(tbl);
-            tbl = fres;
-            g = ray_graph_new(tbl);
-            if (!g) { ray_release(tbl); return ray_error("oom", NULL); }
-            root = ray_const_table(g, tbl);
+            bool can_fuse = !has_nonagg && !table_is_parted;
+            if (can_fuse) {
+                root = ray_optimize(g, root);
+                /* exec_node populates g->selection as a side effect
+                 * of OP_FILTER on a table input, and returns the
+                 * uncompacted table (== g->table).  Discard the
+                 * result — we only needed the side effect. */
+                ray_t* fres = exec_node(g, root);
+                if (!fres || RAY_IS_ERR(fres)) {
+                    ray_graph_free(g); ray_release(tbl);
+                    return fres ? fres : ray_error("domain", NULL);
+                }
+                /* No pre-materialization — g still owns tbl; root
+                 * is discarded and the group nodes built below
+                 * become the new DAG root. */
+            } else {
+                root = ray_optimize(g, root);
+                ray_t* fres = ray_execute(g, root);
+                ray_graph_free(g); g = NULL;
+                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
+                if (ray_is_lazy(fres)) fres = ray_lazy_materialize(fres);
+                if (!fres || RAY_IS_ERR(fres)) { ray_release(tbl); return fres ? fres : ray_error("domain", NULL); }
+                ray_release(tbl);
+                tbl = fres;
+                g = ray_graph_new(tbl);
+                if (!g) { ray_release(tbl); return ray_error("oom", NULL); }
+                root = ray_const_table(g, tbl);
+            }
         }
 
         /* Compile group key(s) */

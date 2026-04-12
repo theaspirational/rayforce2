@@ -630,7 +630,9 @@ static inline uint32_t group_probe_entry(group_ht_t* ht,
 
 void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
                               uint8_t* key_attrs, ray_t** agg_vecs,
-                              int64_t start, int64_t end) {
+                              int64_t start, int64_t end,
+                              const uint64_t* sel_mask,
+                              const uint8_t* sel_flags) {
     const ght_layout_t* ly = &ht->layout;
     uint8_t nk = ly->n_keys;
     uint8_t na = ly->n_aggs;
@@ -639,6 +641,19 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
     char ebuf[8 + 8 * 8 + 8 * 8];
 
     for (int64_t row = start; row < end; row++) {
+        if (sel_mask) {
+            if (sel_flags) {
+                int64_t seg = row / RAY_MORSEL_ELEMS;
+                if (sel_flags[seg] == RAY_SEL_NONE) {
+                    row = (seg + 1) * RAY_MORSEL_ELEMS - 1;
+                    continue;
+                }
+                if (sel_flags[seg] == RAY_SEL_MIX &&
+                    !RAY_SEL_BIT_TEST(sel_mask, row)) continue;
+            } else if (!RAY_SEL_BIT_TEST(sel_mask, row)) {
+                continue;
+            }
+        }
         uint64_t h = 0;
         int64_t* ek = (int64_t*)(ebuf + 8);
         for (uint8_t k = 0; k < nk; k++) {
@@ -2108,7 +2123,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
         }
     }
 
-    /* Extract selection bitmap for pushdown (skip filtered rows in scan loops) */
+    /* Extract selection bitmap for pushdown (skip filtered rows in scan loops). */
     const uint64_t* mask = NULL;
     const uint8_t* sel_flags = NULL;
     if (g->selection && g->selection->type == RAY_SEL
@@ -3209,7 +3224,8 @@ sequential_fallback:;
         result = ray_error("oom", NULL);
         goto cleanup;
     }
-    group_rows_range(&single_ht, key_data, key_types, key_attrs, agg_vecs, 0, nrows);
+    group_rows_range(&single_ht, key_data, key_types, key_attrs, agg_vecs,
+                     0, nrows, mask, sel_flags);
 
     final_ht = &single_ht;
 

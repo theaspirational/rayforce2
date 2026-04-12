@@ -1057,27 +1057,18 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 }
             }
 
-            /* Always compact lazy selection before GROUP BY.
-             * The sequential fallback path (group_rows_range) does not
-             * honour the selection bitmap, so we must materialize a
-             * compacted table upfront.  The DA and radix-parallel paths
-             * *do* check the bitmap, but we cannot predict which path
-             * exec_group will choose, and compaction is cheap relative
-             * to the aggregation work that follows.  This also prevents
-             * a stale g->selection from leaking into downstream ops
-             * (e.g. SORT), which would otherwise try to sel_compact the
-             * already-aggregated result with a mismatched-length bitmap
-             * and produce empty or corrupt output. */
-            if (g->selection && g->selection->type == RAY_SEL) {
-                ray_t* compacted = sel_compact(g, tbl, g->selection);
-                if (!compacted || RAY_IS_ERR(compacted)) return compacted;
-                ray_release(g->selection);
-                g->selection = NULL;
-                owned_tbl = compacted;
-                tbl = compacted;
-            }
+            /* Lazy selection is consumed by exec_group itself — all
+             * paths (sequential, DA, radix-parallel) honour the
+             * bitmap via group_rows_range / radix scan loops.  We
+             * must still clear g->selection *after* group runs so
+             * downstream ops (SORT etc.) don't try to sel_compact the
+             * aggregated output with a mismatched-length bitmap. */
             ray_t* result = exec_group(g, op, tbl, 0);
             if (owned_tbl) ray_release(owned_tbl);
+            if (g->selection) {
+                ray_release(g->selection);
+                g->selection = NULL;
+            }
             return result;
         }
 
