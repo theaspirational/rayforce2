@@ -562,13 +562,19 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
     int64_t col_len = ray_is_atom(col) ? 1 : col->len;
     int64_t set_len = ray_is_atom(set) ? 1 : set->len;
 
-    if (col_len == 0 || set_len == 0) {
-        ray_t* out = ray_vec_new(RAY_BOOL, col_len);
+    /* Empty col: the main loop produces an empty BOOL result
+     * correctly, but there's nothing to iterate, so short-circuit. */
+    if (col_len == 0) {
+        ray_t* out = ray_vec_new(RAY_BOOL, 0);
         if (!out || RAY_IS_ERR(out)) return out;
-        out->len = col_len;
-        memset(ray_data(out), negate ? 1 : 0, (size_t)col_len);
+        out->len = 0;
         return out;
     }
+
+    /* NOTE: we intentionally do NOT short-circuit on set_len == 0.
+     * Even for an empty probe, the main loop still needs to check
+     * each col row's null flag so null rows never leak through as
+     * true for `not-in` (the old memset bypass did exactly that). */
 
     int8_t ct = ray_is_atom(col) ? (int8_t)(-col->type) : col->type;
     int8_t st = ray_is_atom(set) ? (int8_t)(-set->type) : set->type;
@@ -586,15 +592,13 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
     int col_class = CLASSIFY(ct);
     int set_class = CLASSIFY(st);
 
-    /* Mixed SYM vs non-SYM → always false (type mismatch with no
-     * useful coercion).  A SYM set containing resolved sym IDs has
-     * no meaning when compared to a raw integer column. */
+    /* Mixed SYM vs non-SYM → treat as an empty probe.  A SYM set
+     * containing resolved sym IDs has no meaning when compared to a
+     * raw integer column, so nothing can match — but we still drop
+     * through to the main loop so null rows are handled consistently
+     * (they emit 0 regardless of negate). */
     if ((col_class == 2) != (set_class == 2)) {
-        ray_t* out = ray_vec_new(RAY_BOOL, col_len);
-        if (!out || RAY_IS_ERR(out)) return out;
-        out->len = col_len;
-        memset(ray_data(out), negate ? 1 : 0, (size_t)col_len);
-        return out;
+        set_len = 0;
     }
 
     /* Float-promoted path: at least one side is float.  Read both as

@@ -1008,6 +1008,35 @@ static MunitResult test_eval_select_where_in_sym(const void* params, void* fixtu
     return MUNIT_OK;
 }
 
+/* ---- Test: OP_IN with an empty set + null column rows ----
+ * Regression: exec_in had an early return for set_len == 0 that did
+ * `memset(negate ? 1 : 0, col_len)` — flipping all rows, including
+ * nulls, to true for `not-in`.  Null rows must still be excluded. */
+static MunitResult test_eval_select_where_in_empty_set_nulls(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* not-in with empty set: source has [1 0Nl 3 0Nl 5], filter
+     * `not-in []` should return 1, 3, 5 — not the two nulls. */
+    ray_t* r1 = ray_eval_str(
+        "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
+        "(select {from: t where: (not-in k [])}))");
+    munit_assert_ptr_not_null(r1);
+    munit_assert_false(RAY_IS_ERR(r1));
+    munit_assert_int(ray_table_nrows(r1), ==, 3);
+    ray_release(r1);
+
+    /* in with empty set: no row passes. */
+    ray_t* r2 = ray_eval_str(
+        "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
+        "(select {from: t where: (in k [])}))");
+    munit_assert_ptr_not_null(r2);
+    munit_assert_false(RAY_IS_ERR(r2));
+    munit_assert_int(ray_table_nrows(r2), ==, 0);
+    ray_release(r2);
+
+    return MUNIT_OK;
+}
+
 /* ---- Test: OP_IN must not leak null rows through ----
  * Regression: exec_in originally treated the raw null-sentinel
  * value as a normal data value.  That meant `(not-in k [1])`
@@ -2794,6 +2823,7 @@ static MunitTest lang_tests[] = {
     { "/eval/select_where_in_i64",   test_eval_select_where_in_i64,   lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_mixed_numeric", test_eval_select_where_in_mixed_numeric, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_nulls", test_eval_select_where_in_nulls, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_where_in_empty_set_nulls", test_eval_select_where_in_empty_set_nulls, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_in",    test_eval_select_by_where_in,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_if",             test_eval_select_if,             lang_setup, lang_teardown, 0, NULL },
