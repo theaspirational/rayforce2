@@ -795,6 +795,7 @@ static void expr_exec_unary(uint8_t opcode, int8_t dt, void* dp,
                 case OP_EXP:   for (int64_t j = 0; j < n; j++) d[j] = exp(a[j]); break;
                 case OP_CEIL:  for (int64_t j = 0; j < n; j++) d[j] = ceil(a[j]); break;
                 case OP_FLOOR: for (int64_t j = 0; j < n; j++) d[j] = floor(a[j]); break;
+                case OP_ROUND: for (int64_t j = 0; j < n; j++) d[j] = round(a[j]); break;
                 default: break;
             }
         } else { /* CAST i64→f64 */
@@ -1203,6 +1204,7 @@ ray_t* exec_elementwise_unary(ray_graph_t* g, ray_op_t* op, ray_t* input) {
                         case OP_EXP:   r = exp(v); break;
                         case OP_CEIL:  r = ceil(v); break;
                         case OP_FLOOR: r = floor(v); break;
+                        case OP_ROUND: r = round(v); break;
                         default:       r = v; break;
                     }
                     if (out_type == RAY_F64) ((double*)dst)[i] = r;

@@ -991,6 +991,146 @@ static MunitResult test_eval_select_where(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* ---- Test: WHERE with `in` and a literal sym vector ----
+ * New in compile_expr_dag completeness pass. */
+static MunitResult test_eval_select_where_in_sym(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B C A B C] [10 20 30 40 50 60]))) "
+        "(select {from: t where: (in s [A C])}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    /* Should filter to A, C, A, C — 4 rows */
+    munit_assert_int(ray_table_nrows(result), ==, 4);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: WHERE with `in` and a literal i64 vector ---- */
+static MunitResult test_eval_select_where_in_i64(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['k 'p] "
+        "(list [1 2 3 4 5] [10 20 30 40 50]))) "
+        "(select {from: t where: (in k [1 3 5])}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 3);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: pre-existing WHERE+by bug — WHERE was silently dropped
+ * when `by:` was present.  Now fixed by pre-materializing the
+ * filter before the GROUP op's inputs are built. */
+static MunitResult test_eval_select_by_where_filters(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
+        "(select {from: t by: s where: (> p 25.0) tot: (sum p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    /* sum(A where p > 25) = 30+50 = 80; sum(B where p > 25) = 40+60 = 100 */
+    int64_t tot_id = ray_sym_intern("tot", 3);
+    ray_t* tot_col = ray_table_get_col(result, tot_id);
+    munit_assert_ptr_not_null(tot_col);
+    double* td = (double*)ray_data(tot_col);
+    munit_assert_double(td[0], ==, 80.0);
+    munit_assert_double(td[1], ==, 100.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: WHERE with `in` + group-by end-to-end ---- */
+static MunitResult test_eval_select_by_where_in(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B C A B C A B C] [1 2 3 4 5 6 7 8 9]))) "
+        "(select {from: t by: s where: (in s [A C]) tot: (sum p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    /* B should be filtered out, leaving only A and C. */
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: `if` conditional projection ---- */
+static MunitResult test_eval_select_if(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [10 20 30 40]))) "
+        "(select {from: t m: (if (> p 25) 1 0)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 4);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    int64_t* md = (int64_t*)ray_data(m_col);
+    munit_assert_int(md[0], ==, 0);
+    munit_assert_int(md[1], ==, 0);
+    munit_assert_int(md[2], ==, 1);
+    munit_assert_int(md[3], ==, 1);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: equality against sym literal atom ---- */
+static MunitResult test_eval_select_where_sym_atom(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B] [10 20 30 40]))) "
+        "(select {from: t where: (== s 'A)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: `as` type cast ---- */
+static MunitResult test_eval_select_cast(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [10.5 20.5 30.5]))) "
+        "(select {from: t m: (as 'I64 p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    munit_assert_int(m_col->type, ==, RAY_I64);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: `round` on f64 column ---- */
+static MunitResult test_eval_select_round(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [1.4 2.6 3.5]))) "
+        "(select {from: t m: (round p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    double* md = (double*)ray_data(m_col);
+    munit_assert_double(md[0], ==, 1.0);
+    munit_assert_double(md[1], ==, 3.0);
+    munit_assert_double(md[2], >=, 3.0);  /* round half: either 3 or 4 depending on mode */
+    ray_release(result);
+    return MUNIT_OK;
+}
+
 /* ---- Test: select cols (projection) ---- */
 static MunitResult test_eval_select_cols(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -2602,6 +2742,14 @@ static MunitTest lang_tests[] = {
     { "/eval/count_table",     test_eval_count_table,     lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_all",      test_eval_select_all,      lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where",    test_eval_select_where,    lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_where_in_sym",   test_eval_select_where_in_sym,   lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_where_in_i64",   test_eval_select_where_in_i64,   lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_by_where_in",    test_eval_select_by_where_in,    lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_if",             test_eval_select_if,             lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_where_sym_atom", test_eval_select_where_sym_atom, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_cast",           test_eval_select_cast,           lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_round",          test_eval_select_round,          lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_cols",     test_eval_select_cols,     lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_groupby",  test_eval_select_groupby,  lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_xbar",     test_eval_select_xbar,     lang_setup, lang_teardown, 0, NULL },

@@ -115,6 +115,7 @@ void     ray_cancel(void);
 #define OP_FLOOR        17
 #define OP_ISNULL       18
 #define OP_CAST         19
+#define OP_ROUND         9   /* unary element-wise round */
 
 /* Opcodes — Binary element-wise (fuseable) */
 #define OP_ADD          20
@@ -143,6 +144,8 @@ void     ray_cancel(void);
 #define OP_CONCAT       43
 #define OP_EXTRACT      45
 #define OP_DATE_TRUNC   46
+#define OP_IN           47   /* binary: col in set_vec -> BOOL */
+#define OP_NOT_IN       48   /* binary: col not in set_vec -> BOOL */
 
 /* EXTRACT / DATE_TRUNC field identifiers */
 #define RAY_EXTRACT_YEAR    0
@@ -463,6 +466,7 @@ ray_op_t* ray_const_i64(ray_graph_t* g, int64_t val);
 ray_op_t* ray_const_bool(ray_graph_t* g, bool val);
 ray_op_t* ray_const_str(ray_graph_t* g, const char* s, size_t len);
 ray_op_t* ray_const_vec(ray_graph_t* g, ray_t* vec);
+ray_op_t* ray_const_atom(ray_graph_t* g, ray_t* atom);
 ray_op_t* ray_const_table(ray_graph_t* g, ray_t* table);
 
 /* Unary element-wise ops */
@@ -474,6 +478,7 @@ ray_op_t* ray_log_op(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_exp_op(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_ceil_op(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_floor_op(ray_graph_t* g, ray_op_t* a);
+ray_op_t* ray_round_op(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_isnull(ray_graph_t* g, ray_op_t* a);
 ray_op_t* ray_cast(ray_graph_t* g, ray_op_t* a, int8_t target_type);
 
@@ -496,6 +501,8 @@ ray_op_t* ray_and(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_or(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_min2(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
 ray_op_t* ray_max2(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
+ray_op_t* ray_in(ray_graph_t* g, ray_op_t* col, ray_op_t* set);
+ray_op_t* ray_not_in(ray_graph_t* g, ray_op_t* col, ray_op_t* set);
 ray_op_t* ray_if(ray_graph_t* g, ray_op_t* cond, ray_op_t* then_val, ray_op_t* else_val);
 ray_op_t* ray_like(ray_graph_t* g, ray_op_t* input, ray_op_t* pattern);
 ray_op_t* ray_ilike(ray_graph_t* g, ray_op_t* input, ray_op_t* pattern);

@@ -384,6 +384,29 @@ ray_op_t* ray_const_vec(ray_graph_t* g, ray_t* vec) {
     return &g->nodes[ext->base.id];
 }
 
+/* Generic const-atom constructor.  Handles any scalar atom type
+ * (RAY_SYM, RAY_DATE, RAY_TIME, RAY_TIMESTAMP, RAY_GUID, RAY_NULL,
+ * and any other ray_t* used as an immediate literal).  The executor
+ * OP_CONST handler just returns ext->literal, so the same retain/
+ * store mechanism as ray_const_vec works for atoms too. */
+ray_op_t* ray_const_atom(ray_graph_t* g, ray_t* atom) {
+    ray_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+
+    ext->base.opcode = OP_CONST;
+    ext->base.arity = 0;
+    /* Atom types are stored negated (-RAY_I64 etc); the executor
+     * does not rely on out_type for OP_CONST dispatch, but we keep
+     * it consistent with the source atom. */
+    ext->base.out_type = atom->type;
+    ext->base.est_rows = 1;
+    ext->literal = atom;
+    ray_retain(atom);
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
 ray_op_t* ray_const_table(ray_graph_t* g, ray_t* tbl) {
     ray_op_ext_t* ext = graph_alloc_ext_node(g);
     if (!ext) return NULL;
@@ -463,6 +486,7 @@ ray_op_t* ray_log_op(ray_graph_t* g, ray_op_t* a)  { return make_unary(g, OP_LOG
 ray_op_t* ray_exp_op(ray_graph_t* g, ray_op_t* a)  { return make_unary(g, OP_EXP, a, RAY_F64); }
 ray_op_t* ray_ceil_op(ray_graph_t* g, ray_op_t* a) { return make_unary(g, OP_CEIL, a, a->out_type); }
 ray_op_t* ray_floor_op(ray_graph_t* g, ray_op_t* a){ return make_unary(g, OP_FLOOR, a, a->out_type); }
+ray_op_t* ray_round_op(ray_graph_t* g, ray_op_t* a){ return make_unary(g, OP_ROUND, a, a->out_type); }
 ray_op_t* ray_isnull(ray_graph_t* g, ray_op_t* a)  { return make_unary(g, OP_ISNULL, a, RAY_BOOL); }
 
 ray_op_t* ray_cast(ray_graph_t* g, ray_op_t* a, int8_t target_type) {
@@ -504,6 +528,8 @@ ray_op_t* ray_and(ray_graph_t* g, ray_op_t* a, ray_op_t* b){ return make_binary(
 ray_op_t* ray_or(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_OR, a, b, RAY_BOOL); }
 ray_op_t* ray_min2(ray_graph_t* g, ray_op_t* a, ray_op_t* b){ return make_binary(g, OP_MIN2, a, b, promote(a->out_type, b->out_type)); }
 ray_op_t* ray_max2(ray_graph_t* g, ray_op_t* a, ray_op_t* b){ return make_binary(g, OP_MAX2, a, b, promote(a->out_type, b->out_type)); }
+ray_op_t* ray_in(ray_graph_t* g, ray_op_t* col, ray_op_t* set){ return make_binary(g, OP_IN, col, set, RAY_BOOL); }
+ray_op_t* ray_not_in(ray_graph_t* g, ray_op_t* col, ray_op_t* set){ return make_binary(g, OP_NOT_IN, col, set, RAY_BOOL); }
 
 ray_op_t* ray_if(ray_graph_t* g, ray_op_t* cond, ray_op_t* then_val, ray_op_t* else_val) {
     /* 3-input node: cond, then, else — needs ext node */

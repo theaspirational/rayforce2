@@ -59,8 +59,15 @@ static dag_binary_ctor resolve_binary_dag(int64_t sym_id) {
         if (name[0] == '=' && name[1] == '=') return ray_eq;
         if (name[0] == '!' && name[1] == '=') return ray_ne;
         if (name[0] == 'o' && name[1] == 'r') return ray_or;
-    } else if (len == 3 && name[0] == 'a' && name[1] == 'n' && name[2] == 'd') {
-        return ray_and;
+        if (name[0] == 'i' && name[1] == 'n') return ray_in;
+    } else if (len == 3) {
+        if (memcmp(name, "and",  3) == 0) return ray_and;
+    } else if (len == 4) {
+        if (memcmp(name, "like", 4) == 0) return ray_like;
+    } else if (len == 5) {
+        if (memcmp(name, "ilike", 5) == 0) return ray_ilike;
+    } else if (len == 6) {
+        if (memcmp(name, "not-in", 6) == 0) return ray_not_in;
     }
     return NULL;
 }
@@ -77,10 +84,19 @@ static dag_unary_ctor resolve_unary_dag(int64_t sym_id) {
         if (memcmp(name, "exp", 3) == 0) return ray_exp_op;
         if (memcmp(name, "log", 3) == 0) return ray_log_op;
     } else if (len == 4) {
-        if (memcmp(name, "ceil", 4) == 0) return ray_ceil_op;
-        if (memcmp(name, "sqrt", 4) == 0) return ray_sqrt_op;
+        if (memcmp(name, "ceil",  4) == 0) return ray_ceil_op;
+        if (memcmp(name, "sqrt",  4) == 0) return ray_sqrt_op;
+        if (memcmp(name, "trim",  4) == 0) return ray_trim_op;
     } else if (len == 5) {
         if (memcmp(name, "floor", 5) == 0) return ray_floor_op;
+        if (memcmp(name, "round", 5) == 0) return ray_round_op;
+        if (memcmp(name, "upper", 5) == 0) return ray_upper;
+        if (memcmp(name, "lower", 5) == 0) return ray_lower;
+        if (memcmp(name, "null?", 5) == 0) return ray_isnull;
+    } else if (len == 6) {
+        if (memcmp(name, "strlen", 6) == 0) return ray_strlen;
+    } else if (len == 7) {
+        if (memcmp(name, "is-null", 7) == 0) return ray_isnull;
     }
     return NULL;
 }
@@ -95,9 +111,12 @@ static uint16_t resolve_agg_opcode(int64_t sym_id) {
     if (len == 3 && memcmp(name, "avg", 3) == 0) return OP_AVG;
     if (len == 3 && memcmp(name, "min", 3) == 0) return OP_MIN;
     if (len == 3 && memcmp(name, "max", 3) == 0) return OP_MAX;
+    if (len == 3 && memcmp(name, "dev", 3) == 0) return OP_STDDEV;
+    if (len == 3 && memcmp(name, "var", 3) == 0) return OP_VAR;
+    if (len == 4 && memcmp(name, "prod", 4) == 0) return OP_PROD;
+    if (len == 4 && memcmp(name, "last", 4) == 0) return OP_LAST;
     if (len == 5 && memcmp(name, "count", 5) == 0) return OP_COUNT;
     if (len == 5 && memcmp(name, "first", 5) == 0) return OP_FIRST;
-    if (len == 4 && memcmp(name, "last", 4) == 0) return OP_LAST;
     return 0;
 }
 
@@ -228,7 +247,10 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
 static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     if (!expr) return NULL;
 
-    /* Atom literal → const node */
+    /* Atom literal → const node.  Handle the four "fast" scalar
+     * types via dedicated ctors, and everything else (SYM, DATE,
+     * TIME, TIMESTAMP, GUID, typed null) via the generic
+     * ray_const_atom which stores the ray_t* in ext->literal. */
     if (expr->type == -RAY_I64)
         return ray_const_i64(g, expr->i64);
     if (expr->type == -RAY_F64)
@@ -241,17 +263,31 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         return ray_const_str(g, ptr, len);
     }
 
-    /* Symbol literal → cannot compile to DAG (no const SYM node type).
-     * Return NULL to trigger eval-level fallback. */
-    if (expr->type == -RAY_SYM && !(expr->attrs & RAY_ATTR_NAME))
-        return NULL;
-
-    /* Name reference → column scan */
+    /* Name reference → column scan. */
     if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
         ray_t* s = ray_sym_str(expr->i64);
         if (!s) return NULL;
         return ray_scan(g, ray_str_ptr(s));
     }
+
+    /* Symbol literal (no RAY_ATTR_NAME) → const atom node. */
+    if (expr->type == -RAY_SYM)
+        return ray_const_atom(g, expr);
+
+    /* Other atom literal types → const atom node. */
+    if (expr->type == -RAY_DATE || expr->type == -RAY_TIME ||
+        expr->type == -RAY_TIMESTAMP || expr->type == -RAY_GUID ||
+        expr->type == -RAY_I32 || expr->type == -RAY_I16 ||
+        expr->type == -RAY_U8 || expr->type == -RAY_F32)
+        return ray_const_atom(g, expr);
+
+    /* Typed-vector literal (e.g. [1 2 3], [AAPL MSFT], ["a" "b"]) →
+     * const vector node.  ray_const_vec already stores any ray_t*
+     * vec in ext->literal, and the OP_CONST executor returns it
+     * directly — so this unlocks every typed literal vector as a
+     * DAG operand (crucial for OP_IN set operands). */
+    if (ray_is_vec(expr) && !(expr->attrs & RAY_ATTR_NAME))
+        return ray_const_vec(g, expr);
 
     /* List → function call: (fn arg1 arg2 ...) */
     if (expr->type == RAY_LIST && !(expr->attrs & (RAY_ATTR_DICT))) {
@@ -266,14 +302,143 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
 
         /* Check for xbar */
         ray_t* fn_name_str = ray_sym_str(fn_sym);
-        if (fn_name_str && ray_str_len(fn_name_str) == 4
-            && memcmp(ray_str_ptr(fn_name_str), "xbar", 4) == 0) {
+        const char* fname = fn_name_str ? ray_str_ptr(fn_name_str) : NULL;
+        size_t fname_len = fn_name_str ? ray_str_len(fn_name_str) : 0;
+
+        if (fname_len == 4 && memcmp(fname, "xbar", 4) == 0) {
             if (n != 3) return NULL;
             ray_op_t* col = compile_expr_dag(g, elems[1]);
             ray_op_t* bucket = compile_expr_dag(g, elems[2]);
             if (!col || !bucket) return NULL;
             /* xbar(x, b) = x - (x % b)  (stays in integer domain) */
             return ray_sub(g, col, ray_mod(g, col, bucket));
+        }
+
+        /* (if cond then else) — 4 elements (fn + 3 args).  Compiles
+         * to OP_IF which is supported by the element-wise fusion
+         * pipeline. */
+        if (fname_len == 2 && memcmp(fname, "if", 2) == 0) {
+            if (n != 4) return NULL;
+            ray_op_t* c = compile_expr_dag(g, elems[1]);
+            ray_op_t* t = compile_expr_dag(g, elems[2]);
+            ray_op_t* e = compile_expr_dag(g, elems[3]);
+            if (!c || !t || !e) return NULL;
+            return ray_if(g, c, t, e);
+        }
+
+        /* (substr str start len) — 4 elements. */
+        if (fname_len == 6 && memcmp(fname, "substr", 6) == 0) {
+            if (n != 4) return NULL;
+            ray_op_t* str = compile_expr_dag(g, elems[1]);
+            ray_op_t* start = compile_expr_dag(g, elems[2]);
+            ray_op_t* ln = compile_expr_dag(g, elems[3]);
+            if (!str || !start || !ln) return NULL;
+            return ray_substr(g, str, start, ln);
+        }
+
+        /* (replace str from to) — 4 elements. */
+        if (fname_len == 7 && memcmp(fname, "replace", 7) == 0) {
+            if (n != 4) return NULL;
+            ray_op_t* str = compile_expr_dag(g, elems[1]);
+            ray_op_t* from = compile_expr_dag(g, elems[2]);
+            ray_op_t* to = compile_expr_dag(g, elems[3]);
+            if (!str || !from || !to) return NULL;
+            return ray_replace(g, str, from, to);
+        }
+
+        /* (concat a b ...) — variadic string concat. */
+        if (fname_len == 6 && memcmp(fname, "concat", 6) == 0) {
+            if (n < 2 || n - 1 > 16) return NULL;
+            ray_op_t* args[16];
+            for (int64_t i = 1; i < n; i++) {
+                args[i - 1] = compile_expr_dag(g, elems[i]);
+                if (!args[i - 1]) return NULL;
+            }
+            return ray_concat(g, args, (int)(n - 1));
+        }
+
+        /* (as 'TYPE col) — cast.  The type is a sym literal like 'I64 / 'F64. */
+        if (fname_len == 2 && memcmp(fname, "as", 2) == 0) {
+            if (n != 3) return NULL;
+            ray_t* type_expr = elems[1];
+            if (type_expr->type != -RAY_SYM) return NULL;
+            int8_t tgt = -1;
+            ray_t* ts = ray_sym_str(type_expr->i64);
+            if (ts) {
+                const char* tn = ray_str_ptr(ts);
+                size_t tl = ray_str_len(ts);
+                if (tl == 3 && memcmp(tn, "I64", 3) == 0)       tgt = RAY_I64;
+                else if (tl == 3 && memcmp(tn, "F64", 3) == 0)  tgt = RAY_F64;
+                else if (tl == 3 && memcmp(tn, "I32", 3) == 0)  tgt = RAY_I32;
+                else if (tl == 3 && memcmp(tn, "I16", 3) == 0)  tgt = RAY_I16;
+                else if (tl == 3 && memcmp(tn, "F32", 3) == 0)  tgt = RAY_F32;
+                else if (tl == 2 && memcmp(tn, "U8", 2) == 0)   tgt = RAY_U8;
+                else if (tl == 4 && memcmp(tn, "BOOL", 4) == 0) tgt = RAY_BOOL;
+            }
+            if (tgt < 0) return NULL;
+            ray_op_t* col = compile_expr_dag(g, elems[2]);
+            if (!col) return NULL;
+            return ray_cast(g, col, tgt);
+        }
+
+        /* Temporal extract: (year col), (month col), (day col), ... */
+        if (n == 2) {
+            int64_t field = -1;
+            if (fname_len == 4 && memcmp(fname, "year",  4) == 0) field = RAY_EXTRACT_YEAR;
+            else if (fname_len == 5 && memcmp(fname, "month", 5) == 0) field = RAY_EXTRACT_MONTH;
+            else if (fname_len == 3 && memcmp(fname, "day",   3) == 0) field = RAY_EXTRACT_DAY;
+            else if (fname_len == 4 && memcmp(fname, "hour",  4) == 0) field = RAY_EXTRACT_HOUR;
+            else if (fname_len == 6 && memcmp(fname, "minute",6) == 0) field = RAY_EXTRACT_MINUTE;
+            else if (fname_len == 6 && memcmp(fname, "second",6) == 0) field = RAY_EXTRACT_SECOND;
+            else if (fname_len == 9 && memcmp(fname, "dayofweek",9) == 0) field = RAY_EXTRACT_DOW;
+            else if (fname_len == 9 && memcmp(fname, "dayofyear",9) == 0) field = RAY_EXTRACT_DOY;
+            if (field >= 0) {
+                ray_op_t* col = compile_expr_dag(g, elems[1]);
+                if (!col) return NULL;
+                return ray_extract(g, col, field);
+            }
+        }
+
+        /* (do e1 e2 ... en) → compile only the last expression.
+         * Earlier expressions can't have side-effects in DAG context;
+         * if they do, they'll be silently dropped.  Use eval-level
+         * for side-effectful scripts. */
+        if (fname_len == 2 && memcmp(fname, "do", 2) == 0) {
+            if (n < 2) return NULL;
+            return compile_expr_dag(g, elems[n - 1]);
+        }
+
+        /* (cond (p1 e1) (p2 e2) ... (else en)) → nested OP_IF. */
+        if (fname_len == 4 && memcmp(fname, "cond", 4) == 0) {
+            if (n < 2) return NULL;
+            /* Walk right-to-left, building an OP_IF chain.  The last
+             * clause must be an `else` form. */
+            ray_op_t* chain = NULL;
+            for (int64_t i = n - 1; i >= 1; i--) {
+                ray_t* clause = elems[i];
+                if (clause->type != RAY_LIST || ray_len(clause) != 2) return NULL;
+                ray_t** cpair = (ray_t**)ray_data(clause);
+                /* `else` tag matches name "else" */
+                int is_else = 0;
+                if (cpair[0]->type == -RAY_SYM) {
+                    ray_t* ns = ray_sym_str(cpair[0]->i64);
+                    if (ns && ray_str_len(ns) == 4 &&
+                        memcmp(ray_str_ptr(ns), "else", 4) == 0)
+                        is_else = 1;
+                }
+                if (is_else) {
+                    if (i != n - 1) return NULL;  /* else must be last */
+                    chain = compile_expr_dag(g, cpair[1]);
+                    if (!chain) return NULL;
+                } else {
+                    ray_op_t* pred = compile_expr_dag(g, cpair[0]);
+                    ray_op_t* body = compile_expr_dag(g, cpair[1]);
+                    if (!pred || !body || !chain) return NULL;
+                    chain = ray_if(g, pred, body, chain);
+                    if (!chain) return NULL;
+                }
+            }
+            return chain;
         }
 
         /* Binary op? */
@@ -301,13 +466,16 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
                 ray_op_t* arg = compile_expr_dag(g, elems[1]);
                 if (!arg) return NULL;
                 switch (agg_op) {
-                    case OP_SUM:   return ray_sum(g, arg);
-                    case OP_AVG:   return ray_avg(g, arg);
-                    case OP_MIN:   return ray_min_op(g, arg);
-                    case OP_MAX:   return ray_max_op(g, arg);
-                    case OP_COUNT: return ray_count(g, arg);
-                    case OP_FIRST: return ray_first(g, arg);
-                    case OP_LAST:  return ray_last(g, arg);
+                    case OP_SUM:    return ray_sum(g, arg);
+                    case OP_AVG:    return ray_avg(g, arg);
+                    case OP_MIN:    return ray_min_op(g, arg);
+                    case OP_MAX:    return ray_max_op(g, arg);
+                    case OP_COUNT:  return ray_count(g, arg);
+                    case OP_FIRST:  return ray_first(g, arg);
+                    case OP_LAST:   return ray_last(g, arg);
+                    case OP_PROD:   return ray_prod(g, arg);
+                    case OP_STDDEV: return ray_stddev(g, arg);
+                    case OP_VAR:    return ray_var(g, arg);
                     default: return NULL;
                 }
             }
@@ -442,7 +610,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     /* Apply WHERE filter */
     if (where_expr) {
         ray_op_t* pred = compile_expr_dag(g, where_expr);
-        if (!pred) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+        if (!pred) {
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain",
+                "WHERE predicate not supported by DAG compiler "
+                "(try rewriting without lambda invocations, "
+                "`let`, or unsupported special forms)");
+        }
         root = ray_filter(g, root, pred);
     }
 
@@ -839,10 +1013,17 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             }
         }
 
-        /* If we have non-agg expressions + WHERE, materialize the filter
-         * now so both the DAG GROUP and the scatter see the same
-         * (flat) row set.  This also flattens parted tables. */
-        if (has_nonagg && where_expr) {
+        /* If there's a WHERE clause, materialize the filter now before
+         * the DAG GROUP node builds its own inputs.  ray_group builds
+         * a fresh GROUP op whose key_ops / agg_ins are independent
+         * scans over the original table — without pre-materialization
+         * they completely bypass the ray_filter node we added to
+         * `root` earlier.  Pre-materializing also flattens parted
+         * tables and gives the non-agg scatter a consistent row set.
+         *
+         * (This was a pre-existing WHERE-vs-by bug: any WHERE clause
+         * on a `select ... by` query was silently ignored.) */
+        if (where_expr) {
             root = ray_optimize(g, root);
             ray_t* fres = ray_execute(g, root);
             ray_graph_free(g); g = NULL;

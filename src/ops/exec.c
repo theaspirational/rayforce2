@@ -536,6 +536,112 @@ ray_t* broadcast_scalar(ray_t* atom, int64_t nrows) {
 }
 
 /* ============================================================================
+ * exec_in — membership test (col IN set_vec)
+ *
+ * Evaluates each element of `col` against `set`.  Returns a RAY_BOOL
+ * vector of col->len.  For OP_NOT_IN the output is inverted.
+ *
+ * Comparison rules:
+ *   - RAY_SYM / RAY_I64 / RAY_I32 / RAY_I16 / RAY_U8 / RAY_BOOL
+ *     / RAY_DATE / RAY_TIME / RAY_TIMESTAMP: integer-id equality via
+ *     read_col_i64 after converting set elements into a small linear
+ *     probe buffer.
+ *   - RAY_F64 / RAY_F32: bitwise equality (matches kdb+ hash-equality).
+ *   - RAY_STR: pool-aware ray_str_t_eq (deferred; pattern set small).
+ *   - Mixed types: coerce set to col's type if possible, else type error.
+ *
+ * Linear scan of the probe buffer is fine for the typical |set| <= 16
+ * case.  For larger sets a hash table would win, but that's a future
+ * refinement — the cost is still dominated by col->len.
+ * ============================================================================ */
+static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
+    (void)g;
+    bool negate = (op->opcode == OP_NOT_IN);
+
+    /* Broadcast a scalar `col` to a 1-element probe */
+    int64_t col_len = ray_is_atom(col) ? 1 : col->len;
+    int64_t set_len = ray_is_atom(set) ? 1 : set->len;
+    if (col_len == 0 || set_len == 0) {
+        ray_t* out = ray_vec_new(RAY_BOOL, col_len);
+        if (!out || RAY_IS_ERR(out)) return out;
+        out->len = col_len;
+        memset(ray_data(out), negate ? 1 : 0, (size_t)col_len);
+        return out;
+    }
+
+    int8_t ct = ray_is_atom(col) ? (int8_t)(-col->type) : col->type;
+    int8_t st = ray_is_atom(set) ? (int8_t)(-set->type) : set->type;
+    if (RAY_IS_PARTED(ct)) ct = (int8_t)RAY_PARTED_BASETYPE(ct);
+
+    /* RAY_STR handled separately because element extraction is
+     * pool-dependent.  For now error out — STR IN can be added once
+     * the str-pool element reader is wired here. */
+    if (ct == RAY_STR || st == RAY_STR)
+        return ray_error("nyi", "OP_IN on RAY_STR not yet implemented");
+
+    /* Integer-id path: read col and set as int64_t via the column
+     * reader (ray_read_sym when SYM, direct load otherwise). */
+    ray_t* out = ray_vec_new(RAY_BOOL, col_len);
+    if (!out || RAY_IS_ERR(out)) return out;
+    out->len = col_len;
+    uint8_t* ob = (uint8_t*)ray_data(out);
+
+    /* Build a flat probe buffer of set values as int64_t (or float
+     * bits for float types). */
+    int64_t set_stack[32];
+    ray_t* sv_hdr = NULL;
+    int64_t* sv = set_stack;
+    if (set_len > 32) {
+        sv_hdr = ray_alloc((size_t)set_len * sizeof(int64_t));
+        if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
+        sv = (int64_t*)ray_data(sv_hdr);
+    }
+
+    #define READ_AS_I64(dst, vec, type, idx) do {                          \
+        const void* _d = ray_data(vec);                                    \
+        switch (type) {                                                    \
+        case RAY_BOOL: case RAY_U8: (dst) = ((const uint8_t*)_d)[idx]; break; \
+        case RAY_I16:  (dst) = ((const int16_t*)_d)[idx]; break;           \
+        case RAY_I32:  case RAY_DATE: case RAY_TIME:                       \
+                       (dst) = ((const int32_t*)_d)[idx]; break;           \
+        case RAY_I64:  case RAY_TIMESTAMP:                                 \
+                       (dst) = ((const int64_t*)_d)[idx]; break;           \
+        case RAY_F32:  { uint32_t _u;                                      \
+                         memcpy(&_u, &((const float*)_d)[idx], 4);         \
+                         (dst) = (int64_t)_u; break; }                     \
+        case RAY_F64:  { int64_t _u;                                       \
+                         memcpy(&_u, &((const double*)_d)[idx], 8);        \
+                         (dst) = _u; break; }                              \
+        case RAY_SYM:  (dst) = ray_read_sym(_d, (idx), (type),             \
+                                            (vec)->attrs); break;          \
+        default:       (dst) = 0; break;                                   \
+        }                                                                  \
+    } while (0)
+
+    if (ray_is_atom(set)) {
+        sv[0] = set->i64;
+    } else {
+        for (int64_t i = 0; i < set_len; i++) READ_AS_I64(sv[i], set, st, i);
+    }
+
+    /* Scan col and probe against sv[]. */
+    for (int64_t i = 0; i < col_len; i++) {
+        int64_t cv;
+        if (ray_is_atom(col)) cv = col->i64;
+        else READ_AS_I64(cv, col, ct, i);
+        int found = 0;
+        for (int64_t j = 0; j < set_len; j++) {
+            if (cv == sv[j]) { found = 1; break; }
+        }
+        ob[i] = (uint8_t)(found ^ negate);
+    }
+
+    #undef READ_AS_I64
+    if (sv_hdr) ray_free(sv_hdr);
+    return out;
+}
+
+/* ============================================================================
  * Recursive executor
  * ============================================================================ */
 
@@ -644,9 +750,21 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             return vec;
         }
 
+        /* Membership: col IN set_vec */
+        case OP_IN: case OP_NOT_IN: {
+            ray_t* col = exec_node(g, op->inputs[0]);
+            if (!col || RAY_IS_ERR(col)) return col;
+            ray_t* set = exec_node(g, op->inputs[1]);
+            if (!set || RAY_IS_ERR(set)) { ray_release(col); return set; }
+            ray_t* result = exec_in(g, op, col, set);
+            ray_release(col);
+            ray_release(set);
+            return result;
+        }
+
         /* Unary element-wise */
         case OP_NEG: case OP_ABS: case OP_NOT: case OP_SQRT:
-        case OP_LOG: case OP_EXP: case OP_CEIL: case OP_FLOOR:
+        case OP_LOG: case OP_EXP: case OP_CEIL: case OP_FLOOR: case OP_ROUND:
         case OP_ISNULL: case OP_CAST:
         /* Binary element-wise */
         case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
@@ -1648,13 +1766,13 @@ static bool op_streamable(uint16_t opc) {
         case OP_SCAN:
         /* Element-wise unary */
         case OP_NEG: case OP_ABS: case OP_NOT: case OP_SQRT:
-        case OP_LOG: case OP_EXP: case OP_CEIL: case OP_FLOOR:
+        case OP_LOG: case OP_EXP: case OP_CEIL: case OP_FLOOR: case OP_ROUND:
         case OP_ISNULL: case OP_CAST:
         /* Element-wise binary */
         case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
         case OP_EQ: case OP_NE: case OP_LT: case OP_LE:
         case OP_GT: case OP_GE: case OP_AND: case OP_OR:
-        case OP_MIN2: case OP_MAX2: case OP_IF:
+        case OP_MIN2: case OP_MAX2: case OP_IF: case OP_IN: case OP_NOT_IN:
         /* String element-wise */
         case OP_LIKE: case OP_ILIKE: case OP_UPPER: case OP_LOWER:
         case OP_STRLEN: case OP_SUBSTR: case OP_REPLACE: case OP_TRIM:
