@@ -28,6 +28,7 @@
 #include "opt.h"
 #include "core/profile.h"
 #include "mem/sys.h"
+#include "mem/heap.h"
 #include <math.h>
 #include <string.h>
 
@@ -1726,7 +1727,8 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
         uint16_t cmp_op = pred->opcode;
         if (cmp_op != OP_EQ && cmp_op != OP_NE &&
             cmp_op != OP_LT && cmp_op != OP_GT &&
-            cmp_op != OP_LE && cmp_op != OP_GE) continue;
+            cmp_op != OP_LE && cmp_op != OP_GE &&
+            cmp_op != OP_IN && cmp_op != OP_NOT_IN) continue;
 
         ray_op_t* lhs = pred->inputs[0];
         ray_op_t* rhs = pred->inputs[1];
@@ -1778,32 +1780,97 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
         if (!mask) continue;
         memset(mask, 0, n_words * sizeof(uint64_t));
 
-        /* Extract constant for comparison.
-         * Atoms use negative type codes and store values in the header.
-         * RAY_SYM atoms store intern IDs as i64 in the header.
-         * MAPCOMMON key_values for RAY_MC_SYM are always W64 (created by
-         * ray_vec_new(RAY_SYM,...) which defaults to RAY_SYM_W64), so the
-         * 8-byte read in the key comparison loop below is correct. */
-        int64_t const_val = 0;
+        /* OP_IN / OP_NOT_IN expects a literal vector const on the RHS.
+         * For the scalar ops, the const is a single atom or 1-elem vec. */
+        bool is_in  = (cmp_op == OP_IN);
+        bool is_nin = (cmp_op == OP_NOT_IN);
+
+        /* For IN/NOT_IN the scan must be the LHS (col IN set), not
+         * swapped — we never pruned on `const IN col_set` anyway. */
+        if ((is_in || is_nin) && swapped) { ray_sys_free(mask); continue; }
+
+        /* Extract constant(s) for comparison.  Scalar ops take one
+         * value; IN ops take an array of values read from the vec
+         * literal.  We normalize all values to int64_t (which covers
+         * I64, TIMESTAMP, SYM interned IDs, and sign-extended I32/
+         * DATE/TIME).  Atoms store the value in the header; vectors
+         * store it in data. */
+        int64_t const_val = 0;                 /* for scalar ops */
+        int64_t set_stack[32];
+        int64_t* set_vals = set_stack;         /* for IN/NOT_IN */
+        int64_t set_len   = 0;
+        ray_t*  set_heap  = NULL;
+
         int8_t lt = lit->type < 0 ? (int8_t)(-lit->type) : lit->type;
-        if (lt == RAY_I64 || lt == RAY_TIMESTAMP || lt == RAY_SYM) {
-            if (lit->type < 0)
-                const_val = lit->i64;  /* atom: value in header */
-            else
-                memcpy(&const_val, ray_data(lit), sizeof(int64_t));
-        } else if (lt == RAY_I32 || lt == RAY_DATE || lt == RAY_TIME) {
-            int32_t v32;
-            if (lit->type < 0)
-                v32 = lit->i32;
-            else
-                memcpy(&v32, ray_data(lit), sizeof(int32_t));
-            const_val = v32;
-        } else {
+        bool narrow32 = (lt == RAY_I32 || lt == RAY_DATE || lt == RAY_TIME);
+        bool wide64   = (lt == RAY_I64 || lt == RAY_TIMESTAMP || lt == RAY_SYM);
+        if (!narrow32 && !wide64) {
             ray_sys_free(mask);
-            continue; /* unsupported type for partition pruning */
+            continue;  /* unsupported type for partition pruning */
         }
 
-        /* Effective comparison: if swapped, reverse direction */
+        if (is_in || is_nin) {
+            /* Literal must be a vector (ray_const_vec carries the vec
+             * pointer unchanged in ext->literal). */
+            if (lit->type <= 0) { ray_sys_free(mask); continue; }
+            set_len = lit->len;
+            if (set_len <= 0) {
+                /* Empty set: for IN no partition can match → mask stays 0
+                 * and we attach it below (skipping all segments).  For
+                 * NOT_IN every partition passes → set all bits. */
+                if (is_nin) {
+                    for (int64_t p = 0; p < n_parts; p++)
+                        mask[p / 64] |= (1ULL << (p % 64));
+                }
+                goto attach_mask;
+            }
+            if (set_len > 32) {
+                set_heap = ray_alloc((size_t)set_len * sizeof(int64_t));
+                if (!set_heap) { ray_sys_free(mask); continue; }
+                set_vals = (int64_t*)ray_data(set_heap);
+            }
+            /* Read set elements — skip nulls in the literal so a null
+             * sentinel can never match a partition key. */
+            int64_t next = 0;
+            bool set_has_nulls = (lit->attrs & RAY_ATTR_HAS_NULLS) != 0;
+            for (int64_t i = 0; i < set_len; i++) {
+                if (set_has_nulls && ray_vec_is_null(lit, i)) continue;
+                if (narrow32) {
+                    int32_t v32;
+                    memcpy(&v32, (char*)ray_data(lit) + i * sizeof(int32_t), sizeof(int32_t));
+                    set_vals[next++] = v32;
+                } else {
+                    int64_t v64;
+                    memcpy(&v64, (char*)ray_data(lit) + i * sizeof(int64_t), sizeof(int64_t));
+                    set_vals[next++] = v64;
+                }
+            }
+            set_len = next;
+            /* Also handle the degenerate case where all set elements
+             * were null — treat like empty set. */
+            if (set_len == 0) {
+                if (is_nin) {
+                    for (int64_t p = 0; p < n_parts; p++)
+                        mask[p / 64] |= (1ULL << (p % 64));
+                }
+                if (set_heap) ray_free(set_heap);
+                goto attach_mask;
+            }
+        } else {
+            /* Scalar const path (EQ/NE/LT/GT/LE/GE). */
+            if (wide64) {
+                if (lit->type < 0) const_val = lit->i64;
+                else memcpy(&const_val, ray_data(lit), sizeof(int64_t));
+            } else {
+                int32_t v32;
+                if (lit->type < 0) v32 = lit->i32;
+                else memcpy(&v32, ray_data(lit), sizeof(int32_t));
+                const_val = v32;
+            }
+        }
+
+        /* Effective comparison: if swapped, reverse direction
+         * (IN/NOT_IN are never swapped — gated above). */
         uint16_t eff_op = cmp_op;
         if (swapped) {
             if (cmp_op == OP_LT) eff_op = OP_GT;
@@ -1823,18 +1890,28 @@ static void pass_partition_pruning(ray_graph_t* g, ray_op_t* root) {
             }
 
             bool pass = false;
-            switch (eff_op) {
-                case OP_EQ: pass = (pkey == const_val); break;
-                case OP_NE: pass = (pkey != const_val); break;
-                case OP_LT: pass = (pkey <  const_val); break;
-                case OP_GT: pass = (pkey >  const_val); break;
-                case OP_LE: pass = (pkey <= const_val); break;
-                case OP_GE: pass = (pkey >= const_val); break;
-                default: break;
+            if (is_in || is_nin) {
+                bool found = false;
+                for (int64_t j = 0; j < set_len; j++) {
+                    if (pkey == set_vals[j]) { found = true; break; }
+                }
+                pass = is_in ? found : !found;
+            } else {
+                switch (eff_op) {
+                    case OP_EQ: pass = (pkey == const_val); break;
+                    case OP_NE: pass = (pkey != const_val); break;
+                    case OP_LT: pass = (pkey <  const_val); break;
+                    case OP_GT: pass = (pkey >  const_val); break;
+                    case OP_LE: pass = (pkey <= const_val); break;
+                    case OP_GE: pass = (pkey >= const_val); break;
+                    default: break;
+                }
             }
             if (pass)
                 mask[p / 64] |= (1ULL << (p % 64));
         }
+        if (set_heap) ray_free(set_heap);
+    attach_mask:;
 
         /* Attach seg_mask to OP_SCAN nodes reading parted columns from same table.
          * When !any_active the mask is all-zeros — attach it anyway so the

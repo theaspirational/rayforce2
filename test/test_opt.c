@@ -466,6 +466,184 @@ static MunitResult test_partition_pruning_mask(const void* params, void* data) {
     return MUNIT_OK;
 }
 
+/*
+ * Test: partition pruning works for OP_IN predicates.
+ *
+ * 4 partitions keyed by I64 values [100, 200, 300, 400].
+ * Filter: pkey IN [100, 300].  Expected seg_mask: bits 0,2 set.
+ */
+static MunitResult test_partition_pruning_in(const void* params, void* data) {
+    (void)params; (void)data;
+    ray_heap_init();
+    (void)ray_sym_init();
+
+    ray_t* key_values = ray_vec_new(RAY_I64, 4);
+    key_values->len = 4;
+    int64_t keys[] = {100, 200, 300, 400};
+    memcpy(ray_data(key_values), keys, sizeof(keys));
+
+    ray_t* row_counts = ray_vec_new(RAY_I64, 4);
+    row_counts->len = 4;
+    int64_t counts[] = {5, 5, 5, 5};
+    memcpy(ray_data(row_counts), counts, sizeof(counts));
+
+    ray_t* mapcommon = ray_alloc(2 * sizeof(ray_t*));
+    mapcommon->type = RAY_MAPCOMMON;
+    mapcommon->len = 2;
+    ((ray_t**)ray_data(mapcommon))[0] = key_values;
+    ((ray_t**)ray_data(mapcommon))[1] = row_counts;
+
+    ray_t* segs[4];
+    for (int i = 0; i < 4; i++) {
+        segs[i] = ray_vec_new(RAY_I64, 5);
+        segs[i]->len = 5;
+        int64_t* d = (int64_t*)ray_data(segs[i]);
+        for (int j = 0; j < 5; j++) d[j] = (i + 1) * 10 + j;
+    }
+
+    ray_t* val_parted = ray_alloc(4 * sizeof(ray_t*));
+    val_parted->type = RAY_PARTED_BASE + RAY_I64;
+    val_parted->len = 4;
+    for (int i = 0; i < 4; i++)
+        ((ray_t**)ray_data(val_parted))[i] = segs[i];
+
+    int64_t sym_pkey = ray_sym_intern("pkey", 4);
+    int64_t sym_val  = ray_sym_intern("val", 3);
+
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, sym_pkey, mapcommon);
+    tbl = ray_table_add_col(tbl, sym_val, val_parted);
+
+    /* Build DAG: FILTER(SCAN(val), IN(SCAN(pkey), CONST(vec [100 300]))) */
+    ray_graph_t* g = ray_graph_new(tbl);
+    munit_assert_ptr_not_null(g);
+
+    ray_op_t* scan_val  = ray_scan(g, "val");
+    ray_op_t* scan_pkey = ray_scan(g, "pkey");
+
+    /* Build literal set vector [100, 300] */
+    ray_t* set_vec = ray_vec_new(RAY_I64, 2);
+    set_vec->len = 2;
+    ((int64_t*)ray_data(set_vec))[0] = 100;
+    ((int64_t*)ray_data(set_vec))[1] = 300;
+    ray_op_t* set_const = ray_const_vec(g, set_vec);
+    ray_release(set_vec);  /* graph retained it */
+
+    ray_op_t* in_pred = ray_in(g, scan_pkey, set_const);
+    ray_op_t* filt    = ray_filter(g, scan_val, in_pred);
+
+    /* Optimize — should produce seg_mask with bits 0,2 set */
+    ray_op_t* opt = ray_optimize(g, filt);
+    munit_assert_ptr_not_null(opt);
+
+    ray_op_ext_t* val_ext = NULL;
+    for (uint32_t i = 0; i < g->ext_count; i++) {
+        if (g->ext_nodes[i] && g->ext_nodes[i]->base.id == scan_val->id) {
+            val_ext = g->ext_nodes[i];
+            break;
+        }
+    }
+    munit_assert_ptr_not_null(val_ext);
+    munit_assert_ptr_not_null(val_ext->seg_mask);
+
+    /* bits 0,2 set — partitions keyed 100 and 300 are in the set */
+    uint64_t expected = (1ULL << 0) | (1ULL << 2);
+    munit_assert_true(val_ext->seg_mask[0] == expected);
+
+    ray_graph_free(g);
+    ray_release(mapcommon);
+    ray_release(val_parted);
+    ray_release(tbl);
+    ray_sym_destroy();
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/*
+ * Test: partition pruning for OP_NOT_IN is the complement.
+ * pkey NOT IN [100, 300] → bits 1,3 set (keys 200 and 400).
+ */
+static MunitResult test_partition_pruning_not_in(const void* params, void* data) {
+    (void)params; (void)data;
+    ray_heap_init();
+    (void)ray_sym_init();
+
+    ray_t* key_values = ray_vec_new(RAY_I64, 4);
+    key_values->len = 4;
+    int64_t keys[] = {100, 200, 300, 400};
+    memcpy(ray_data(key_values), keys, sizeof(keys));
+
+    ray_t* row_counts = ray_vec_new(RAY_I64, 4);
+    row_counts->len = 4;
+    int64_t counts[] = {5, 5, 5, 5};
+    memcpy(ray_data(row_counts), counts, sizeof(counts));
+
+    ray_t* mapcommon = ray_alloc(2 * sizeof(ray_t*));
+    mapcommon->type = RAY_MAPCOMMON;
+    mapcommon->len = 2;
+    ((ray_t**)ray_data(mapcommon))[0] = key_values;
+    ((ray_t**)ray_data(mapcommon))[1] = row_counts;
+
+    ray_t* segs[4];
+    for (int i = 0; i < 4; i++) {
+        segs[i] = ray_vec_new(RAY_I64, 5);
+        segs[i]->len = 5;
+        int64_t* d = (int64_t*)ray_data(segs[i]);
+        for (int j = 0; j < 5; j++) d[j] = (i + 1) * 10 + j;
+    }
+
+    ray_t* val_parted = ray_alloc(4 * sizeof(ray_t*));
+    val_parted->type = RAY_PARTED_BASE + RAY_I64;
+    val_parted->len = 4;
+    for (int i = 0; i < 4; i++)
+        ((ray_t**)ray_data(val_parted))[i] = segs[i];
+
+    int64_t sym_pkey = ray_sym_intern("pkey", 4);
+    int64_t sym_val  = ray_sym_intern("val", 3);
+
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, sym_pkey, mapcommon);
+    tbl = ray_table_add_col(tbl, sym_val, val_parted);
+
+    ray_graph_t* g = ray_graph_new(tbl);
+    ray_op_t* scan_val  = ray_scan(g, "val");
+    ray_op_t* scan_pkey = ray_scan(g, "pkey");
+
+    ray_t* set_vec = ray_vec_new(RAY_I64, 2);
+    set_vec->len = 2;
+    ((int64_t*)ray_data(set_vec))[0] = 100;
+    ((int64_t*)ray_data(set_vec))[1] = 300;
+    ray_op_t* set_const = ray_const_vec(g, set_vec);
+    ray_release(set_vec);
+
+    ray_op_t* nin_pred = ray_not_in(g, scan_pkey, set_const);
+    ray_op_t* filt     = ray_filter(g, scan_val, nin_pred);
+
+    ray_op_t* opt = ray_optimize(g, filt);
+    munit_assert_ptr_not_null(opt);
+
+    ray_op_ext_t* val_ext = NULL;
+    for (uint32_t i = 0; i < g->ext_count; i++) {
+        if (g->ext_nodes[i] && g->ext_nodes[i]->base.id == scan_val->id) {
+            val_ext = g->ext_nodes[i];
+            break;
+        }
+    }
+    munit_assert_ptr_not_null(val_ext);
+    munit_assert_ptr_not_null(val_ext->seg_mask);
+
+    uint64_t expected = (1ULL << 1) | (1ULL << 3);
+    munit_assert_true(val_ext->seg_mask[0] == expected);
+
+    ray_graph_free(g);
+    ray_release(mapcommon);
+    ray_release(val_parted);
+    ray_release(tbl);
+    ray_sym_destroy();
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
     { "/filter_reorder_type", test_filter_reorder_by_type, NULL, NULL, 0, NULL },
     { "/filter_and_split",    test_filter_and_split,       NULL, NULL, 0, NULL },
@@ -475,6 +653,8 @@ static MunitTest tests[] = {
     { "/projection_pushdown", test_projection_pushdown,   NULL, NULL, 0, NULL },
     { "/partition_pruning",   test_partition_pruning_smoke, NULL, NULL, 0, NULL },
     { "/partition_pruning_mask", test_partition_pruning_mask, NULL, NULL, 0, NULL },
+    { "/partition_pruning_in",   test_partition_pruning_in,   NULL, NULL, 0, NULL },
+    { "/partition_pruning_not_in", test_partition_pruning_not_in, NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL }
 };
 
