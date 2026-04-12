@@ -606,6 +606,16 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
     out->len = col_len;
     uint8_t* ob = (uint8_t*)ray_data(out);
 
+    /* Null-aware: null rows in the column never pass either `in` or
+     * `not-in`.  Mirrors SQL-style semantics where NULL IN (…) and
+     * NULL NOT IN (…) both yield UNKNOWN / false in a boolean
+     * context.  Also skip null elements when building the probe
+     * buffer so a non-null col row doesn't accidentally match the
+     * sentinel value of a null set element. */
+    bool col_has_nulls = !ray_is_atom(col) && (col->attrs & RAY_ATTR_HAS_NULLS);
+    bool col_atom_null = ray_is_atom(col) && RAY_ATOM_IS_NULL(col);
+    bool set_has_nulls = !ray_is_atom(set) && (set->attrs & RAY_ATTR_HAS_NULLS);
+
     #define READ_I64(dst, vec, type, idx) do {                             \
         const void* _d = ray_data(vec);                                    \
         switch (type) {                                                    \
@@ -636,6 +646,10 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
         }                                                                  \
     } while (0)
 
+    /* Compact probe buffer: drop null set elements up front so the
+     * inner loop doesn't special-case them. */
+    int64_t sv_len = 0;
+
     if (use_double) {
         double sv_stack[32];
         ray_t* sv_hdr = NULL;
@@ -646,21 +660,28 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
             sv = (double*)ray_data(sv_hdr);
         }
         if (ray_is_atom(set)) {
-            if (st == RAY_F64)  sv[0] = set->f64;
-            else                sv[0] = (double)set->i64;
+            if (!RAY_ATOM_IS_NULL(set)) {
+                sv[0] = (st == RAY_F64) ? set->f64 : (double)set->i64;
+                sv_len = 1;
+            }
         } else {
-            for (int64_t i = 0; i < set_len; i++) READ_F64(sv[i], set, st, i);
+            for (int64_t i = 0; i < set_len; i++) {
+                if (set_has_nulls && ray_vec_is_null(set, i)) continue;
+                READ_F64(sv[sv_len], set, st, i);
+                sv_len++;
+            }
         }
         for (int64_t i = 0; i < col_len; i++) {
+            /* Null col rows never pass either in or not-in. */
+            bool row_null = col_atom_null ||
+                            (col_has_nulls && !ray_is_atom(col) &&
+                             ray_vec_is_null(col, i));
+            if (row_null) { ob[i] = 0; continue; }
             double cv;
-            if (ray_is_atom(col)) {
-                if (ct == RAY_F64)  cv = col->f64;
-                else                cv = (double)col->i64;
-            } else {
-                READ_F64(cv, col, ct, i);
-            }
+            if (ray_is_atom(col)) cv = (ct == RAY_F64) ? col->f64 : (double)col->i64;
+            else READ_F64(cv, col, ct, i);
             int found = 0;
-            for (int64_t j = 0; j < set_len; j++) {
+            for (int64_t j = 0; j < sv_len; j++) {
                 if (cv == sv[j]) { found = 1; break; }
             }
             ob[i] = (uint8_t)(found ^ negate);
@@ -676,15 +697,26 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
             if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
             sv = (int64_t*)ray_data(sv_hdr);
         }
-        if (ray_is_atom(set)) sv[0] = set->i64;
-        else for (int64_t i = 0; i < set_len; i++) READ_I64(sv[i], set, st, i);
+        if (ray_is_atom(set)) {
+            if (!RAY_ATOM_IS_NULL(set)) { sv[0] = set->i64; sv_len = 1; }
+        } else {
+            for (int64_t i = 0; i < set_len; i++) {
+                if (set_has_nulls && ray_vec_is_null(set, i)) continue;
+                READ_I64(sv[sv_len], set, st, i);
+                sv_len++;
+            }
+        }
 
         for (int64_t i = 0; i < col_len; i++) {
+            bool row_null = col_atom_null ||
+                            (col_has_nulls && !ray_is_atom(col) &&
+                             ray_vec_is_null(col, i));
+            if (row_null) { ob[i] = 0; continue; }
             int64_t cv;
             if (ray_is_atom(col)) cv = col->i64;
             else READ_I64(cv, col, ct, i);
             int found = 0;
-            for (int64_t j = 0; j < set_len; j++) {
+            for (int64_t j = 0; j < sv_len; j++) {
                 if (cv == sv[j]) { found = 1; break; }
             }
             ob[i] = (uint8_t)(found ^ negate);

@@ -1008,6 +1008,38 @@ static MunitResult test_eval_select_where_in_sym(const void* params, void* fixtu
     return MUNIT_OK;
 }
 
+/* ---- Test: OP_IN must not leak null rows through ----
+ * Regression: exec_in originally treated the raw null-sentinel
+ * value as a normal data value.  That meant `(not-in k [1])`
+ * on a column containing 0Nl nulls returned the null rows as
+ * "true" (because null-sentinel != 1), leaking them through.
+ * Null rows must never pass either `in` or `not-in`. */
+static MunitResult test_eval_select_where_in_nulls(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* not-in with null rows: source has [1 0Nl 3 0Nl 5], filter
+     * `not-in [1]` should return only 3 and 5 — not the two nulls. */
+    ray_t* r1 = ray_eval_str(
+        "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
+        "(select {from: t where: (not-in k [1])}))");
+    munit_assert_ptr_not_null(r1);
+    munit_assert_false(RAY_IS_ERR(r1));
+    munit_assert_int(ray_table_nrows(r1), ==, 2);
+    ray_release(r1);
+
+    /* in with null rows: source has [1 0Nl 3 0Nl 5], filter
+     * `in [1 3]` should return 1 and 3 — not the nulls. */
+    ray_t* r2 = ray_eval_str(
+        "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
+        "(select {from: t where: (in k [1 3])}))");
+    munit_assert_ptr_not_null(r2);
+    munit_assert_false(RAY_IS_ERR(r2));
+    munit_assert_int(ray_table_nrows(r2), ==, 2);
+    ray_release(r2);
+
+    return MUNIT_OK;
+}
+
 /* ---- Test: `in` with mixed numeric types (F64 col vs I64 set) ----
  * Regression: exec_in originally compared bit patterns which made
  * `(in price_f64 [1 2 3])` match nothing.  Now we promote to double
@@ -2761,6 +2793,7 @@ static MunitTest lang_tests[] = {
     { "/eval/select_where_in_sym",   test_eval_select_where_in_sym,   lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_i64",   test_eval_select_where_in_i64,   lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_mixed_numeric", test_eval_select_where_in_mixed_numeric, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_where_in_nulls", test_eval_select_where_in_nulls, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_in",    test_eval_select_by_where_in,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_if",             test_eval_select_if,             lang_setup, lang_teardown, 0, NULL },
