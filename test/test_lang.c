@@ -1017,6 +1017,131 @@ static MunitResult test_eval_select_where_in_sym(const void* params, void* fixtu
  * falsely returns 1 row.  With the fix set_len stays 0, the probe
  * is empty, no false match. */
 
+/* ---- Test: lambda inlining in non-agg column expression ---- */
+static MunitResult test_eval_select_lambda_nonagg(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p 'q] "
+        "(list [A B A B] [10.0 20.0 30.0 40.0] [1 2 3 4]))) "
+        "(select {from: t by: s m: ((fn [x y] (+ x y)) p q)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    munit_assert_int(m_col->type, ==, RAY_LIST);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: lambda in WHERE predicate compiles (was: error domain) ---- */
+static MunitResult test_eval_select_lambda_where(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [10 20 30 40 50]))) "
+        "(select {from: t where: ((fn [x] (> x 25)) p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    /* rows where p > 25: 30, 40, 50 — 3 rows */
+    munit_assert_int(ray_table_nrows(result), ==, 3);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: lambda as an aggregation argument ---- */
+static MunitResult test_eval_select_lambda_agg(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['s 'p] "
+        "(list [A B A B] [10.0 20.0 30.0 40.0]))) "
+        "(select {from: t by: s tot: (sum ((fn [x] (* x 2.0)) p))}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    int64_t tot_id = ray_sym_intern("tot", 3);
+    ray_t* tot_col = ray_table_get_col(result, tot_id);
+    munit_assert_ptr_not_null(tot_col);
+    /* A: 2*(10+30) = 80; B: 2*(20+40) = 120 */
+    double* td = (double*)ray_data(tot_col);
+    munit_assert_double(td[0], ==, 80.0);
+    munit_assert_double(td[1], ==, 120.0);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: `(let var val body)` binding in WHERE ---- */
+static MunitResult test_eval_select_let_binding(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [10 20 30 40 50]))) "
+        "(select {from: t where: (let threshold 25 (> p threshold))}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 3);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: nested lambda shadowing — inner `x` shadows outer ----
+ * Expression applied per row: ((fn [x] ((fn [x] (* x 10)) (+ x 1))) p)
+ * Expands to: (* (+ p 1) 10) — so each row becomes (p+1)*10.
+ * The outer `x` is `p`; the inner `x` is `(+ x 1)` = `(+ p 1)`.
+ * Verify p=3 gives 40, p=5 gives 60. */
+static MunitResult test_eval_select_lambda_nested_shadow(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [3 5]))) "
+        "(select {from: t m: ((fn [x] ((fn [x] (* x 10)) (+ x 1))) p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 2);
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    int64_t* md = (int64_t*)ray_data(m_col);
+    munit_assert_int(md[0], ==, 40);
+    munit_assert_int(md[1], ==, 60);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: lambda arg reuse — actual compiled once, referenced twice ----
+ * `((fn [x] (+ x x)) (* p 2))` per row.  Naive AST substitution
+ * would recompute `(* p 2)` twice, but DAG-node sharing computes it
+ * once and both inputs of `+` point at the same node.  Functionally:
+ * each row becomes 4*p. */
+static MunitResult test_eval_select_lambda_arg_reuse(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [10 20 30]))) "
+        "(select {from: t m: ((fn [x] (+ x x)) (* p 2))}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    int64_t m_id = ray_sym_intern("m", 1);
+    ray_t* m_col = ray_table_get_col(result, m_id);
+    munit_assert_ptr_not_null(m_col);
+    int64_t* md = (int64_t*)ray_data(m_col);
+    munit_assert_int(md[0], ==, 40);
+    munit_assert_int(md[1], ==, 80);
+    munit_assert_int(md[2], ==, 120);
+    ray_release(result);
+    return MUNIT_OK;
+}
+
+/* ---- Test: arity mismatch returns an error ---- */
+static MunitResult test_eval_select_lambda_arity_err(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* result = ray_eval_str(
+        "(do (set t (table ['p] (list [1 2 3]))) "
+        "(select {from: t where: ((fn [x y] (> x y)) p)}))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_true(RAY_IS_ERR(result));
+    ray_release(result);
+    return MUNIT_OK;
+}
+
 /* ---- Test: `== 0N` / `!= 0N` null-check idiom ----
  * Regression: compile_expr_dag routed typed null literals
  * (`-RAY_I64` with RAY_ATOM_IS_NULL set) through the fast ctors
@@ -2904,6 +3029,13 @@ static MunitTest lang_tests[] = {
     { "/eval/select_where_in_empty_set_nulls", test_eval_select_where_in_empty_set_nulls, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_in_sym_vs_atom_mismatch", test_eval_select_where_in_sym_vs_atom_mismatch, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_where_eq_null_literal", test_eval_select_where_eq_null_literal, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_lambda_nonagg",        test_eval_select_lambda_nonagg,        lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_lambda_where",         test_eval_select_lambda_where,         lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_lambda_agg",           test_eval_select_lambda_agg,           lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_let_binding",          test_eval_select_let_binding,          lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_lambda_nested_shadow", test_eval_select_lambda_nested_shadow, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_lambda_arg_reuse",     test_eval_select_lambda_arg_reuse,     lang_setup, lang_teardown, 0, NULL },
+    { "/eval/select_lambda_arity_err",     test_eval_select_lambda_arity_err,     lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_by_where_in",    test_eval_select_by_where_in,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_if",             test_eval_select_if,             lang_setup, lang_teardown, 0, NULL },

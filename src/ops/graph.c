@@ -206,6 +206,8 @@ ray_graph_t* ray_graph_new(ray_t* tbl) {
     g->ext_cap = 0;
     g->selection = NULL;
 
+    g->cexpr_env_top = 0;  /* compile-time lambda/let env, initially empty */
+
     return g;
 }
 

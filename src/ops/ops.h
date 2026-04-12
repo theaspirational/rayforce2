@@ -370,6 +370,18 @@ typedef struct ray_graph {
     uint32_t       ext_count;   /* number of extended nodes */
     uint32_t       ext_cap;     /* capacity of ext_nodes array */
     ray_t*          selection;   /* RAY_SEL bitmap — lazy filter (NULL = all pass) */
+
+    /* Compile-time local env for lambda / let inlining in
+     * compile_expr_dag (src/ops/query.c).  Stack of
+     * {formal_sym_id → compiled op_node}.  Pushed on lambda
+     * call / let entry, popped on exit.  Looked up BEFORE
+     * ray_scan so formals shadow column names naturally.
+     * Weak references — ops live in g->nodes. */
+    struct {
+        int64_t    sym;
+        ray_op_t*  node;
+    } cexpr_env[32];
+    int             cexpr_env_top;
 } ray_graph_t;
 
 /* ===== Morsel Iterator ===== */

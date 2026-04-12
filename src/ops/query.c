@@ -247,6 +247,41 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
     return sorted;
 }
 
+/* --------------------------------------------------------------------------
+ * Compile-time local env helpers for lambda / let inlining.
+ *
+ * compile_expr_dag hangs a small stack of {formal_sym_id → op_node}
+ * bindings on the graph.  When the recursive walker encounters a
+ * name reference, it checks the env first; if the name is bound,
+ * return the pre-compiled op — otherwise fall through to ray_scan.
+ *
+ * Shadowing is automatic: nested lambda / let pushes appear later in
+ * the stack, and cexpr_env_lookup walks top-down so the innermost
+ * binding wins.  Pops are counted — never partial rewinds.
+ *
+ * No retain/release: op nodes live in g->nodes and are freed
+ * uniformly by ray_graph_free.
+ * -------------------------------------------------------------------------- */
+static ray_op_t* cexpr_env_lookup(ray_graph_t* g, int64_t sym) {
+    for (int i = g->cexpr_env_top - 1; i >= 0; i--)
+        if (g->cexpr_env[i].sym == sym)
+            return g->cexpr_env[i].node;
+    return NULL;
+}
+
+static bool cexpr_env_push(ray_graph_t* g, int64_t sym, ray_op_t* node) {
+    if (g->cexpr_env_top >= 32) return false;
+    g->cexpr_env[g->cexpr_env_top].sym  = sym;
+    g->cexpr_env[g->cexpr_env_top].node = node;
+    g->cexpr_env_top++;
+    return true;
+}
+
+static void cexpr_env_pop(ray_graph_t* g, int n) {
+    g->cexpr_env_top -= n;
+    if (g->cexpr_env_top < 0) g->cexpr_env_top = 0;  /* defensive */
+}
+
 /* Compile a Rayfall AST expression into a DAG node */
 static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
     if (!expr) return NULL;
@@ -269,8 +304,12 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         return ray_const_str(g, ptr, len);
     }
 
-    /* Name reference → column scan. */
+    /* Name reference → local env first, then column scan.  The
+     * local env holds lambda / let bindings; it takes precedence
+     * over column names so formals shadow columns naturally. */
     if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
+        ray_op_t* bound = cexpr_env_lookup(g, expr->i64);
+        if (bound) return bound;
         ray_t* s = ray_sym_str(expr->i64);
         if (!s) return NULL;
         return ray_scan(g, ray_str_ptr(s));
@@ -301,6 +340,51 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         if (n == 0) return NULL;
         ray_t** elems = (ray_t**)ray_data(expr);
         ray_t* head = elems[0];
+
+        /* Lambda invocation: `((fn [formals] body) a1 a2 …)`.
+         * β-reduce at the DAG-node level — compile each actual
+         * arg into its own op (in the current env), push the
+         * {formal_i → actual_op_i} frame, recurse into the body
+         * (which reads the env via cexpr_env_lookup when it hits
+         * a name reference), then pop.  Sub-expression sharing is
+         * automatic: multiple uses of a formal all resolve to the
+         * single compiled actual op. */
+        if (head->type == RAY_LIST && !(head->attrs & RAY_ATTR_DICT)) {
+            int64_t hn = ray_len(head);
+            if (hn != 3) return NULL;
+            ray_t** hel = (ray_t**)ray_data(head);
+            if (hel[0]->type != -RAY_SYM) return NULL;
+            ray_t* hname_str = ray_sym_str(hel[0]->i64);
+            if (!hname_str || ray_str_len(hname_str) != 2 ||
+                memcmp(ray_str_ptr(hname_str), "fn", 2) != 0) return NULL;
+
+            ray_t* formals = hel[1];
+            ray_t* body    = hel[2];
+            if (!ray_is_vec(formals) || formals->type != RAY_SYM) return NULL;
+            int64_t nf = formals->len;
+            if (n - 1 != nf) return NULL;              /* arity mismatch */
+            if (nf > 16) return NULL;                  /* too many formals */
+            if (g->cexpr_env_top + (int)nf > 32) return NULL; /* env overflow */
+
+            /* Compile actuals in the CURRENT env, before pushing. */
+            ray_op_t* actuals[16];
+            for (int64_t i = 0; i < nf; i++) {
+                actuals[i] = compile_expr_dag(g, elems[i + 1]);
+                if (!actuals[i]) return NULL;
+            }
+            int64_t* fids = (int64_t*)ray_data(formals);
+            int pushed = 0;
+            for (int64_t i = 0; i < nf; i++) {
+                if (!cexpr_env_push(g, fids[i], actuals[i])) {
+                    cexpr_env_pop(g, pushed);
+                    return NULL;
+                }
+                pushed++;
+            }
+            ray_op_t* result = compile_expr_dag(g, body);
+            cexpr_env_pop(g, pushed);
+            return result;
+        }
 
         /* Head must be a name referencing a builtin */
         if (head->type != -RAY_SYM) return NULL;
@@ -412,6 +496,23 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         if (fname_len == 2 && memcmp(fname, "do", 2) == 0) {
             if (n < 2) return NULL;
             return compile_expr_dag(g, elems[n - 1]);
+        }
+
+        /* (let var val body) — compile `val` in the current env,
+         * push {var → val_op}, compile `body` with the extended
+         * env, pop.  Same β-reduction mechanism as lambda inlining,
+         * just with a single binding and simpler surface syntax. */
+        if (fname_len == 3 && memcmp(fname, "let", 3) == 0) {
+            if (n != 4) return NULL;
+            ray_t* var_expr = elems[1];
+            if (var_expr->type != -RAY_SYM) return NULL;
+            int64_t var_sym = var_expr->i64;
+            ray_op_t* val_op = compile_expr_dag(g, elems[2]);
+            if (!val_op) return NULL;
+            if (!cexpr_env_push(g, var_sym, val_op)) return NULL;
+            ray_op_t* body_op = compile_expr_dag(g, elems[3]);
+            cexpr_env_pop(g, 1);
+            return body_op;
         }
 
         /* (cond (p1 e1) (p2 e2) ... (else en)) → nested OP_IF. */
