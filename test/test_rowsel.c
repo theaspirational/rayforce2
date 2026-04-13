@@ -243,6 +243,69 @@ static MunitResult test_rowsel_parallel(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* Many ALL segments + a few MIX — verifies that idx[] is sized for
+ * MIX-contributed entries only, not total_pass.  Without this fix the
+ * producer over-allocates idx[] to ~total_pass uint16s, which on a
+ * 10M-row 99%-selective filter wastes ~20 MB.
+ *
+ * Test shape: 4 morsels, segments 0..2 are all-true (ALL, contribute
+ * 0 to idx[]), segment 3 has 7 mixed bits.  total_pass should be
+ * 3*1024 + 7 = 3079 but the underlying allocation should size idx[]
+ * for only 7 entries. */
+static MunitResult test_rowsel_all_segments_compact(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    int64_t nrows = 4 * RAY_MORSEL_ELEMS;
+    ray_t* buf = ray_alloc((size_t)nrows);
+    uint8_t* bytes = (uint8_t*)ray_data(buf);
+    memset(bytes, 1, 3 * RAY_MORSEL_ELEMS);
+    /* Segment 3: only 7 set bits, in a partial pattern. */
+    memset(bytes + 3 * RAY_MORSEL_ELEMS, 0, RAY_MORSEL_ELEMS);
+    int positions[] = {2, 5, 100, 333, 700, 900, 1023};
+    for (size_t i = 0; i < sizeof(positions) / sizeof(positions[0]); i++)
+        bytes[3 * RAY_MORSEL_ELEMS + positions[i]] = 1;
+
+    ray_t* pred = make_pred(bytes, nrows);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_ptr_not_null(sel);
+
+    ray_rowsel_t* m = ray_rowsel_meta(sel);
+    munit_assert_int(m->total_pass, ==, 3 * RAY_MORSEL_ELEMS + 7);
+    munit_assert_int(m->n_segs, ==, 4);
+
+    const uint8_t* flags = ray_rowsel_flags(sel);
+    munit_assert_int(flags[0], ==, RAY_SEL_ALL);
+    munit_assert_int(flags[1], ==, RAY_SEL_ALL);
+    munit_assert_int(flags[2], ==, RAY_SEL_ALL);
+    munit_assert_int(flags[3], ==, RAY_SEL_MIX);
+
+    /* Critical: seg_offsets[n_segs] must equal 7 — the actual
+     * idx[] occupancy — NOT total_pass.  Verifies the allocation
+     * is sized for MIX rows only. */
+    const uint32_t* offsets = ray_rowsel_offsets(sel);
+    munit_assert_int(offsets[0], ==, 0);
+    munit_assert_int(offsets[1], ==, 0);
+    munit_assert_int(offsets[2], ==, 0);
+    munit_assert_int(offsets[3], ==, 0);
+    munit_assert_int(offsets[4], ==, 7);
+
+    /* Reconstruct: 3072 dense rows from segments 0..2, plus 7
+     * indexed rows from segment 3. */
+    int64_t* recon = (int64_t*)ray_data(ray_alloc((size_t)m->total_pass * sizeof(int64_t)));
+    int64_t recon_n = reconstruct(sel, recon);
+    munit_assert_int(recon_n, ==, m->total_pass);
+    /* Spot-check the segment-3 indices land in the right spots. */
+    int64_t base = 3 * RAY_MORSEL_ELEMS;
+    munit_assert_int(recon[m->total_pass - 7], ==, base + 2);
+    munit_assert_int(recon[m->total_pass - 1], ==, base + 1023);
+
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_release(buf);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
 /* Refine: existing rowsel ANDed with a second pred shrinks correctly. */
 static MunitResult test_rowsel_refine(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -311,6 +374,7 @@ static MunitTest rowsel_tests[] = {
     { "/multi_morsel",           test_rowsel_multi_morsel,           NULL, NULL, 0, NULL },
     { "/partial_last_morsel",    test_rowsel_partial_last_morsel,    NULL, NULL, 0, NULL },
     { "/parallel",               test_rowsel_parallel,               NULL, NULL, 0, NULL },
+    { "/all_segments_compact",   test_rowsel_all_segments_compact,   NULL, NULL, 0, NULL },
     { "/refine",                 test_rowsel_refine,                 NULL, NULL, 0, NULL },
     { "/refine_null_existing",   test_rowsel_refine_null_existing,   NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL }

@@ -20,10 +20,11 @@
  * Allocation helpers
  * ────────────────────────────────────────────────────────────────── */
 
-ray_t* ray_rowsel_new(int64_t nrows, int64_t total_pass) {
-    if (nrows < 0 || total_pass < 0 || total_pass > nrows) return NULL;
+ray_t* ray_rowsel_new(int64_t nrows, int64_t total_pass, int64_t idx_count) {
+    if (nrows < 0 || total_pass < 0 || total_pass > nrows ||
+        idx_count < 0 || idx_count > total_pass) return NULL;
 
-    size_t payload = ray_rowsel_payload_bytes(nrows, total_pass);
+    size_t payload = ray_rowsel_payload_bytes(nrows, idx_count);
     ray_t* block = ray_alloc(payload);
     if (!block) return NULL;
 
@@ -114,7 +115,7 @@ ray_t* ray_rowsel_from_pred(ray_t* pred) {
     int64_t nrows = pred->len;
     if (nrows == 0) {
         /* Empty source — empty selection. */
-        return ray_rowsel_new(0, 0);
+        return ray_rowsel_new(0, 0, 0);
     }
 
     const uint8_t* pred_data = (const uint8_t*)ray_data(pred);
@@ -138,9 +139,22 @@ ray_t* ray_rowsel_from_pred(ray_t* pred) {
     else
         rowsel_pass1_fn(&p1, 0, 0, (int64_t)n_segs);
 
-    /* Sum + decide all-pass / none-pass. */
+    /* Single sweep: classify each segment and accumulate both
+     * total_pass (ALL + MIX rows, for meta) and idx_count (MIX rows
+     * only, for sizing idx[]).  Walking popcount[] sequentially —
+     * n_segs is at most ~10K for a 10M-row table, trivial. */
     int64_t total_pass = 0;
-    for (uint32_t s = 0; s < n_segs; s++) total_pass += popcount[s];
+    int64_t idx_count  = 0;
+    for (uint32_t s = 0; s < n_segs; s++) {
+        int64_t seg_start = (int64_t)s * RAY_MORSEL_ELEMS;
+        int64_t seg_end   = seg_start + RAY_MORSEL_ELEMS;
+        if (seg_end > nrows) seg_end = nrows;
+        int64_t seg_len = seg_end - seg_start;
+        uint32_t pc = popcount[s];
+        total_pass += pc;
+        if (pc != 0 && (int64_t)pc != seg_len)
+            idx_count += pc;
+    }
 
     if (total_pass == nrows) {
         /* All rows pass — convention is "no selection". */
@@ -148,15 +162,17 @@ ray_t* ray_rowsel_from_pred(ray_t* pred) {
         return NULL;
     }
 
-    /* Allocate the result block sized for the actual passing rows. */
-    ray_t* block = ray_rowsel_new(nrows, total_pass);
+    /* Allocate the result block sized for the MIX-contributed
+     * indices only.  ALL and NONE segments add nothing to idx[]. */
+    ray_t* block = ray_rowsel_new(nrows, total_pass, idx_count);
     if (!block) {
         ray_release(pop_block);
         return NULL;
     }
 
-    /* Fill seg_flags + seg_offsets sequentially.  n_segs is at most
-     * nrows/1024 ≈ 10K for a 10M-row table — trivial. */
+    /* Fill seg_flags + seg_offsets in a second sequential walk over
+     * popcount[].  cum accumulates MIX-contributed indices to build
+     * the prefix sum into idx[]. */
     uint8_t*  seg_flags   = ray_rowsel_flags(block);
     uint32_t* seg_offsets = ray_rowsel_offsets(block);
     uint32_t cum = 0;
@@ -171,22 +187,13 @@ ray_t* ray_rowsel_from_pred(ray_t* pred) {
             seg_flags[s] = RAY_SEL_NONE;
         } else if ((int64_t)pc == seg_len) {
             seg_flags[s] = RAY_SEL_ALL;
-            /* ALL segments contribute zero indices to idx[] — the
-             * consumer iterates the dense range directly. */
+            /* ALL contributes nothing to idx[]; cum unchanged. */
         } else {
             seg_flags[s] = RAY_SEL_MIX;
             cum += pc;
         }
     }
     seg_offsets[n_segs] = cum;
-    /* cum now equals the number of MIX-contributed indices, which is
-     * exactly the size of idx[] when ALL segments contribute zero.
-     * total_pass counts ALL+MIX rows; the idx[] array only stores
-     * MIX positions.  Re-size accounting: ray_rowsel_new sized idx[]
-     * for `total_pass`, but we only fill `cum` of them.  We keep the
-     * over-allocation — it's bounded by total_pass which itself is
-     * bounded by nrows.  Consumers read via seg_offsets so the unused
-     * tail is invisible. */
 
     /* Pass 2 — parallel index write into idx[]. */
     if (cum > 0) {
@@ -237,12 +244,14 @@ ray_t* ray_rowsel_refine(ray_t* existing, ray_t* pred) {
     memset(popcount, 0, (size_t)n_segs * sizeof(uint32_t));
 
     int64_t total_pass = 0;
+    int64_t idx_count  = 0;
     for (uint32_t s = 0; s < n_segs; s++) {
         uint8_t f = e_flags[s];
         if (f == RAY_SEL_NONE) continue;
         int64_t base = (int64_t)s * RAY_MORSEL_ELEMS;
         int64_t end  = base + RAY_MORSEL_ELEMS;
         if (end > nrows) end = nrows;
+        int64_t seg_len = end - base;
         uint32_t n = 0;
         if (f == RAY_SEL_ALL) {
             for (int64_t r = base; r < end; r++)
@@ -257,6 +266,10 @@ ray_t* ray_rowsel_refine(ray_t* existing, ray_t* pred) {
         }
         popcount[s] = n;
         total_pass += n;
+        /* This segment will be MIX in the output (and contribute to
+         * idx[]) iff some-but-not-all of its rows pass. */
+        if (n != 0 && (int64_t)n != seg_len)
+            idx_count += n;
     }
 
     if (total_pass == nrows) {
@@ -267,7 +280,7 @@ ray_t* ray_rowsel_refine(ray_t* existing, ray_t* pred) {
         return NULL;
     }
 
-    ray_t* block = ray_rowsel_new(nrows, total_pass);
+    ray_t* block = ray_rowsel_new(nrows, total_pass, idx_count);
     if (!block) {
         ray_release(pop_block);
         return NULL;

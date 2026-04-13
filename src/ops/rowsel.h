@@ -90,23 +90,35 @@ static inline uint16_t* ray_rowsel_idx(ray_t* block) {
     return (uint16_t*)(ray_rowsel_offsets(block) + (m->n_segs + 1));
 }
 
-/* Compute the total bytes needed for the inline payload.  Matches the
- * layout the accessors above expect. */
-static inline size_t ray_rowsel_payload_bytes(int64_t nrows, int64_t total_pass) {
+/* Compute the total bytes needed for the inline payload.
+ * `idx_count` is the number of uint16_t entries the idx[] array
+ * needs to hold — this is the sum of popcounts over MIX segments
+ * only, NOT the total passing-row count.  ALL segments contribute
+ * zero to idx[]. */
+static inline size_t ray_rowsel_payload_bytes(int64_t nrows, int64_t idx_count) {
     uint32_t n_segs = (uint32_t)((nrows + RAY_MORSEL_ELEMS - 1) / RAY_MORSEL_ELEMS);
     if (nrows <= 0) n_segs = 0;
     return sizeof(ray_rowsel_t)
          + ray_rowsel_pad8(n_segs)
          + (size_t)(n_segs + 1) * sizeof(uint32_t)
-         + (size_t)total_pass    * sizeof(uint16_t);
+         + (size_t)idx_count    * sizeof(uint16_t);
 }
 
-/* Allocate a rowsel block sized for `nrows` source rows and
- * `total_pass` selected rows.  Header fields are populated; arrays
- * are uninitialized.  Caller is responsible for filling seg_flags,
- * seg_offsets, and idx, then handing the block off (g->selection,
- * etc.) or releasing via ray_rowsel_release.  Returns NULL on OOM. */
-ray_t* ray_rowsel_new(int64_t nrows, int64_t total_pass);
+/* Allocate a rowsel block.
+ *
+ * `nrows`      — source row count this selection covers.
+ * `total_pass` — number of passing rows (ALL + MIX).  Stored in
+ *                meta; consumers read it for sizing decisions.
+ * `idx_count`  — number of uint16_t slots the idx[] array needs.
+ *                Equal to the sum of popcounts over segments
+ *                tagged MIX in the final layout.  ALL and NONE
+ *                segments contribute zero.
+ *
+ * Header fields are populated; arrays are uninitialized.  Caller
+ * fills seg_flags, seg_offsets, and idx, then hands the block off
+ * (g->selection, etc.) or releases via ray_rowsel_release.
+ * Returns NULL on OOM. */
+ray_t* ray_rowsel_new(int64_t nrows, int64_t total_pass, int64_t idx_count);
 
 /* Release a rowsel block.  Equivalent to ray_release / ray_free of
  * the underlying allocation — exposed under its own name for clarity
