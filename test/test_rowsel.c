@@ -5,7 +5,7 @@
 
 #include "munit.h"
 #include <rayforce.h>
-#include "mem/heap.h"
+#include "mem/heap.h"   /* BSIZEOF for block-size assertion */
 #include "ops/ops.h"
 #include "ops/rowsel.h"
 #include <string.h>
@@ -279,15 +279,32 @@ static MunitResult test_rowsel_all_segments_compact(const void* params, void* fi
     munit_assert_int(flags[2], ==, RAY_SEL_ALL);
     munit_assert_int(flags[3], ==, RAY_SEL_MIX);
 
-    /* Critical: seg_offsets[n_segs] must equal 7 — the actual
-     * idx[] occupancy — NOT total_pass.  Verifies the allocation
-     * is sized for MIX rows only. */
+    /* seg_offsets[n_segs] must equal 7 — the actual idx[]
+     * occupancy.  This part is correct in BOTH the buggy and
+     * fixed code (offsets are computed by walking popcounts) so
+     * it's a sanity check, not the regression assertion. */
     const uint32_t* offsets = ray_rowsel_offsets(sel);
     munit_assert_int(offsets[0], ==, 0);
     munit_assert_int(offsets[1], ==, 0);
     munit_assert_int(offsets[2], ==, 0);
     munit_assert_int(offsets[3], ==, 0);
     munit_assert_int(offsets[4], ==, 7);
+
+    /* Real regression assertion: the underlying ray_alloc block
+     * size must reflect idx_count=7, not idx_count=total_pass.
+     *
+     * Fixed payload   = sizeof(meta)24 + pad8(4)8 + (4+1)*4 + 7*2     = 66 B
+     * Buggy payload   = sizeof(meta)24 + pad8(4)8 + (4+1)*4 + 3079*2  = 6210 B
+     *
+     * Buddy allocator rounds to the next power-of-two order, so
+     * the fixed block is order 7 (128 B) and the buggy block is
+     * order 13 (8 KB).  Assert the block's actual size is less
+     * than the buggy expectation. */
+    size_t fixed_payload = ray_rowsel_payload_bytes(nrows, 7);
+    size_t buggy_payload = ray_rowsel_payload_bytes(nrows, m->total_pass);
+    munit_assert_size(fixed_payload, <, buggy_payload);
+    size_t actual_block = BSIZEOF(sel->order);
+    munit_assert_size(actual_block, <, buggy_payload);
 
     /* Reconstruct: 3072 dense rows from segments 0..2, plus 7
      * indexed rows from segment 3. */
