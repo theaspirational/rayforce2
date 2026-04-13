@@ -1067,6 +1067,327 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
     }
 }
 
+/* ============================================================================
+ * MSD byte-radix sort for RAY_STR single-key sorts
+ *
+ * Variable-width strings can't fit in the 8-byte numeric radix pipeline.
+ * This specialised path sorts an index permutation in place using an MSD
+ * (most-significant-digit) byte-wise radix with recursion into equal-
+ * prefix sub-buckets — the same technique ska_sort / American-flag sort
+ * uses.  At each recursion level:
+ *
+ *   1. Histogram the byte at position `depth` for each row in the range,
+ *      into 257 buckets: bucket 0 for "string ended" (len <= depth) and
+ *      buckets 1..256 for concrete byte values 0..255.  The offset-by-1
+ *      avoids the need for an in-string NUL sentinel — length is looked
+ *      up directly so strings containing raw 0x00 bytes sort correctly.
+ *   2. Prefix-sum to compute bucket starts.
+ *   3. Scatter row indices into a scratch buffer, then memcpy back.
+ *   4. Recurse into each non-trivial bucket (> 1 element) at depth+1.
+ *      Bucket 0 never recurses — every row there has the same string
+ *      as the current prefix and further bytes don't exist.
+ *
+ * Small ranges (≤ RAY_MSD_INSERTION) fall back to a direct insertion
+ * sort using the full ray_str_t_cmp, which amortises the per-level
+ * overhead on short buckets and avoids deep recursion on random data.
+ *
+ * NULL rows are partitioned out up front (via a stable split on
+ * sorted_idx) so the recursive core only sees non-null strings.
+ *
+ * DESC is handled by sorting ASC then reversing the sorted range.
+ * ============================================================================ */
+
+#define RAY_MSD_INSERTION  32
+#define RAY_MSD_BUCKETS    257  /* 0 = end-of-string, 1..256 = byte+1 */
+
+typedef struct {
+    const ray_str_t* elems;
+    const char*      pool;
+    int64_t*         tmp;   /* scratch buffer, length nrows */
+} msd_str_ctx_t;
+
+/* Return the "radix digit" for the byte at position `depth` of string s.
+ * Range is [0, 256]: 0 when depth is past the end of the string, otherwise
+ * 1 + byte_value so shorter strings sort before longer ones that share a
+ * prefix (matching strcmp semantics). */
+static inline int msd_str_digit(const ray_str_t* s, const char* pool,
+                                int depth) {
+    if ((int)s->len <= depth) return 0;
+    const char* p = ray_str_t_ptr(s, pool);
+    return 1 + (int)(uint8_t)p[depth];
+}
+
+/* Insertion sort on sorted_idx[lo..hi) using full ray_str_t_cmp.
+ * Base case for small ranges. */
+static void msd_str_insertion(int64_t* sorted_idx, int64_t lo, int64_t hi,
+                              const ray_str_t* elems, const char* pool) {
+    for (int64_t i = lo + 1; i < hi; i++) {
+        int64_t cur = sorted_idx[i];
+        const ray_str_t* sc = &elems[cur];
+        int64_t j = i - 1;
+        while (j >= lo) {
+            const ray_str_t* sb = &elems[sorted_idx[j]];
+            if (ray_str_t_cmp(sb, pool, sc, pool) <= 0) break;
+            sorted_idx[j + 1] = sorted_idx[j];
+            j--;
+        }
+        sorted_idx[j + 1] = cur;
+    }
+}
+
+/* Recursive MSD byte-radix sort of sorted_idx[lo..hi) at byte position
+ * `depth`.  All strings in the range are assumed to share the same
+ * (depth)-byte prefix by virtue of how earlier levels partitioned them. */
+static void msd_str_sort_range(int64_t* sorted_idx, int64_t lo, int64_t hi,
+                               int depth, const msd_str_ctx_t* c) {
+    int64_t n = hi - lo;
+    if (n <= 1) return;
+    if (n <= RAY_MSD_INSERTION) {
+        msd_str_insertion(sorted_idx, lo, hi, c->elems, c->pool);
+        return;
+    }
+
+    /* Phase 1: histogram.  Also track the first non-EOS digit seen and
+     * whether all non-EOS entries land in the same bucket — the common
+     * case for clustered / few-unique data where every remaining string
+     * matches on many consecutive bytes.  When that happens we can skip
+     * the scatter and recurse at depth+1 directly, avoiding a full
+     * rewrite pass per depth level. */
+    int64_t counts[RAY_MSD_BUCKETS];
+    memset(counts, 0, sizeof(counts));
+    int single_digit = -1;
+    bool single = true;
+    for (int64_t i = lo; i < hi; i++) {
+        int d = msd_str_digit(&c->elems[sorted_idx[i]], c->pool, depth);
+        counts[d]++;
+        if (d == 0) continue;
+        if (single_digit == -1) single_digit = d;
+        else if (d != single_digit) single = false;
+    }
+    /* Fast path: every non-EOS row landed in the same bucket.  The EOS
+     * bucket (digit 0) stays in-place at the start and needs no sort;
+     * the rest of the range shares this digit and we just recurse one
+     * byte deeper without touching sorted_idx. */
+    if (single && single_digit != -1) {
+        int64_t eos = counts[0];
+        /* EOS rows should come first.  If any are present, move them
+         * to the front via a stable partition — but since every non-EOS
+         * row has the same digit, we can just swap by a simple scan:
+         * first collect EOS rows into tmp[lo..lo+eos), then non-EOS
+         * into tmp[lo+eos..hi). */
+        if (eos > 0 && eos < n) {
+            int64_t* t = c->tmp;
+            int64_t e_cur = lo, n_cur = lo + eos;
+            for (int64_t i = lo; i < hi; i++) {
+                int64_t idx = sorted_idx[i];
+                const ray_str_t* s = &c->elems[idx];
+                if ((int)s->len <= depth) t[e_cur++] = idx;
+                else                      t[n_cur++] = idx;
+            }
+            memcpy(sorted_idx + lo, t + lo, (size_t)n * sizeof(int64_t));
+        }
+        /* Recurse on just the non-EOS portion at depth+1. */
+        if (n - eos > 1)
+            msd_str_sort_range(sorted_idx, lo + eos, hi, depth + 1, c);
+        return;
+    }
+
+    /* Phase 2: prefix-sum to bucket starts (absolute into sorted_idx) */
+    int64_t starts[RAY_MSD_BUCKETS];
+    {
+        int64_t sum = lo;
+        for (int b = 0; b < RAY_MSD_BUCKETS; b++) {
+            starts[b] = sum;
+            sum += counts[b];
+        }
+    }
+
+    /* Phase 3: scatter to tmp[] using cursors (separate copy so we keep
+     * starts[] intact for the recursion step). */
+    int64_t cursors[RAY_MSD_BUCKETS];
+    memcpy(cursors, starts, sizeof(cursors));
+    for (int64_t i = lo; i < hi; i++) {
+        int64_t idx = sorted_idx[i];
+        int d = msd_str_digit(&c->elems[idx], c->pool, depth);
+        c->tmp[cursors[d]++] = idx;
+    }
+
+    /* Phase 4: copy back */
+    memcpy(sorted_idx + lo, c->tmp + lo, (size_t)n * sizeof(int64_t));
+
+    /* Phase 5: recurse into non-trivial non-EOS buckets */
+    for (int b = 1; b < RAY_MSD_BUCKETS; b++) {
+        int64_t bs = starts[b];
+        int64_t be = bs + counts[b];
+        if (be - bs > 1)
+            msd_str_sort_range(sorted_idx, bs, be, depth + 1, c);
+    }
+}
+
+/* Worker context for parallel sub-bucket sort after the top-level
+ * partition. */
+typedef struct {
+    int64_t*        sorted_idx;
+    const ray_str_t* elems;
+    const char*     pool;
+    int64_t*        scratch;        /* shared scratch sized [0, n_live) */
+    const int64_t*  bucket_starts;  /* absolute offsets into sorted_idx */
+    const int64_t*  bucket_counts;  /* [RAY_MSD_BUCKETS] */
+} msd_str_bucket_ctx_t;
+
+static void msd_str_bucket_task_fn(void* vctx, uint32_t worker_id,
+                                   int64_t start_bucket, int64_t end_bucket) {
+    (void)worker_id;
+    msd_str_bucket_ctx_t* c = (msd_str_bucket_ctx_t*)vctx;
+    for (int64_t b = start_bucket; b < end_bucket; b++) {
+        /* Skip bucket 0 (end-of-string) — already sorted (all equal). */
+        if (b == 0) continue;
+        int64_t count = c->bucket_counts[b];
+        if (count <= 1) continue;
+        int64_t lo = c->bucket_starts[b];
+        int64_t hi = lo + count;
+        /* Per-bucket scratch lives at the same offsets as sorted_idx so
+         * the recursive scatter/copy can use absolute indexing. */
+        msd_str_ctx_t sub = {
+            .elems = c->elems, .pool = c->pool, .tmp = c->scratch,
+        };
+        msd_str_sort_range(c->sorted_idx, lo, hi, 1, &sub);
+    }
+}
+
+/* Top-level MSD string sort.  Initializes sorted_idx with a row permutation
+ * [0..nrows), partitions nulls to the desired end, sorts the non-null range
+ * via the recursive radix, reverses for DESC, and writes the result back to
+ * sorted_idx in place.  Returns false on OOM (caller should fall back). */
+static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
+                                 ray_t* col, bool desc, bool nulls_first) {
+    if (nrows <= 0) return true;
+
+    /* Initial iota — caller may or may not have already filled it. */
+    for (int64_t i = 0; i < nrows; i++) sorted_idx[i] = i;
+
+    /* Partition nulls to the desired end in one stable pass. */
+    int64_t null_count = 0;
+    bool has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    if (has_nulls) {
+        int64_t w = 0;
+        int64_t null_pos = nrows;  /* build nulls in sorted_idx[null_pos..nrows) */
+        /* Two-pass approach is simpler than in-place partitioning:
+         * first collect non-null indices, then append null indices. */
+        for (int64_t i = 0; i < nrows; i++) {
+            if (!ray_vec_is_null(col, i)) {
+                sorted_idx[w++] = i;
+            }
+        }
+        null_count = nrows - w;
+        null_pos = w;
+        /* Second pass: append null rows at tail. */
+        for (int64_t i = 0; i < nrows; i++) {
+            if (ray_vec_is_null(col, i)) {
+                sorted_idx[null_pos++] = i;
+            }
+        }
+    }
+    int64_t n_live = nrows - null_count;
+    /* sorted_idx now holds non-nulls at [0, n_live) and nulls at [n_live, nrows). */
+
+    /* Sort the non-null range via MSD radix.
+     *
+     * Top-level partition is done inline here so each resulting
+     * bucket can be sorted in parallel across the thread pool —
+     * the recursive core is sequential per bucket but buckets are
+     * independent.  For few-unique data this dispatches 10 big
+     * buckets to 10 workers at once; for random data it dispatches
+     * ~256 small buckets. */
+    if (n_live > 1) {
+        const ray_str_t* elems;
+        const char* pool;
+        str_resolve(col, &elems, &pool);
+
+        ray_t* tmp_hdr;
+        int64_t* tmp = (int64_t*)scratch_alloc(&tmp_hdr,
+                            (size_t)n_live * sizeof(int64_t));
+        if (!tmp) return false;
+
+        /* Top-level histogram on byte 0. */
+        int64_t counts[RAY_MSD_BUCKETS];
+        memset(counts, 0, sizeof(counts));
+        for (int64_t i = 0; i < n_live; i++) {
+            int d = msd_str_digit(&elems[sorted_idx[i]], pool, 0);
+            counts[d]++;
+        }
+
+        /* Prefix-sum to bucket start offsets. */
+        int64_t starts[RAY_MSD_BUCKETS];
+        {
+            int64_t sum = 0;
+            for (int b = 0; b < RAY_MSD_BUCKETS; b++) {
+                starts[b] = sum;
+                sum += counts[b];
+            }
+        }
+
+        /* Scatter into tmp. */
+        int64_t cursors[RAY_MSD_BUCKETS];
+        memcpy(cursors, starts, sizeof(cursors));
+        for (int64_t i = 0; i < n_live; i++) {
+            int64_t idx = sorted_idx[i];
+            int d = msd_str_digit(&elems[idx], pool, 0);
+            tmp[cursors[d]++] = idx;
+        }
+        /* Copy back. */
+        memcpy(sorted_idx, tmp, (size_t)n_live * sizeof(int64_t));
+
+        /* Dispatch each bucket's recursive sort to a worker thread.
+         * Bucket 0 is EOS (zero-length strings) — already in place.
+         * Small buckets (≤ RAY_MSD_INSERTION) will hit the insertion
+         * sort base case inside the recursive core. */
+        msd_str_bucket_ctx_t bctx = {
+            .sorted_idx    = sorted_idx,
+            .elems         = elems,
+            .pool          = pool,
+            .scratch       = tmp,
+            .bucket_starts = starts,
+            .bucket_counts = counts,
+        };
+        ray_pool_t* pool_p = ray_pool_get();
+        /* Use dispatch_n (one task per bucket) so the pool
+         * schedules them onto workers.  For small nrows, run
+         * sequentially to avoid dispatch overhead. */
+        if (pool_p && n_live >= RAY_PARALLEL_THRESHOLD)
+            ray_pool_dispatch_n(pool_p, msd_str_bucket_task_fn, &bctx,
+                                RAY_MSD_BUCKETS);
+        else
+            msd_str_bucket_task_fn(&bctx, 0, 0, RAY_MSD_BUCKETS);
+
+        scratch_free(tmp_hdr);
+    }
+
+    /* DESC reverses the sorted (non-null) range. */
+    if (desc && n_live > 1) {
+        for (int64_t i = 0, j = n_live - 1; i < j; i++, j--) {
+            int64_t t = sorted_idx[i];
+            sorted_idx[i] = sorted_idx[j];
+            sorted_idx[j] = t;
+        }
+    }
+
+    /* If nulls should be first, rotate them to the front. */
+    if (null_count > 0 && nulls_first) {
+        /* Cheap rotation via three reverses:
+         *   reverse [0, n_live); reverse [n_live, nrows); reverse [0, nrows)
+         * Takes O(nrows) swaps, no extra memory. */
+        int64_t a = 0, b = n_live - 1;
+        while (a < b) { int64_t t = sorted_idx[a]; sorted_idx[a] = sorted_idx[b]; sorted_idx[b] = t; a++; b--; }
+        a = n_live; b = nrows - 1;
+        while (a < b) { int64_t t = sorted_idx[a]; sorted_idx[a] = sorted_idx[b]; sorted_idx[b] = t; a++; b--; }
+        a = 0; b = nrows - 1;
+        while (a < b) { int64_t t = sorted_idx[a]; sorted_idx[a] = sorted_idx[b]; sorted_idx[b] = t; a++; b--; }
+    }
+
+    return true;
+}
+
 /* Build SYM rank mapping: intern_id → sorted rank by string value.
  * Caller must scratch_free(*hdr_out) when done.
  * Returns pointer to rank array of size (max_id + 1), or NULL on error. */
@@ -1653,6 +1974,21 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
     memset(enum_rank_hdrs, 0, n_cols * sizeof(ray_t*));
 
     if (nrows > 64) {
+        /* RAY_STR single-key fast path — dedicated MSD byte-radix
+         * sort.  Handles variable-width strings, nulls, and DESC
+         * internally; skips the rest of sort_indices_ex on success. */
+        if (n_cols == 1 && cols[0]->type == RAY_STR) {
+            bool desc = descs ? descs[0] : 0;
+            bool nf   = nulls_first ? nulls_first[0] : !desc;
+            if (sort_str_msd_inplace(indices, nrows, cols[0], desc, nf)) {
+                sorted_idx = indices;
+                iota_done = true;
+                radix_done = true;
+                goto str_msd_done;
+            }
+            /* OOM — fall through to comparison merge sort. */
+        }
+
         /* Check if all sort keys are radix-sortable types */
         bool can_radix = true;
         for (uint8_t k = 0; k < n_cols; k++) {
@@ -2113,6 +2449,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
         }
     }
 
+str_msd_done:;
     /* If sorted_keys_out was requested but never set, null it out */
     if (sorted_keys_out && !*sorted_keys_out) {
         *sorted_keys_out = NULL;
