@@ -1982,9 +1982,28 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
     /* Factorized shortcut: if input is a factorized expand result with
      * (_src, _count) columns, and GROUP BY _src with COUNT/SUM(_count),
      * return the pre-aggregated table directly without re-scanning.
-     * Disabled when a selection is in flight — the shortcut returns
-     * the pre-aggregated table verbatim and has no hook for applying
-     * a row filter; fall through to the main path which honours it. */
+     *
+     * Interaction with g->selection: the factorized table encodes
+     * weighted counts (each row has a _count), so COUNT(*) on it
+     * must SUM the _count column, not count rows.  Neither the
+     * shortcut (returns verbatim, no filter) nor the main path
+     * (treats _count as a regular column and counts rows) knows
+     * how to apply a row filter while preserving those semantics.
+     * Reject rather than produce wrong results — this is a niche
+     * combination (WHERE + factorized expand → GROUP) we can
+     * revisit if real workloads need it. */
+    if (n_keys == 1 && n_aggs > 0 && nrows > 0) {
+        int64_t cnt_sym_probe = ray_sym_intern("_count", 6);
+        ray_t*  cnt_col_probe = ray_table_get_col(tbl, cnt_sym_probe);
+        ray_op_ext_t* key_ext_probe = find_ext(g, ext->keys[0]->id);
+        int64_t src_sym_probe = ray_sym_intern("_src", 4);
+        if (g->selection && cnt_col_probe && cnt_col_probe->type == RAY_I64 &&
+            key_ext_probe && key_ext_probe->base.opcode == OP_SCAN &&
+            key_ext_probe->sym == src_sym_probe) {
+            return ray_error("nyi",
+                "GROUP BY with selection on factorized expand result");
+        }
+    }
     if (!g->selection && n_keys == 1 && n_aggs > 0 && nrows > 0) {
         int64_t cnt_sym = ray_sym_intern("_count", 6);
         ray_t* cnt_col = ray_table_get_col(tbl, cnt_sym);
