@@ -535,6 +535,96 @@ ray_t* broadcast_scalar(ray_t* atom, int64_t nrows) {
     return vec;
 }
 
+/* OP_IN worker — process [start, end) of the BOOL output buffer.
+ * Disjoint slices, no synchronization. */
+typedef struct {
+    ray_t*         col;
+    const double*  svf;
+    const int64_t* svi;
+    int64_t        sv_len;
+    uint8_t*       ob;
+    int8_t         ct;
+    bool           col_has_nulls;
+    bool           col_atom_null;
+    bool           col_is_atom;
+    bool           use_double;
+    bool           negate;
+} in_worker_ctx_t;
+
+static void exec_in_worker(void* vctx, uint32_t worker_id,
+                           int64_t start, int64_t end) {
+    (void)worker_id;
+    in_worker_ctx_t* c = (in_worker_ctx_t*)vctx;
+    ray_t* col = c->col;
+    const void* cd = c->col_is_atom ? NULL : ray_data(col);
+    int8_t ct = c->ct;
+    uint8_t cattrs = c->col_is_atom ? 0 : col->attrs;
+    uint8_t* ob = c->ob;
+    int64_t sv_len = c->sv_len;
+    int negate = c->negate ? 1 : 0;
+
+    #define IN_READ_I64(dst, idx) do {                                      \
+        switch (ct) {                                                       \
+        case RAY_BOOL: case RAY_U8: (dst) = ((const uint8_t*)cd)[idx]; break; \
+        case RAY_I16:  (dst) = ((const int16_t*)cd)[idx]; break;            \
+        case RAY_I32:  case RAY_DATE: case RAY_TIME:                        \
+                       (dst) = ((const int32_t*)cd)[idx]; break;            \
+        case RAY_I64:  case RAY_TIMESTAMP:                                  \
+                       (dst) = ((const int64_t*)cd)[idx]; break;            \
+        case RAY_SYM:  (dst) = ray_read_sym(cd, (idx), ct, cattrs); break;  \
+        default:       (dst) = 0; break;                                    \
+        }                                                                   \
+    } while (0)
+
+    #define IN_READ_F64(dst, idx) do {                                      \
+        switch (ct) {                                                       \
+        case RAY_BOOL: case RAY_U8: (dst) = (double)((const uint8_t*)cd)[idx]; break; \
+        case RAY_I16:  (dst) = (double)((const int16_t*)cd)[idx]; break;    \
+        case RAY_I32:  case RAY_DATE: case RAY_TIME:                        \
+                       (dst) = (double)((const int32_t*)cd)[idx]; break;    \
+        case RAY_I64:  case RAY_TIMESTAMP:                                  \
+                       (dst) = (double)((const int64_t*)cd)[idx]; break;    \
+        case RAY_F32:  (dst) = (double)((const float*)cd)[idx]; break;      \
+        case RAY_F64:  (dst) = ((const double*)cd)[idx]; break;             \
+        default:       (dst) = 0.0; break;                                  \
+        }                                                                   \
+    } while (0)
+
+    if (c->use_double) {
+        const double* svf = c->svf;
+        for (int64_t i = start; i < end; i++) {
+            bool row_null = c->col_atom_null ||
+                            (c->col_has_nulls && !c->col_is_atom &&
+                             ray_vec_is_null(col, i));
+            if (row_null) { ob[i] = 0; continue; }
+            double cv;
+            if (c->col_is_atom) cv = (ct == RAY_F64) ? col->f64 : (double)col->i64;
+            else IN_READ_F64(cv, i);
+            int found = 0;
+            for (int64_t j = 0; j < sv_len; j++)
+                if (cv == svf[j]) { found = 1; break; }
+            ob[i] = (uint8_t)(found ^ negate);
+        }
+    } else {
+        const int64_t* svi = c->svi;
+        for (int64_t i = start; i < end; i++) {
+            bool row_null = c->col_atom_null ||
+                            (c->col_has_nulls && !c->col_is_atom &&
+                             ray_vec_is_null(col, i));
+            if (row_null) { ob[i] = 0; continue; }
+            int64_t cv;
+            if (c->col_is_atom) cv = col->i64;
+            else IN_READ_I64(cv, i);
+            int found = 0;
+            for (int64_t j = 0; j < sv_len; j++)
+                if (cv == svi[j]) { found = 1; break; }
+            ob[i] = (uint8_t)(found ^ negate);
+        }
+    }
+    #undef IN_READ_I64
+    #undef IN_READ_F64
+}
+
 /* ============================================================================
  * exec_in — membership test (col IN set_vec)
  *
@@ -653,85 +743,65 @@ static ray_t* exec_in(ray_graph_t* g, ray_op_t* op, ray_t* col, ray_t* set) {
     /* Compact probe buffer: drop null set elements up front so the
      * inner loop doesn't special-case them. */
     int64_t sv_len = 0;
+    double  svf_stack[32];
+    int64_t svi_stack[32];
+    double* svf = svf_stack;
+    int64_t* svi = svi_stack;
+    ray_t* sv_hdr = NULL;
+    if (set_len > 32) {
+        size_t bytes = (size_t)set_len * (use_double ? sizeof(double) : sizeof(int64_t));
+        sv_hdr = ray_alloc(bytes);
+        if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
+        if (use_double) svf = (double*)ray_data(sv_hdr);
+        else            svi = (int64_t*)ray_data(sv_hdr);
+    }
 
+    /* set_len is 0 when we want to suppress the set entirely
+     * (SYM-vs-non-SYM type mismatch).  Respect it in BOTH the
+     * atom and vec branches so the probe stays empty. */
     if (use_double) {
-        double sv_stack[32];
-        ray_t* sv_hdr = NULL;
-        double* sv = sv_stack;
-        if (set_len > 32) {
-            sv_hdr = ray_alloc((size_t)set_len * sizeof(double));
-            if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
-            sv = (double*)ray_data(sv_hdr);
-        }
-        /* set_len is 0 when we want to suppress the set entirely
-         * (SYM-vs-non-SYM type mismatch).  Respect it in BOTH the
-         * atom and vec branches so the probe stays empty. */
         if (set_len > 0 && ray_is_atom(set)) {
             if (!RAY_ATOM_IS_NULL(set)) {
-                sv[0] = (st == RAY_F64) ? set->f64 : (double)set->i64;
+                svf[0] = (st == RAY_F64) ? set->f64 : (double)set->i64;
                 sv_len = 1;
             }
         } else if (set_len > 0) {
             for (int64_t i = 0; i < set_len; i++) {
                 if (set_has_nulls && ray_vec_is_null(set, i)) continue;
-                READ_F64(sv[sv_len], set, st, i);
+                READ_F64(svf[sv_len], set, st, i);
                 sv_len++;
             }
         }
-        for (int64_t i = 0; i < col_len; i++) {
-            /* Null col rows never pass either in or not-in. */
-            bool row_null = col_atom_null ||
-                            (col_has_nulls && !ray_is_atom(col) &&
-                             ray_vec_is_null(col, i));
-            if (row_null) { ob[i] = 0; continue; }
-            double cv;
-            if (ray_is_atom(col)) cv = (ct == RAY_F64) ? col->f64 : (double)col->i64;
-            else READ_F64(cv, col, ct, i);
-            int found = 0;
-            for (int64_t j = 0; j < sv_len; j++) {
-                if (cv == sv[j]) { found = 1; break; }
-            }
-            ob[i] = (uint8_t)(found ^ negate);
-        }
-        if (sv_hdr) ray_free(sv_hdr);
     } else {
-        /* Integer-id path: both sides are int-family or both are SYM. */
-        int64_t sv_stack[32];
-        ray_t* sv_hdr = NULL;
-        int64_t* sv = sv_stack;
-        if (set_len > 32) {
-            sv_hdr = ray_alloc((size_t)set_len * sizeof(int64_t));
-            if (!sv_hdr) { ray_release(out); return ray_error("oom", NULL); }
-            sv = (int64_t*)ray_data(sv_hdr);
-        }
-        /* Same suppression check as in the float path — a zeroed
-         * set_len means "don't probe against anything". */
         if (set_len > 0 && ray_is_atom(set)) {
-            if (!RAY_ATOM_IS_NULL(set)) { sv[0] = set->i64; sv_len = 1; }
+            if (!RAY_ATOM_IS_NULL(set)) { svi[0] = set->i64; sv_len = 1; }
         } else if (set_len > 0) {
             for (int64_t i = 0; i < set_len; i++) {
                 if (set_has_nulls && ray_vec_is_null(set, i)) continue;
-                READ_I64(sv[sv_len], set, st, i);
+                READ_I64(svi[sv_len], set, st, i);
                 sv_len++;
             }
         }
-
-        for (int64_t i = 0; i < col_len; i++) {
-            bool row_null = col_atom_null ||
-                            (col_has_nulls && !ray_is_atom(col) &&
-                             ray_vec_is_null(col, i));
-            if (row_null) { ob[i] = 0; continue; }
-            int64_t cv;
-            if (ray_is_atom(col)) cv = col->i64;
-            else READ_I64(cv, col, ct, i);
-            int found = 0;
-            for (int64_t j = 0; j < sv_len; j++) {
-                if (cv == sv[j]) { found = 1; break; }
-            }
-            ob[i] = (uint8_t)(found ^ negate);
-        }
-        if (sv_hdr) ray_free(sv_hdr);
     }
+
+    in_worker_ctx_t in_ctx = {
+        .col = col,
+        .svf = svf, .svi = svi, .sv_len = sv_len,
+        .ob = ob, .ct = ct,
+        .col_has_nulls = col_has_nulls,
+        .col_atom_null = col_atom_null,
+        .col_is_atom = ray_is_atom(col),
+        .use_double = use_double,
+        .negate = negate,
+    };
+
+    ray_pool_t* pool = ray_pool_get();
+    if (pool && col_len >= RAY_PARALLEL_THRESHOLD && !ray_is_atom(col))
+        ray_pool_dispatch(pool, exec_in_worker, &in_ctx, col_len);
+    else
+        exec_in_worker(&in_ctx, 0, 0, col_len);
+
+    if (sv_hdr) ray_free(sv_hdr);
 
     #undef READ_I64
     #undef READ_F64
