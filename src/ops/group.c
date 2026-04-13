@@ -2005,19 +2005,25 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
         if (cnt_col_probe && cnt_col_probe->type == RAY_I64 &&
             key_ext_probe && key_ext_probe->base.opcode == OP_SCAN &&
             key_ext_probe->sym == src_sym_probe) {
-            /* Same shape check as the shortcut below. */
-            bool all_compat = true;
+            /* Reject on ANY agg whose semantics depend on the
+             * factorized _count weighting: COUNT(*) counts
+             * underlying source rows (not _src table rows) and
+             * SUM(_count) is equivalent.  Even if only one agg in
+             * a mixed query needs weighting, the main path can't
+             * handle it correctly, so fail the whole query rather
+             * than return a mix of right and wrong columns. */
+            bool needs_weighting = false;
             for (uint8_t a = 0; a < n_aggs; a++) {
                 uint16_t aop = ext->agg_ops[a];
                 ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
-                if (aop == OP_COUNT) continue;
+                if (aop == OP_COUNT) { needs_weighting = true; break; }
                 if (aop == OP_SUM && agg_ext &&
                     agg_ext->base.opcode == OP_SCAN &&
-                    agg_ext->sym == cnt_sym_probe) continue;
-                all_compat = false;
-                break;
+                    agg_ext->sym == cnt_sym_probe) {
+                    needs_weighting = true; break;
+                }
             }
-            if (all_compat)
+            if (needs_weighting)
                 return ray_error("nyi",
                     "GROUP BY with selection on factorized expand result "
                     "(COUNT/SUM(_count) semantics)");
