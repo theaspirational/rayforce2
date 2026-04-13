@@ -1392,21 +1392,80 @@ static void strsort_bucket_fn(void* vctx, uint32_t wid, int64_t s, int64_t e) {
     }
 }
 
+/* In-place quicksort by packed key `len` field.  Used as the
+ * finalization step for buckets where every record's string ended
+ * at or before the current base_offset — such records tied on the
+ * packed prefix but still need to be ordered by length (shorter
+ * strings sort before longer ones that extend them, per
+ * ray_str_t_cmp).  Single-key integer quicksort with median-of-3
+ * pivot; stack depth bounded via tail-recursion on the larger half.
+ * Falls back to insertion sort for small ranges. */
+static void strkey_qsort_by_len(ray_strkey_t* a, int64_t lo, int64_t hi) {
+    while (hi - lo > 16) {
+        int64_t mid = lo + (hi - lo) / 2;
+        /* Median-of-3. */
+        if (a[lo].len  > a[hi].len)  { ray_strkey_t t=a[lo];  a[lo]=a[hi];  a[hi]=t;  }
+        if (a[mid].len > a[hi].len)  { ray_strkey_t t=a[mid]; a[mid]=a[hi]; a[hi]=t;  }
+        if (a[lo].len  > a[mid].len) { ray_strkey_t t=a[lo];  a[lo]=a[mid]; a[mid]=t; }
+        uint32_t pivot = a[mid].len;
+        /* Hoare partition. */
+        int64_t i = lo - 1, j = hi + 1;
+        for (;;) {
+            do { i++; } while (a[i].len < pivot);
+            do { j--; } while (a[j].len > pivot);
+            if (i >= j) break;
+            ray_strkey_t t = a[i]; a[i] = a[j]; a[j] = t;
+        }
+        /* Recurse on smaller half, loop on the larger. */
+        if (j - lo < hi - (j + 1)) {
+            strkey_qsort_by_len(a, lo, j);
+            lo = j + 1;
+        } else {
+            strkey_qsort_by_len(a, j + 1, hi);
+            hi = j;
+        }
+    }
+    /* Insertion sort base case. */
+    for (int64_t i = lo + 1; i <= hi; i++) {
+        ray_strkey_t cur = a[i];
+        int64_t j = i - 1;
+        while (j >= lo && a[j].len > cur.len) {
+            a[j + 1] = a[j];
+            j--;
+        }
+        a[j + 1] = cur;
+    }
+}
+
 /* Re-pack the next window of bytes for records whose previous window
  * tied on the full packed prefix.  `base_offset` is the byte position
  * in the original string that will become byte 0 of the new packed
  * prefix.  Returns true if any record still has bytes to contribute
  * past base_offset — false means every record's string ended at or
- * before base_offset and they are all equal in the suffix. */
+ * before base_offset.
+ *
+ * When this returns false the caller MUST NOT simply move on: strings
+ * that ended before base_offset may still have differing lengths, and
+ * ray_str_t_cmp sorts shorter-before-longer on tie.  We handle that
+ * right here by sorting the bucket in place on `len` before returning,
+ * so the caller can just stop recursing. */
 static bool strsort_repack_window(ray_strkey_t* keys, int64_t n,
                                    int64_t base_offset,
                                    const ray_str_t* elems, const char* pool,
                                    int parts) {
     bool any_tail = false;
+    /* Track min/max len alongside the repack so we can skip the
+     * finalize-by-len step when every string in the bucket has the
+     * same length — the very common case where the bucket is full
+     * of identical strings (e.g. few_unique radix sub-bucket). */
+    uint32_t min_len = UINT32_MAX;
+    uint32_t max_len = 0;
     for (int64_t i = 0; i < n; i++) {
         const ray_str_t* s = &elems[keys[i].row];
         int64_t len = s->len;
         if (len > base_offset) any_tail = true;
+        if ((uint32_t)len < min_len) min_len = (uint32_t)len;
+        if ((uint32_t)len > max_len) max_len = (uint32_t)len;
         const char* src = len > 0 ? ray_str_t_ptr(s, pool) : NULL;
         for (int p = 0; p < parts; p++) {
             int64_t off = base_offset + (int64_t)p * 8;
@@ -1414,6 +1473,16 @@ static bool strsort_repack_window(ray_strkey_t* keys, int64_t n,
                 ? strkey_load_part(src, len, (int)off)
                 : 0;
         }
+    }
+    if (!any_tail && n > 1 && min_len != max_len) {
+        /* Every string ended at or before base_offset, they tied on
+         * the zero-padded packed prefix, and at least two of them
+         * differ in length.  A string of length 3 whose bytes match
+         * a prefix of a length-5 string must sort before it (per
+         * ray_str_t_cmp), so finalize the bucket by sorting on len.
+         * When min_len == max_len every record is bitwise equal and
+         * any order is valid — we skip the sort entirely. */
+        strkey_qsort_by_len(keys, 0, n - 1);
     }
     return any_tail;
 }

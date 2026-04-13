@@ -2762,6 +2762,61 @@ static MunitResult test_sort_long_common_prefix(const void* params, void* fixtur
     return MUNIT_OK;
 }
 
+/* ---- Sort regression: embedded NUL + prefix-of-each-other ---------
+ * Two distinct strings can produce bit-identical zero-padded packed
+ * prefixes in the RAY_STR radix when the longer one has embedded
+ * NULs at exactly the positions where the shorter one was
+ * zero-padded.  ray_str_t_cmp puts the strict-prefix string first,
+ * but the packed radix saw them as tied.  Previously the repack
+ * short-circuit (any_tail=false) returned without ordering by len,
+ * leaving a bucket > the insertion-sort base case in arbitrary
+ * order.  This test builds such a bucket and verifies the sort
+ * groups all shorter strings before the longer ones.
+ *
+ * Construction: 50 copies of "abc" (len 3) and 50 copies of
+ * "abc\0\0" (len 5).  Both pad to 0x6162630000000000 in the packed
+ * window (parts_bytes=8 at the top level), so they all land in the
+ * same top-level bucket, flow through uniform radix iterations, and
+ * hit the any_tail=false short-circuit at the first repack. */
+static MunitResult test_sort_embedded_nul(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    const int64_t per_group = 50;
+    const int64_t n = 2 * per_group;  /* 100 > BASE_CASE */
+    ray_t* col = ray_vec_new(RAY_STR, n);
+    munit_assert_ptr_not_null(col);
+    munit_assert_false(RAY_IS_ERR(col));
+    /* Interleave so the run-detection shortcut cannot fire — adjacent
+     * pairs alternate (5,3) and (3,5), killing both monotone flags. */
+    const char long_str[5] = { 'a', 'b', 'c', '\0', '\0' };
+    for (int64_t k = 0; k < per_group; k++) {
+        col = ray_str_vec_append(col, long_str, 5);
+        munit_assert_false(RAY_IS_ERR(col));
+        col = ray_str_vec_append(col, "abc", 3);
+        munit_assert_false(RAY_IS_ERR(col));
+    }
+    ray_env_set(ray_sym_intern("_enul", 5), col);
+    ray_t* idx = ray_eval_str("(iasc _enul)");
+    munit_assert_ptr_not_null(idx);
+    munit_assert_false(RAY_IS_ERR(idx));
+    munit_assert_int(ray_len(idx), ==, n);
+    int64_t* p = (int64_t*)ray_data(idx);
+    /* First per_group entries must point at the len-3 rows, next
+     * per_group at the len-5 rows. */
+    for (int64_t i = 0; i < per_group; i++) {
+        size_t l;
+        (void)ray_str_vec_get(col, p[i], &l);
+        munit_assert_int((int)l, ==, 3);
+    }
+    for (int64_t i = per_group; i < n; i++) {
+        size_t l;
+        (void)ray_str_vec_get(col, p[i], &l);
+        munit_assert_int((int)l, ==, 5);
+    }
+    ray_release(idx);
+    ray_release(col);
+    return MUNIT_OK;
+}
+
 /* ---- Test: read/write CSV roundtrip ---- */
 static MunitResult test_eval_read_write_csv(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -3254,6 +3309,7 @@ static MunitTest lang_tests[] = {
     { "/sort/decode_radix_f64_desc", test_sort_decode_radix_f64_desc, lang_setup, lang_teardown, 0, NULL },
     { "/sort/decode_radix_i64",      test_sort_decode_radix_i64,      lang_setup, lang_teardown, 0, NULL },
     { "/sort/long_common_prefix",    test_sort_long_common_prefix,    lang_setup, lang_teardown, 0, NULL },
+    { "/sort/embedded_nul",          test_sort_embedded_nul,          lang_setup, lang_teardown, 0, NULL },
     { "/eval/read_write_csv",  test_eval_read_write_csv,  lang_setup, lang_teardown, 0, NULL },
     { "/eval/as_cast",         test_eval_as_cast,         lang_setup, lang_teardown, 0, NULL },
     { "/eval/type",            test_eval_type,            lang_setup, lang_teardown, 0, NULL },
