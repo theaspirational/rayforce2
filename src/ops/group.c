@@ -1940,12 +1940,33 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                   int64_t group_limit) {
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
 
+    /* Selection-shape guard — runs BEFORE any fast path (parted
+     * dispatch, factorized shortcut) so every exec_group code path
+     * sees the same validated selection state.  A mismatch here
+     * indicates a graph-construction bug: the caller installed a
+     * selection that was built for a different table shape, and
+     * silently ignoring it would return unfiltered results. */
+    if (g->selection) {
+        ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+        int64_t tbl_nrows = ray_table_nrows(tbl);
+        if (sm->nrows != tbl_nrows)
+            return ray_error("domain",
+                "exec_group: selection nrows mismatch (sel=%lld tbl=%lld)",
+                (long long)sm->nrows, (long long)tbl_nrows);
+    }
+
     /* Parted dispatch: detect parted input columns */
     {
         int64_t nc = ray_table_ncols(tbl);
         for (int64_t c = 0; c < nc; c++) {
             ray_t* col = ray_table_get_col_idx(tbl, c);
             if (col && (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON)) {
+                /* exec_group_parted has no rowsel plumbing — a
+                 * selection in flight would be silently ignored.
+                 * Reject rather than produce unfiltered results. */
+                if (g->selection)
+                    return ray_error("nyi",
+                        "GROUP BY with selection on parted table");
                 return exec_group_parted(g, op, tbl, group_limit);
             }
         }
@@ -1960,8 +1981,11 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
 
     /* Factorized shortcut: if input is a factorized expand result with
      * (_src, _count) columns, and GROUP BY _src with COUNT/SUM(_count),
-     * return the pre-aggregated table directly without re-scanning. */
-    if (n_keys == 1 && n_aggs > 0 && nrows > 0) {
+     * return the pre-aggregated table directly without re-scanning.
+     * Disabled when a selection is in flight — the shortcut returns
+     * the pre-aggregated table verbatim and has no hook for applying
+     * a row filter; fall through to the main path which honours it. */
+    if (!g->selection && n_keys == 1 && n_aggs > 0 && nrows > 0) {
         int64_t cnt_sym = ray_sym_intern("_count", 6);
         ray_t* cnt_col = ray_table_get_col(tbl, cnt_sym);
         if (cnt_col && cnt_col->type == RAY_I64) {
@@ -2032,24 +2056,17 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
      * match_idx_block must be released on every exec_group exit
      * path — see the various `goto cleanup` and early returns below.
      *
-     * If g->selection is set but was built for a different table
-     * shape (nrows mismatch), that's a graph-construction bug — the
-     * caller passed a selection that doesn't apply here.  Fail loud
-     * rather than silently running the aggregation on unfiltered
-     * data. */
+     * The top-of-function guard already rejected nrows mismatches,
+     * so if we reach here with a selection it's guaranteed valid
+     * for `tbl`. */
     ray_t* match_idx_block = NULL;
     const int64_t* match_idx = NULL;
     int64_t n_scan = nrows;
     if (g->selection) {
-        ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
-        if (sm->nrows != nrows)
-            return ray_error("domain",
-                "exec_group: selection nrows mismatch (sel=%lld tbl=%lld)",
-                (long long)sm->nrows, (long long)nrows);
         match_idx_block = ray_rowsel_to_indices(g->selection);
         if (!match_idx_block) return ray_error("oom", NULL);
         match_idx = (const int64_t*)ray_data(match_idx_block);
-        n_scan = sm->total_pass;
+        n_scan = ray_rowsel_meta(g->selection)->total_pass;
     }
 
     /* Resolve key columns (VLA — n_keys ≤ 8; use ≥1 to avoid zero-size VLA UB) */
