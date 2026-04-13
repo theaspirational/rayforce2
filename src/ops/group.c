@@ -1983,25 +1983,44 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
      * (_src, _count) columns, and GROUP BY _src with COUNT/SUM(_count),
      * return the pre-aggregated table directly without re-scanning.
      *
-     * Interaction with g->selection: the factorized table encodes
-     * weighted counts (each row has a _count), so COUNT(*) on it
-     * must SUM the _count column, not count rows.  Neither the
-     * shortcut (returns verbatim, no filter) nor the main path
-     * (treats _count as a regular column and counts rows) knows
-     * how to apply a row filter while preserving those semantics.
-     * Reject rather than produce wrong results — this is a niche
-     * combination (WHERE + factorized expand → GROUP) we can
-     * revisit if real workloads need it. */
-    if (n_keys == 1 && n_aggs > 0 && nrows > 0) {
+     * Interaction with g->selection: the factorized _count column
+     * encodes weighted counts, so COUNT(*) must SUM _count to get
+     * the true row count and SUM(_count) is the same thing.
+     * Neither the shortcut (returns verbatim, no filter) nor the
+     * main path (counts rows of the _src table, ignoring _count)
+     * knows how to apply a row filter while preserving those
+     * semantics.
+     *
+     * Other agg shapes — SUM/AVG/MIN/MAX of a non-_count column,
+     * etc. — don't rely on the factorized weighting; the main
+     * path handles them correctly with the selection installed.
+     * So the rejection must mirror the shortcut's exact
+     * compatibility check (all aggs are COUNT or SUM(_count)),
+     * not just the presence of a _count column. */
+    if (g->selection && n_keys == 1 && n_aggs > 0 && nrows > 0) {
         int64_t cnt_sym_probe = ray_sym_intern("_count", 6);
         ray_t*  cnt_col_probe = ray_table_get_col(tbl, cnt_sym_probe);
         ray_op_ext_t* key_ext_probe = find_ext(g, ext->keys[0]->id);
         int64_t src_sym_probe = ray_sym_intern("_src", 4);
-        if (g->selection && cnt_col_probe && cnt_col_probe->type == RAY_I64 &&
+        if (cnt_col_probe && cnt_col_probe->type == RAY_I64 &&
             key_ext_probe && key_ext_probe->base.opcode == OP_SCAN &&
             key_ext_probe->sym == src_sym_probe) {
-            return ray_error("nyi",
-                "GROUP BY with selection on factorized expand result");
+            /* Same shape check as the shortcut below. */
+            bool all_compat = true;
+            for (uint8_t a = 0; a < n_aggs; a++) {
+                uint16_t aop = ext->agg_ops[a];
+                ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
+                if (aop == OP_COUNT) continue;
+                if (aop == OP_SUM && agg_ext &&
+                    agg_ext->base.opcode == OP_SCAN &&
+                    agg_ext->sym == cnt_sym_probe) continue;
+                all_compat = false;
+                break;
+            }
+            if (all_compat)
+                return ray_error("nyi",
+                    "GROUP BY with selection on factorized expand result "
+                    "(COUNT/SUM(_count) semantics)");
         }
     }
     if (!g->selection && n_keys == 1 && n_aggs > 0 && nrows > 0) {
