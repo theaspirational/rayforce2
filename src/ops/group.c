@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "ops/rowsel.h"
 
 /* ============================================================================
  * Reduction execution
@@ -631,8 +632,7 @@ static inline uint32_t group_probe_entry(group_ht_t* ht,
 void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
                               uint8_t* key_attrs, ray_t** agg_vecs,
                               int64_t start, int64_t end,
-                              const uint64_t* sel_mask,
-                              const uint8_t* sel_flags) {
+                              const int64_t* match_idx) {
     const ght_layout_t* ly = &ht->layout;
     uint8_t nk = ly->n_keys;
     uint8_t na = ly->n_aggs;
@@ -640,20 +640,8 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
     /* Stack buffer for one entry (max: 8 + 8*8 + 8*8 = 136 bytes) */
     char ebuf[8 + 8 * 8 + 8 * 8];
 
-    for (int64_t row = start; row < end; row++) {
-        if (sel_mask) {
-            if (sel_flags) {
-                int64_t seg = row / RAY_MORSEL_ELEMS;
-                if (sel_flags[seg] == RAY_SEL_NONE) {
-                    row = (seg + 1) * RAY_MORSEL_ELEMS - 1;
-                    continue;
-                }
-                if (sel_flags[seg] == RAY_SEL_MIX &&
-                    !RAY_SEL_BIT_TEST(sel_mask, row)) continue;
-            } else if (!RAY_SEL_BIT_TEST(sel_mask, row)) {
-                continue;
-            }
-        }
+    for (int64_t i = start; i < end; i++) {
+        int64_t row = match_idx ? match_idx[i] : i;
         uint64_t h = 0;
         int64_t* ek = (int64_t*)(ebuf + 8);
         for (uint8_t k = 0; k < nk; k++) {
@@ -740,8 +728,9 @@ typedef struct {
     uint32_t     n_workers;
     radix_buf_t* bufs;        /* [n_workers * RADIX_P] */
     ght_layout_t layout;
-    const uint64_t* mask;
-    const uint8_t*  sel_flags; /* per-segment RAY_SEL_NONE/ALL/MIX (NULL=all pass) */
+    /* When non-NULL, workers iterate match_idx[start..end) and
+     * read row=match_idx[i].  When NULL, row=i. */
+    const int64_t* match_idx;
 } radix_phase1_ctx_t;
 
 static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
@@ -752,22 +741,13 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
     uint8_t na = ly->n_aggs;
     uint8_t nv = ly->n_agg_vals;
     uint16_t estride = ly->entry_stride;
-    const uint64_t* mask = c->mask;
-    const uint8_t* sel_flags = c->sel_flags;
+    const int64_t* match_idx = c->match_idx;
 
     int64_t keys[8];
     int64_t agg_vals[8];
 
-    for (int64_t row = start; row < end; ) {
-        /* Segment-level skip for RAY_SEL_NONE */
-        if (sel_flags) {
-            uint32_t seg = (uint32_t)(row / RAY_MORSEL_ELEMS);
-            int64_t seg_end = (int64_t)(seg + 1) * RAY_MORSEL_ELEMS;
-            if (seg_end > end) seg_end = end;
-            if (sel_flags[seg] == RAY_SEL_NONE) { row = seg_end; continue; }
-        }
-
-        if (RAY_UNLIKELY(mask && !RAY_SEL_BIT_TEST(mask, row))) { row++; continue; }
+    for (int64_t i = start; i < end; i++) {
+        int64_t row = match_idx ? match_idx[i] : i;
         uint64_t h = 0;
         for (uint8_t k = 0; k < nk; k++) {
             int8_t t = c->key_types[k];
@@ -795,7 +775,6 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
 
         uint32_t part = RADIX_PART(h);
         radix_buf_push(&my_bufs[part], estride, h, keys, nk, agg_vals, nv);
-        row++;
     }
 }
 
@@ -1016,46 +995,24 @@ typedef struct {
     int64_t*    per_worker_min;  /* [n_workers] */
     int64_t*    per_worker_max;  /* [n_workers] */
     uint32_t    n_workers;
-    const uint64_t* mask;
-    const uint8_t*  sel_flags;   /* per-segment RAY_SEL_NONE/ALL/MIX (NULL=all pass) */
+    const int64_t* match_idx;    /* NULL = no selection */
 } minmax_ctx_t;
 
 static void minmax_scan_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
     minmax_ctx_t* c = (minmax_ctx_t*)ctx;
     uint32_t wid = worker_id % c->n_workers;
-    const uint64_t* mask = c->mask;
-    const uint8_t* sel_flags = c->sel_flags;
+    const int64_t* match_idx = c->match_idx;
     int64_t kmin = INT64_MAX, kmax = INT64_MIN;
     int8_t t = c->key_type;
 
     #define MINMAX_SEG_LOOP(TYPE, CAST) \
         do { \
             const TYPE* kd = (const TYPE*)c->key_data; \
-            for (int64_t r = start; r < end; ) { \
-                if (sel_flags) { \
-                    uint32_t seg = (uint32_t)(r / RAY_MORSEL_ELEMS); \
-                    int64_t seg_end = (int64_t)(seg + 1) * RAY_MORSEL_ELEMS; \
-                    if (seg_end > end) seg_end = end; \
-                    if (sel_flags[seg] == RAY_SEL_NONE) { r = seg_end; continue; } \
-                    bool need_bit = (sel_flags[seg] == RAY_SEL_MIX); \
-                    for (; r < seg_end; r++) { \
-                        if (need_bit && !RAY_SEL_BIT_TEST(mask, r)) continue; \
-                        int64_t v = (int64_t)CAST kd[r]; \
-                        if (v < kmin) kmin = v; \
-                        if (v > kmax) kmax = v; \
-                    } \
-                } else if (mask) { \
-                    if (!RAY_SEL_BIT_TEST(mask, r)) { r++; continue; } \
-                    int64_t v = (int64_t)CAST kd[r]; \
-                    if (v < kmin) kmin = v; \
-                    if (v > kmax) kmax = v; \
-                    r++; \
-                } else { \
-                    int64_t v = (int64_t)CAST kd[r]; \
-                    if (v < kmin) kmin = v; \
-                    if (v > kmax) kmax = v; \
-                    r++; \
-                } \
+            for (int64_t i = start; i < end; i++) { \
+                int64_t r = match_idx ? match_idx[i] : i; \
+                int64_t v = (int64_t)CAST kd[r]; \
+                if (v < kmin) kmin = v; \
+                if (v > kmax) kmax = v; \
             } \
         } while (0)
 
@@ -1278,8 +1235,7 @@ typedef struct {
     uint32_t       agg_f64_mask; /* bitmask: bit a set if agg[a] is RAY_F64 */
     bool           all_sum;      /* true when all ops are SUM/AVG/COUNT (no MIN/MAX/FIRST/LAST) */
     uint32_t       n_slots;
-    const uint64_t* mask;
-    const uint8_t*  sel_flags;   /* per-segment RAY_SEL_NONE/ALL/MIX (NULL=all pass) */
+    const int64_t* match_idx;    /* NULL = no selection */
 } da_ctx_t;
 
 /* Composite GID from multi-key.  Arithmetic overflow is prevented in practice
@@ -1391,8 +1347,7 @@ typedef struct {
     agg_linear_t*  agg_linear;
     uint8_t        n_aggs;
     uint8_t        need_flags;
-    const uint64_t* mask;
-    const uint8_t*  sel_flags;   /* per-segment RAY_SEL_NONE/ALL/MIX (NULL=all pass) */
+    const int64_t* match_idx;    /* NULL = no selection */
     /* per-worker accumulators (1 slot each) */
     da_accum_t*    accums;
     uint32_t       n_accums;
@@ -1494,28 +1449,11 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
 static void scalar_accum_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
     scalar_ctx_t* c = (scalar_ctx_t*)ctx;
     da_accum_t* acc = &c->accums[worker_id];
-    const uint64_t* mask = c->mask;
-    const uint8_t* sel_flags = c->sel_flags;
+    const int64_t* match_idx = c->match_idx;
 
-    for (int64_t r = start; r < end; ) {
-        /* Segment-level skip */
-        if (sel_flags) {
-            uint32_t seg = (uint32_t)(r / RAY_MORSEL_ELEMS);
-            int64_t seg_end = (int64_t)(seg + 1) * RAY_MORSEL_ELEMS;
-            if (seg_end > end) seg_end = end;
-            if (sel_flags[seg] == RAY_SEL_NONE) { r = seg_end; continue; }
-            bool need_bit = (sel_flags[seg] == RAY_SEL_MIX);
-
-            for (; r < seg_end; r++) {
-                if (need_bit && !RAY_SEL_BIT_TEST(mask, r)) continue;
-                scalar_accum_row(c, acc, r);
-            }
-            continue;
-        }
-
-        if (RAY_UNLIKELY(mask && !RAY_SEL_BIT_TEST(mask, r))) { r++; continue; }
+    for (int64_t i = start; i < end; i++) {
+        int64_t r = match_idx ? match_idx[i] : i;
         scalar_accum_row(c, acc, r);
-        r++;
     }
 }
 
@@ -1584,8 +1522,7 @@ static void da_accum_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t en
     da_accum_t* acc = &c->accums[worker_id];
     uint8_t n_aggs = c->n_aggs;
     uint8_t n_keys = c->n_keys;
-    const uint64_t* mask = c->mask;
-    const uint8_t* sel_flags = c->sel_flags;
+    const int64_t* match_idx = c->match_idx;
 
     /* Fast path: single key — avoid composite GID loop overhead.
      * Templated by key element size: the entire loop is stamped out per width
@@ -1596,36 +1533,17 @@ static void da_accum_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t en
         const KTYPE* kp = (const KTYPE*)c->key_ptrs[0]; \
         int64_t kmin = c->key_mins[0]; \
         bool da_pf = c->n_slots >= 4096; \
-        for (int64_t r = start; r < end; ) { \
-            if (sel_flags) { \
-                uint32_t seg = (uint32_t)(r / RAY_MORSEL_ELEMS); \
-                int64_t seg_end = (int64_t)(seg + 1) * RAY_MORSEL_ELEMS; \
-                if (seg_end > end) seg_end = end; \
-                if (sel_flags[seg] == RAY_SEL_NONE) { r = seg_end; continue; } \
-                bool need_bit = (sel_flags[seg] == RAY_SEL_MIX); \
-                for (; r < seg_end; r++) { \
-                    if (need_bit && !RAY_SEL_BIT_TEST(mask, r)) continue; \
-                    if (da_pf && RAY_LIKELY(r + DA_PF_DIST < end)) { \
-                        int64_t pfk = (int64_t)KCAST kp[r + DA_PF_DIST]; \
-                        __builtin_prefetch(&acc->count[(int32_t)(pfk - kmin)], 1, 1); \
-                        if (acc->sum) __builtin_prefetch( \
-                            &acc->sum[(size_t)(int32_t)(pfk - kmin) * n_aggs], 1, 1); \
-                    } \
-                    int64_t kv = (int64_t)KCAST kp[r]; \
-                    da_accum_row(c, acc, (int32_t)(kv - kmin), r); \
-                } \
-                continue; \
-            } \
-            if (RAY_UNLIKELY(mask && !RAY_SEL_BIT_TEST(mask, r))) { r++; continue; } \
-            if (da_pf && RAY_LIKELY(r + DA_PF_DIST < end)) { \
-                int64_t pfk = (int64_t)KCAST kp[r + DA_PF_DIST]; \
+        for (int64_t i = start; i < end; i++) { \
+            int64_t r = match_idx ? match_idx[i] : i; \
+            if (da_pf && RAY_LIKELY(i + DA_PF_DIST < end)) { \
+                int64_t pf_r = match_idx ? match_idx[i + DA_PF_DIST] : (i + DA_PF_DIST); \
+                int64_t pfk = (int64_t)KCAST kp[pf_r]; \
                 __builtin_prefetch(&acc->count[(int32_t)(pfk - kmin)], 1, 1); \
                 if (acc->sum) __builtin_prefetch( \
                     &acc->sum[(size_t)(int32_t)(pfk - kmin) * n_aggs], 1, 1); \
             } \
             int64_t kv = (int64_t)KCAST kp[r]; \
             da_accum_row(c, acc, (int32_t)(kv - kmin), r); \
-            r++; \
         } \
     } while (0)
 
@@ -1645,32 +1563,15 @@ static void da_accum_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t en
     #define DA_MULTI_KEY_LOOP(GID_FN) \
     do { \
         bool _da_pf = c->n_slots >= 4096; \
-        for (int64_t r = start; r < end; ) { \
-            if (sel_flags) { \
-                uint32_t seg = (uint32_t)(r / RAY_MORSEL_ELEMS); \
-                int64_t seg_end = (int64_t)(seg + 1) * RAY_MORSEL_ELEMS; \
-                if (seg_end > end) seg_end = end; \
-                if (sel_flags[seg] == RAY_SEL_NONE) { r = seg_end; continue; } \
-                bool need_bit = (sel_flags[seg] == RAY_SEL_MIX); \
-                for (; r < seg_end; r++) { \
-                    if (need_bit && !RAY_SEL_BIT_TEST(mask, r)) continue; \
-                    if (_da_pf && RAY_LIKELY(r + DA_PF_DIST < end)) { \
-                        int32_t pf_gid = GID_FN(r + DA_PF_DIST); \
-                        __builtin_prefetch(&acc->count[pf_gid], 1, 1); \
-                        if (acc->sum) __builtin_prefetch(&acc->sum[(size_t)pf_gid * n_aggs], 1, 1); \
-                    } \
-                    da_accum_row(c, acc, GID_FN(r), r); \
-                } \
-                continue; \
-            } \
-            if (RAY_UNLIKELY(mask && !RAY_SEL_BIT_TEST(mask, r))) { r++; continue; } \
-            if (_da_pf && RAY_LIKELY(r + DA_PF_DIST < end)) { \
-                int32_t pf_gid = GID_FN(r + DA_PF_DIST); \
+        for (int64_t i = start; i < end; i++) { \
+            int64_t r = match_idx ? match_idx[i] : i; \
+            if (_da_pf && RAY_LIKELY(i + DA_PF_DIST < end)) { \
+                int64_t pf_r = match_idx ? match_idx[i + DA_PF_DIST] : (i + DA_PF_DIST); \
+                int32_t pf_gid = GID_FN(pf_r); \
                 __builtin_prefetch(&acc->count[pf_gid], 1, 1); \
                 if (acc->sum) __builtin_prefetch(&acc->sum[(size_t)pf_gid * n_aggs], 1, 1); \
             } \
             da_accum_row(c, acc, GID_FN(r), r); \
-            r++; \
         } \
     } while (0)
 
@@ -2123,16 +2024,26 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
         }
     }
 
-    /* Extract selection bitmap for pushdown (skip filtered rows in scan loops). */
-    const uint64_t* mask = NULL;
-    const uint8_t* sel_flags = NULL;
-    if (g->selection && g->selection->type == RAY_SEL
-        && g->selection->len == nrows) {
-        mask = ray_sel_bits(g->selection);
-        sel_flags = ray_sel_flags(g->selection);
-    }
-
     if (n_keys > 8 || n_aggs > 8) return ray_error("nyi", NULL);
+
+    /* Extract selection (rowsel) for pushdown.  Workers iterate over
+     * [0, n_scan) and read row=match_idx[i].  When no selection is
+     * present, match_idx is NULL and n_scan equals nrows.  The
+     * match_idx_block must be released on every exec_group exit
+     * path — see the various `goto cleanup` and early returns below. */
+    ray_t* match_idx_block = NULL;
+    const int64_t* match_idx = NULL;
+    int64_t n_scan = nrows;
+    if (g->selection) {
+        ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+        if (sm->nrows == nrows) {
+            match_idx_block = ray_rowsel_to_indices(g->selection);
+            if (match_idx_block) {
+                match_idx = (const int64_t*)ray_data(match_idx_block);
+                n_scan = sm->total_pass;
+            }
+        }
+    }
 
     /* Resolve key columns (VLA — n_keys ≤ 8; use ≥1 to avoid zero-size VLA UB) */
     uint8_t vla_keys = n_keys > 0 ? n_keys : 1;
@@ -2341,16 +2252,18 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             .agg_linear = agg_linear,
             .n_aggs     = n_aggs,
             .need_flags = need_flags,
-            .mask       = mask,
-            .sel_flags  = sel_flags,
+            .match_idx  = match_idx,
             .accums     = sc_acc,
             .n_accums   = sc_n,
         };
 
-        /* Pick specialized tight loop when possible, else generic */
+        /* Pick specialized tight loop when possible, else generic.
+         * The specialized scalar_sum_*_fn variants don't honour
+         * match_idx — they read data[r] directly — so they're only
+         * safe when no selection is in flight. */
         typedef void (*scalar_fn_t)(void*, uint32_t, int64_t, int64_t);
         scalar_fn_t sc_fn = scalar_accum_fn;
-        if (n_aggs == 1 && !mask && agg_ptrs[0] != NULL) {
+        if (n_aggs == 1 && !match_idx && agg_ptrs[0] != NULL) {
             uint16_t op0 = ext->agg_ops[0];
             int8_t   t0  = agg_types[0];
             if ((op0 == OP_SUM || op0 == OP_AVG) &&
@@ -2358,16 +2271,16 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                 sc_fn = scalar_sum_i64_fn;
             else if ((op0 == OP_SUM || op0 == OP_AVG) && t0 == RAY_F64)
                 sc_fn = scalar_sum_f64_fn;
-        } else if (n_aggs == 1 && !mask && agg_linear[0].enabled) {
+        } else if (n_aggs == 1 && !match_idx && agg_linear[0].enabled) {
             uint16_t op0 = ext->agg_ops[0];
             if (op0 == OP_SUM || op0 == OP_AVG)
                 sc_fn = scalar_sum_linear_i64_fn;
         }
 
         if (sc_n > 1)
-            ray_pool_dispatch(sc_pool, sc_fn, &sc_ctx, nrows);
+            ray_pool_dispatch(sc_pool, sc_fn, &sc_ctx, n_scan);
         else
-            sc_fn(&sc_ctx, 0, 0, nrows);
+            sc_fn(&sc_ctx, 0, 0, n_scan);
 
         /* Merge per-worker accumulators into sc_acc[0] */
         da_accum_t* m = &sc_acc[0];
@@ -2428,6 +2341,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
                 if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]);
             for (uint8_t k = 0; k < n_keys; k++)
                 if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+            if (match_idx_block) ray_release(match_idx_block);
             return result ? result : ray_error("oom", NULL);
         }
 
@@ -2442,6 +2356,7 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
             if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]);
         for (uint8_t k = 0; k < n_keys; k++)
             if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+        if (match_idx_block) ray_release(match_idx_block);
         return result;
     }
 
@@ -2488,13 +2403,12 @@ da_path:;
                     .per_worker_min = mm_mins,
                     .per_worker_max = mm_maxs,
                     .n_workers      = mm_n,
-                    .mask           = mask,
-                    .sel_flags      = sel_flags,
+                    .match_idx      = match_idx,
                 };
                 if (mm_n > 1) {
-                    ray_pool_dispatch(mm_pool, minmax_scan_fn, &mm_ctx, nrows);
+                    ray_pool_dispatch(mm_pool, minmax_scan_fn, &mm_ctx, n_scan);
                 } else {
-                    minmax_scan_fn(&mm_ctx, 0, 0, nrows);
+                    minmax_scan_fn(&mm_ctx, 0, 0, n_scan);
                 }
                 kmin = INT64_MAX; kmax = INT64_MIN;
                 for (uint32_t w = 0; w < mm_n; w++) {
@@ -2673,14 +2587,13 @@ da_path:;
                 .agg_f64_mask = agg_f64_mask,
                 .all_sum     = all_sum,
                 .n_slots     = n_slots,
-                .mask        = mask,
-                .sel_flags   = sel_flags,
+                .match_idx   = match_idx,
             };
 
             if (da_n_workers > 1)
-                ray_pool_dispatch(da_pool, da_accum_fn, &da_ctx, nrows);
+                ray_pool_dispatch(da_pool, da_accum_fn, &da_ctx, n_scan);
             else
-                da_accum_fn(&da_ctx, 0, 0, nrows);
+                da_accum_fn(&da_ctx, 0, 0, n_scan);
 
             /* Merge target is always accums[0] */
             da_accum_t* merged = &accums[0];
@@ -2839,6 +2752,7 @@ da_path:;
                     if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]);
                 for (uint8_t k = 0; k < n_keys; k++)
                     if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+                if (match_idx_block) ray_release(match_idx_block);
                 return result ? result : ray_error("oom", NULL);
             }
 
@@ -2903,6 +2817,7 @@ da_path:;
                 if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]);
             for (uint8_t k = 0; k < n_keys; k++)
                 if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+            if (match_idx_block) ray_release(match_idx_block);
             return result;
         }
     }
@@ -2928,6 +2843,7 @@ ht_path:;
                 if (key_owned[kk] && key_vecs[kk]) ray_release(key_vecs[kk]);
             for (uint8_t a = 0; a < n_aggs; a++)
                 if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]);
+            if (match_idx_block) ray_release(match_idx_block);
             return ray_error("nyi", NULL);
         }
     }
@@ -2992,10 +2908,9 @@ ht_path:;
             .n_workers = n_total,
             .bufs      = radix_bufs,
             .layout    = ght_layout,
-            .mask      = mask,
-            .sel_flags = sel_flags,
+            .match_idx = match_idx,
         };
-        ray_pool_dispatch(pool, radix_phase1_fn, &p1ctx, nrows);
+        ray_pool_dispatch(pool, radix_phase1_fn, &p1ctx, n_scan);
         CHECK_CANCEL_GOTO(pool, cleanup);
 
         /* Check for OOM during phase 1 radix buffer growth */
@@ -3225,7 +3140,7 @@ sequential_fallback:;
         goto cleanup;
     }
     group_rows_range(&single_ht, key_data, key_types, key_attrs, agg_vecs,
-                     0, nrows, mask, sel_flags);
+                     0, n_scan, match_idx);
 
     final_ht = &single_ht;
 
@@ -3431,6 +3346,7 @@ cleanup:
         if (agg_owned[a] && agg_vecs[a]) ray_release(agg_vecs[a]);
     for (uint8_t k = 0; k < n_keys; k++)
         if (key_owned[k] && key_vecs[k]) ray_release(key_vecs[k]);
+    if (match_idx_block) ray_release(match_idx_block);
 
     return result;
 }

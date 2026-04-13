@@ -746,10 +746,17 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
                                 const uint16_t* agg_ops);
 bool group_ht_init(group_ht_t* ht, uint32_t cap, const ght_layout_t* ly);
 void group_ht_free(group_ht_t* ht);
+/* Hash-aggregate rows [start, end) into ht.
+ *
+ * When match_idx is non-NULL, the loop iterates `i` in [start, end)
+ * and reads `row = match_idx[i]` — start/end index the selection
+ * space (number of passing rows), not the source column length.
+ * When match_idx is NULL, `row = i` — iterating directly over source
+ * column rows (no selection). */
 void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
                       uint8_t* key_attrs, ray_t** agg_vecs,
                       int64_t start, int64_t end,
-                      const uint64_t* mask, const uint8_t* sel_flags);
+                      const int64_t* match_idx);
 
 /* ── window.c ── */
 ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl);

@@ -25,6 +25,7 @@
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/ops.h"
+#include "ops/rowsel.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -79,7 +80,7 @@ static ray_t* make_audit_table_10(void) {
 /* Build a RAY_SEL bitmap from a boolean array. */
 static ray_t* make_selection(const uint8_t* mask, int64_t n) {
     ray_t* bvec = ray_vec_from_raw(RAY_BOOL, mask, n);
-    ray_t* sel = ray_sel_from_pred(bvec);
+    ray_t* sel = ray_rowsel_from_pred(bvec);
     ray_release(bvec);
     return sel;
 }
@@ -547,16 +548,15 @@ static MunitResult test_sel_chained(const void* params, void* data) {
 
     ray_graph_t* g = ray_graph_new(tbl);
 
+    /* AND two boolean masks at the source level, then build a single
+     * rowsel from the conjunction.  Equivalent semantics to the old
+     * ray_sel_and path that operated on bitmap selections. */
     uint8_t mask_a[] = {0, 0, 1, 1, 1, 1, 0, 1, 1, 0};
     uint8_t mask_b[] = {1, 1, 1, 1, 1, 1, 0, 0, 0, 0};
-    ray_t* sel_a = make_selection(mask_a, 10);
-    ray_t* sel_b = make_selection(mask_b, 10);
-    ray_t* sel_and = ray_sel_and(sel_a, sel_b);
-    munit_assert_false(RAY_IS_ERR(sel_and));
-    ray_retain(sel_and);
-    g->selection = sel_and;
-    ray_release(sel_a);
-    ray_release(sel_b);
+    uint8_t mask_and[10];
+    for (int i = 0; i < 10; i++) mask_and[i] = mask_a[i] & mask_b[i];
+    g->selection = make_selection(mask_and, 10);
+    munit_assert_ptr_not_null(g->selection);
 
     ray_op_t* key = ray_scan(g, "id");
     ray_op_t* val = ray_scan(g, "val");
@@ -571,7 +571,6 @@ static MunitResult test_sel_chained(const void* params, void* data) {
     munit_assert_int(ray_table_nrows(result), ==, 2);
 
     ray_release(result);
-    ray_release(sel_and);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();

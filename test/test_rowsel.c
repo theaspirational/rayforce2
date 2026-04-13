@@ -364,6 +364,41 @@ static MunitResult test_rowsel_refine(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* to_indices: flattening must produce sorted global row indices
+ * matching the oracle. */
+static MunitResult test_rowsel_to_indices(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    int64_t nrows = 2 * RAY_MORSEL_ELEMS + 13;
+    ray_t* buf = ray_alloc((size_t)nrows);
+    uint8_t* bytes = (uint8_t*)ray_data(buf);
+    for (int64_t i = 0; i < nrows; i++) bytes[i] = (i % 5 == 0);
+    ray_t* pred = make_pred(bytes, nrows);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_ptr_not_null(sel);
+
+    ray_t* idx_block = ray_rowsel_to_indices(sel);
+    munit_assert_ptr_not_null(idx_block);
+    int64_t* idx = (int64_t*)ray_data(idx_block);
+
+    int64_t oracle_n = ray_rowsel_meta(sel)->total_pass;
+    int64_t k = 0;
+    for (int64_t i = 0; i < nrows; i++) {
+        if (bytes[i]) {
+            munit_assert_int(idx[k], ==, i);
+            k++;
+        }
+    }
+    munit_assert_int(k, ==, oracle_n);
+
+    ray_release(idx_block);
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_release(buf);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
 /* Refine on a NULL existing — should behave like from_pred(pred). */
 static MunitResult test_rowsel_refine_null_existing(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -392,6 +427,7 @@ static MunitTest rowsel_tests[] = {
     { "/partial_last_morsel",    test_rowsel_partial_last_morsel,    NULL, NULL, 0, NULL },
     { "/parallel",               test_rowsel_parallel,               NULL, NULL, 0, NULL },
     { "/all_segments_compact",   test_rowsel_all_segments_compact,   NULL, NULL, 0, NULL },
+    { "/to_indices",             test_rowsel_to_indices,             NULL, NULL, 0, NULL },
     { "/refine",                 test_rowsel_refine,                 NULL, NULL, 0, NULL },
     { "/refine_null_existing",   test_rowsel_refine_null_existing,   NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL }

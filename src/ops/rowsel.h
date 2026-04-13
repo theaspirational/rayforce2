@@ -141,6 +141,19 @@ void ray_rowsel_release(ray_t* block);
  * same logic single-threaded. */
 ray_t* ray_rowsel_from_pred(ray_t* pred);
 
+/* Flatten a rowsel into a dense int64 array of global row indices,
+ * sorted ascending.  Length of the array is `meta->total_pass`.
+ *
+ * Returned block is a ray_t* byte buffer whose ray_data() points to
+ * an `int64_t[total_pass]`.  Consumer gets a raw pointer via
+ * ray_data() and releases the block when done via ray_release.
+ * Returns NULL on OOM.
+ *
+ * Used by exec_group and similar consumers that can't cheaply walk
+ * the morsel-local rowsel inline (yet) — they dispatch workers over
+ * [0, total_pass) using the flattened indices directly. */
+ray_t* ray_rowsel_to_indices(ray_t* sel);
+
 /* Refine an existing rowsel by AND-ing it with a fresh predicate vec.
  *
  * Used by chained OP_FILTER on a table input that already has a

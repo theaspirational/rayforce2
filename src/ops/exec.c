@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "ops/rowsel.h"
 #include "mem/sys.h"
 
 /* Global profiler instance (zero-initialized = inactive) */
@@ -1036,25 +1037,26 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             if (!input || RAY_IS_ERR(input)) { if (pred && !RAY_IS_ERR(pred)) ray_release(pred); return input; }
             if (!pred || RAY_IS_ERR(pred)) { ray_release(input); return pred; }
 
-            /* Lazy filter: convert predicate to RAY_SEL bitmap instead of
+            /* Lazy filter: convert predicate to a rowsel (morsel-local
+             * index list) and install on g->selection instead of
              * materializing a compacted table.  Only for TABLE inputs —
-             * downstream ops (group-by) consume the bitmap directly;
-             * boundary ops (sort/join/window) compact on demand.
-             * Vector inputs must still materialize immediately since
-             * downstream ops like COUNT rely on compacted length. */
+             * downstream ops (group-by) walk the rowsel directly,
+             * boundary ops (sort/join/window) compact on demand via
+             * sel_compact.  Vector inputs must still materialize
+             * immediately since downstream ops like COUNT rely on
+             * compacted length. */
             if (pred->type == RAY_BOOL && input->type == RAY_TABLE) {
-                ray_t* new_sel = ray_sel_from_pred(pred);
-                ray_release(pred);
-                if (!new_sel || RAY_IS_ERR(new_sel)) { ray_release(input); return new_sel; }
-
                 if (g->selection) {
-                    /* Chained filter: AND with existing selection */
-                    ray_t* merged = ray_sel_and(g->selection, new_sel);
-                    ray_release(new_sel);
+                    /* Chained filter: refine the existing selection
+                     * with this predicate in one walk. */
+                    ray_t* merged = ray_rowsel_refine(g->selection, pred);
+                    ray_release(pred);
                     ray_release(g->selection);
-                    g->selection = merged;
+                    g->selection = merged;  /* may be NULL if all-pass */
                 } else {
-                    g->selection = new_sel;
+                    ray_t* new_sel = ray_rowsel_from_pred(pred);
+                    ray_release(pred);
+                    g->selection = new_sel;  /* may be NULL if all-pass */
                 }
                 return input;  /* original table, not compacted */
             }
@@ -1145,7 +1147,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         case OP_PIVOT: {
             ray_t* tbl = g->table;
             ray_t* owned_tbl = NULL;
-            if (g->selection && g->selection->type == RAY_SEL) {
+            if (g->selection) {
                 ray_t* compacted = sel_compact(g, tbl, g->selection);
                 if (!compacted || RAY_IS_ERR(compacted)) return compacted;
                 ray_release(g->selection);

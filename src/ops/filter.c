@@ -22,6 +22,7 @@
  */
 
 #include "ops/internal.h"
+#include "ops/rowsel.h"
 
 /* ============================================================================
  * Filter execution — extracted from exec.c
@@ -487,14 +488,16 @@ ray_t* exec_filter_head(ray_t* input, ray_t* pred, int64_t limit) {
 
 ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
     (void)g;
-    if (!tbl || RAY_IS_ERR(tbl) || !sel || sel->type != RAY_SEL)
-        return tbl;
+    if (!tbl || RAY_IS_ERR(tbl) || !sel) return tbl;
 
     int64_t nrows = ray_table_nrows(tbl);
-    ray_sel_meta_t* meta = ray_sel_meta(sel);
+    ray_rowsel_t* meta = ray_rowsel_meta(sel);
     int64_t pass_count = meta->total_pass;
 
-    /* All-pass: nothing to compact */
+    /* All-pass: nothing to compact.  (In practice this path is
+     * unreachable because ray_rowsel_from_pred returns NULL for
+     * all-pass; the caller skips sel_compact in that case.
+     * Handled here for safety.) */
     if (pass_count == nrows) { ray_retain(tbl); return tbl; }
 
     /* None-pass: return empty table with same schema */
@@ -527,22 +530,25 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
     if (!match_idx) { ray_retain(tbl); return tbl; }
 
     {
-        const uint64_t* bits = ray_sel_bits(sel);
-        const uint8_t* flags = ray_sel_flags(sel);
+        const uint8_t*  flags   = ray_rowsel_flags(sel);
+        const uint32_t* offsets = ray_rowsel_offsets(sel);
+        const uint16_t* idx     = ray_rowsel_idx(sel);
         uint32_t n_segs = meta->n_segs;
         int64_t j = 0;
         for (uint32_t seg = 0; seg < n_segs; seg++) {
+            uint8_t f = flags[seg];
+            if (f == RAY_SEL_NONE) continue;
             int64_t seg_start = (int64_t)seg * RAY_MORSEL_ELEMS;
             int64_t seg_end = seg_start + RAY_MORSEL_ELEMS;
             if (seg_end > nrows) seg_end = nrows;
-
-            if (flags[seg] == RAY_SEL_NONE) continue;
-            if (flags[seg] == RAY_SEL_ALL) {
+            if (f == RAY_SEL_ALL) {
                 for (int64_t r = seg_start; r < seg_end; r++)
                     match_idx[j++] = r;
             } else {
-                for (int64_t r = seg_start; r < seg_end; r++)
-                    if (RAY_SEL_BIT_TEST(bits, r)) match_idx[j++] = r;
+                const uint16_t* slice = idx + offsets[seg];
+                uint32_t n = offsets[seg + 1] - offsets[seg];
+                for (uint32_t i = 0; i < n; i++)
+                    match_idx[j++] = seg_start + slice[i];
             }
         }
     }

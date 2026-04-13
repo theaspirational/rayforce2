@@ -215,6 +215,99 @@ ray_t* ray_rowsel_from_pred(ray_t* pred) {
 }
 
 /* ──────────────────────────────────────────────────────────────────
+ * ray_rowsel_to_indices — flatten to a dense int64 array
+ * ────────────────────────────────────────────────────────────────── */
+
+/* Pass 2 worker context for ray_rowsel_to_indices. */
+typedef struct {
+    const uint8_t*  flags;
+    const uint32_t* offsets;
+    const uint16_t* idx;
+    const uint32_t* flat_offsets;  /* per-segment offset into out[] */
+    int64_t*        out;
+    int64_t         nrows;
+} rowsel_to_idx_ctx_t;
+
+static void rowsel_to_idx_fn(void* vctx, uint32_t worker_id,
+                             int64_t start_seg, int64_t end_seg) {
+    (void)worker_id;
+    rowsel_to_idx_ctx_t* c = (rowsel_to_idx_ctx_t*)vctx;
+    int64_t nrows = c->nrows;
+    for (int64_t seg = start_seg; seg < end_seg; seg++) {
+        uint8_t f = c->flags[seg];
+        if (f == RAY_SEL_NONE) continue;
+        int64_t base = seg * RAY_MORSEL_ELEMS;
+        int64_t end  = base + RAY_MORSEL_ELEMS;
+        if (end > nrows) end = nrows;
+        int64_t j = c->flat_offsets[seg];
+        if (f == RAY_SEL_ALL) {
+            for (int64_t r = base; r < end; r++) c->out[j++] = r;
+        } else {
+            const uint16_t* slice = c->idx + c->offsets[seg];
+            uint32_t n = c->offsets[seg + 1] - c->offsets[seg];
+            for (uint32_t i = 0; i < n; i++) c->out[j++] = base + slice[i];
+        }
+    }
+}
+
+ray_t* ray_rowsel_to_indices(ray_t* sel) {
+    if (!sel) return NULL;
+    ray_rowsel_t*   m       = ray_rowsel_meta(sel);
+    const uint8_t*  flags   = ray_rowsel_flags(sel);
+    const uint32_t* offsets = ray_rowsel_offsets(sel);
+    const uint16_t* idx     = ray_rowsel_idx(sel);
+    int64_t nrows      = m->nrows;
+    int64_t total_pass = m->total_pass;
+    uint32_t n_segs    = m->n_segs;
+
+    ray_t* block = ray_alloc((size_t)total_pass * sizeof(int64_t));
+    if (!block) return NULL;
+    int64_t* out = (int64_t*)ray_data(block);
+
+    if (total_pass == 0 || n_segs == 0) return block;
+
+    /* Build per-segment flat offsets into out[].  Sequential prefix
+     * sum over n_segs entries — cheap (n_segs ≈ nrows/1024). */
+    ray_t* fo_block = ray_alloc((size_t)n_segs * sizeof(uint32_t));
+    if (!fo_block) { ray_release(block); return NULL; }
+    uint32_t* flat_offsets = (uint32_t*)ray_data(fo_block);
+    uint32_t cum = 0;
+    for (uint32_t s = 0; s < n_segs; s++) {
+        flat_offsets[s] = cum;
+        uint8_t f = flags[s];
+        if (f == RAY_SEL_NONE) continue;
+        if (f == RAY_SEL_ALL) {
+            int64_t base = (int64_t)s * RAY_MORSEL_ELEMS;
+            int64_t end  = base + RAY_MORSEL_ELEMS;
+            if (end > nrows) end = nrows;
+            cum += (uint32_t)(end - base);
+        } else {
+            cum += offsets[s + 1] - offsets[s];
+        }
+    }
+
+    /* Parallel write: each worker fills its own segment range into
+     * out[] using flat_offsets to find the start of each segment.
+     * Slices are non-overlapping by construction. */
+    rowsel_to_idx_ctx_t ctx = {
+        .flags        = flags,
+        .offsets      = offsets,
+        .idx          = idx,
+        .flat_offsets = flat_offsets,
+        .out          = out,
+        .nrows        = nrows,
+    };
+    ray_pool_t* pool = ray_pool_get();
+    if (pool && nrows >= RAY_PARALLEL_THRESHOLD)
+        ray_pool_dispatch(pool, rowsel_to_idx_fn, &ctx, (int64_t)n_segs);
+    else
+        rowsel_to_idx_fn(&ctx, 0, 0, (int64_t)n_segs);
+
+    ray_release(fo_block);
+    return block;
+}
+
+/* ──────────────────────────────────────────────────────────────────
  * Refine — chained filter
  * ────────────────────────────────────────────────────────────────── */
 
