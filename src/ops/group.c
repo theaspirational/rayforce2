@@ -2011,22 +2011,33 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
              * SUM(_count) is equivalent.  Even if only one agg in
              * a mixed query needs weighting, the main path can't
              * handle it correctly, so fail the whole query rather
-             * than return a mix of right and wrong columns. */
-            bool needs_weighting = false;
-            for (uint8_t a = 0; a < n_aggs; a++) {
-                uint16_t aop = ext->agg_ops[a];
-                ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
-                if (aop == OP_COUNT) { needs_weighting = true; break; }
-                if (aop == OP_SUM && agg_ext &&
-                    agg_ext->base.opcode == OP_SCAN &&
-                    agg_ext->sym == cnt_sym_probe) {
-                    needs_weighting = true; break;
+             * than return a mix of right and wrong columns.
+             *
+             * Special case: an empty selection (total_pass == 0)
+             * means every row was filtered out, so the result is
+             * an empty group set regardless of which aggs are
+             * involved.  The main path handles this correctly
+             * even for count-weighted aggs because n_scan == 0
+             * produces no group rows at all.  Let it fall
+             * through. */
+            ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
+            if (sm->total_pass > 0) {
+                bool needs_weighting = false;
+                for (uint8_t a = 0; a < n_aggs; a++) {
+                    uint16_t aop = ext->agg_ops[a];
+                    ray_op_ext_t* agg_ext = find_ext(g, ext->agg_ins[a]->id);
+                    if (aop == OP_COUNT) { needs_weighting = true; break; }
+                    if (aop == OP_SUM && agg_ext &&
+                        agg_ext->base.opcode == OP_SCAN &&
+                        agg_ext->sym == cnt_sym_probe) {
+                        needs_weighting = true; break;
+                    }
                 }
+                if (needs_weighting)
+                    return ray_error("nyi",
+                        "GROUP BY with selection on factorized expand result "
+                        "(COUNT/SUM(_count) semantics)");
             }
-            if (needs_weighting)
-                return ray_error("nyi",
-                    "GROUP BY with selection on factorized expand result "
-                    "(COUNT/SUM(_count) semantics)");
         }
     }
     if (!g->selection && n_keys == 1 && n_aggs > 0 && nrows > 0) {
