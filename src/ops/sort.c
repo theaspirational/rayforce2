@@ -2552,28 +2552,141 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
     int64_t* idx_data = (int64_t*)ray_data(idx);
     int64_t ncols = ray_table_ncols(tbl);
 
-    /* Gather each column using gather_by_idx — handles nulls, str_pool,
-     * sym_dict, LIST retain, and all type-specific paths correctly. */
+    /* Pre-allocate all output columns, then do a parallel multi-column
+     * gather — same fast path exec_sort uses.  LIST columns are gathered
+     * element-wise with retain; all other columns go through the
+     * partitioned_gather / multi_gather_fn paths.  Null bits, str_pool,
+     * and sym_dict are propagated after the gather runs. */
+    ray_pool_t* gather_pool = (nrows > RAY_PARALLEL_THRESHOLD)
+                              ? ray_pool_get() : NULL;
+    if (ncols > 4096) {
+        if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
+        ray_release(idx);
+        return ray_error("nyi", NULL);
+    }
+
+    ray_t* new_cols[ncols];
+    int64_t col_names[ncols];
+    for (int64_t c = 0; c < ncols; c++) new_cols[c] = NULL;
+
+    for (int64_t c = 0; c < ncols; c++) {
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        col_names[c] = ray_table_col_name(tbl, c);
+        if (!col) continue;
+        ray_t* nc;
+        if (col->type == RAY_LIST)
+            nc = ray_list_new(nrows);
+        else
+            nc = col_vec_new(col, nrows);
+        if (!nc || RAY_IS_ERR(nc)) {
+            for (int64_t j = 0; j < c; j++)
+                if (new_cols[j]) ray_release(new_cols[j]);
+            if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
+            ray_release(idx);
+            return nc ? nc : ray_error("oom", NULL);
+        }
+        if (col->type == RAY_LIST) {
+            ray_t** src_ptrs = (ray_t**)ray_data(col);
+            ray_t** dst_ptrs = (ray_t**)ray_data(nc);
+            for (int64_t r = 0; r < nrows; r++) {
+                dst_ptrs[r] = src_ptrs[idx_data[r]];
+                if (dst_ptrs[r]) ray_retain(dst_ptrs[r]);
+            }
+        }
+        nc->len = nrows;
+        new_cols[c] = nc;
+    }
+
+    /* Decode sort key column directly from sorted radix keys when
+     * available — sequential write, much faster than random-access
+     * gather.  Only for single-key sorts where sort_indices_ex
+     * produced sorted_keys (non-packed path). */
+    int64_t decode_col_idx = -1;
+    if (sorted_keys && n_keys == 1 && !RAY_IS_SYM(key_cols[0]->type)) {
+        for (int64_t c = 0; c < ncols; c++) {
+            if (col_names[c] == key_ids[0] && new_cols[c]) {
+                decode_col_idx = c;
+                break;
+            }
+        }
+    }
+    if (decode_col_idx >= 0) {
+        radix_decode_into(ray_data(new_cols[decode_col_idx]),
+                          key_cols[0]->type, sorted_keys,
+                          nrows, descs[0]);
+    }
+
+    /* Gather remaining non-LIST, non-decode columns in batches.
+     * Single-key sorts use the radix-partitioned gather; multi-key
+     * fallback to the multi_gather pool dispatch. */
+    for (int64_t base = 0; base < ncols; ) {
+        char*   g_srcs[MGATHER_MAX_COLS];
+        char*   g_dsts[MGATHER_MAX_COLS];
+        uint8_t g_esz[MGATHER_MAX_COLS];
+        int64_t g_nc = 0;
+        for (; base < ncols && g_nc < MGATHER_MAX_COLS; base++) {
+            if (!new_cols[base] || base == decode_col_idx) continue;
+            ray_t* col = ray_table_get_col_idx(tbl, base);
+            if (col->type == RAY_LIST) continue;
+            g_srcs[g_nc] = (char*)ray_data(col);
+            g_dsts[g_nc] = (char*)ray_data(new_cols[base]);
+            g_esz[g_nc]  = col_esz(col);
+            g_nc++;
+        }
+        if (g_nc == 0) continue;
+        if (n_keys == 1)
+            partitioned_gather(gather_pool, idx_data, nrows,
+                               nrows, g_srcs, g_dsts, g_esz, g_nc);
+        else {
+            multi_gather_ctx_t mg = { .idx = idx_data, .ncols = g_nc };
+            for (int64_t i = 0; i < g_nc; i++) {
+                mg.srcs[i] = g_srcs[i];
+                mg.dsts[i] = g_dsts[i];
+                mg.esz[i]  = g_esz[i];
+            }
+            if (gather_pool)
+                ray_pool_dispatch(gather_pool, multi_gather_fn, &mg, nrows);
+            else
+                multi_gather_fn(&mg, 0, 0, nrows);
+        }
+    }
+
+    /* Propagate str_pool / sym_dict / null bitmaps from source columns.
+     * Null propagation was the reason this function got rewritten in
+     * commit 87981c8; do it explicitly here instead of relying on
+     * gather_by_idx. */
+    for (int64_t c = 0; c < ncols; c++) {
+        if (!new_cols[c]) continue;
+        ray_t* col = ray_table_get_col_idx(tbl, c);
+        if (!col) continue;
+        col_propagate_str_pool(new_cols[c], col);
+        if (col->type == RAY_SYM && col->sym_dict) {
+            ray_retain(col->sym_dict);
+            new_cols[c]->sym_dict = col->sym_dict;
+        }
+        bool src_has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) ||
+                             ((col->attrs & RAY_ATTR_SLICE) && col->slice_parent &&
+                              (col->slice_parent->attrs & RAY_ATTR_HAS_NULLS));
+        if (src_has_nulls) {
+            for (int64_t r = 0; r < nrows; r++)
+                if (ray_vec_is_null(col, idx_data[r]))
+                    ray_vec_set_null(new_cols[c], r, true);
+        }
+    }
+
+    /* Assemble result table */
     ray_t* result = ray_table_new(ncols);
     if (!result || RAY_IS_ERR(result)) {
+        for (int64_t c = 0; c < ncols; c++)
+            if (new_cols[c]) ray_release(new_cols[c]);
         if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
         ray_release(idx);
         return result ? result : ray_error("oom", NULL);
     }
-
     for (int64_t c = 0; c < ncols; c++) {
-        ray_t* col = ray_table_get_col_idx(tbl, c);
-        int64_t cname = ray_table_col_name(tbl, c);
-        if (!col) continue;
-        ray_t* gathered = gather_by_idx(col, idx_data, nrows);
-        if (!gathered || RAY_IS_ERR(gathered)) {
-            ray_release(result);
-            if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
-            ray_release(idx);
-            return gathered ? gathered : ray_error("oom", NULL);
-        }
-        result = ray_table_add_col(result, cname, gathered);
-        ray_release(gathered);
+        if (!new_cols[c]) continue;
+        result = ray_table_add_col(result, col_names[c], new_cols[c]);
+        ray_release(new_cols[c]);
     }
 
     if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
