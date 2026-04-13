@@ -2702,6 +2702,66 @@ static MunitResult test_sort_decode_radix_i64(const void* params, void* fixture)
     return MUNIT_OK;
 }
 
+/* ---- Sort regression: long common prefix must not be quadratic ----
+ * Every string shares the first 40 bytes ("AAAAAAAA..."), then a distinct
+ * 6-byte suffix.  The packed-key window is 32 bytes, so the radix walks
+ * the entire first window uniform, repacks the next window, and only
+ * finds ordering in the suffix bytes.  A quadratic base-case fallback
+ * at window exhaustion would time out on this input — the repack path
+ * keeps it linear in total string bytes. */
+static MunitResult test_sort_long_common_prefix(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Build a column of 4000 strings with identical 40-byte prefix
+     * followed by a 6-byte distinct suffix, inserted in reverse order
+     * so the input is maximally unsorted. */
+    const int64_t n = 4000;
+    ray_t* col = ray_vec_new(RAY_STR, n);
+    munit_assert_ptr_not_null(col);
+    munit_assert_false(RAY_IS_ERR(col));
+    char buf[64];
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v = n - 1 - i;
+        snprintf(buf, sizeof buf,
+                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%06ld", (long)v);
+        col = ray_str_vec_append(col, buf, strlen(buf));
+        munit_assert_false(RAY_IS_ERR(col));
+    }
+    /* Sanity check the input: every row should be 46 bytes. */
+    munit_assert_int(ray_len(col), ==, n);
+    for (int64_t i = 0; i < n; i++) {
+        size_t l; const char* p = ray_str_vec_get(col, i, &l);
+        munit_assert_int((int)l, ==, 46);
+        (void)p;
+    }
+    /* Bind the column into the Rayfall env and get sort indices. */
+    ray_env_set(ray_sym_intern("_lcp", 4), col);
+    ray_t* idx = ray_eval_str("(iasc _lcp)");
+    munit_assert_ptr_not_null(idx);
+    munit_assert_false(RAY_IS_ERR(idx));
+    munit_assert_int(ray_len(idx), ==, n);
+    /* Walk the sort indices and verify each points to a string greater
+     * than its predecessor. */
+    int64_t* p = (int64_t*)ray_data(idx);
+    size_t la, lb;
+    const char* pa = ray_str_vec_get(col, p[0], &la);
+    for (int64_t i = 1; i < n; i++) {
+        const char* pb = ray_str_vec_get(col, p[i], &lb);
+        size_t m = la < lb ? la : lb;
+        int cmp = memcmp(pa, pb, m);
+        if (!(cmp < 0 || (cmp == 0 && la < lb))) {
+            fprintf(stderr, "FAIL at i=%ld p[i-1]=%ld p[i]=%ld\n"
+                            "  prev=%.46s\n  cur =%.46s\n",
+                    (long)i, (long)p[i-1], (long)p[i], pa, pb);
+            munit_assert_true(0);
+        }
+        pa = pb;
+        la = lb;
+    }
+    ray_release(idx);
+    ray_release(col);
+    return MUNIT_OK;
+}
+
 /* ---- Test: read/write CSV roundtrip ---- */
 static MunitResult test_eval_read_write_csv(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -3193,6 +3253,7 @@ static MunitTest lang_tests[] = {
     { "/sort/decode_radix_f64",      test_sort_decode_radix_f64,      lang_setup, lang_teardown, 0, NULL },
     { "/sort/decode_radix_f64_desc", test_sort_decode_radix_f64_desc, lang_setup, lang_teardown, 0, NULL },
     { "/sort/decode_radix_i64",      test_sort_decode_radix_i64,      lang_setup, lang_teardown, 0, NULL },
+    { "/sort/long_common_prefix",    test_sort_long_common_prefix,    lang_setup, lang_teardown, 0, NULL },
     { "/eval/read_write_csv",  test_eval_read_write_csv,  lang_setup, lang_teardown, 0, NULL },
     { "/eval/as_cast",         test_eval_as_cast,         lang_setup, lang_teardown, 0, NULL },
     { "/eval/type",            test_eval_type,            lang_setup, lang_teardown, 0, NULL },

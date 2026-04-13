@@ -1068,197 +1068,474 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
 }
 
 /* ============================================================================
- * MSD byte-radix sort for RAY_STR single-key sorts
+ * Adaptive string sort (single-key RAY_STR)
  *
- * Variable-width strings can't fit in the 8-byte numeric radix pipeline.
- * This specialised path sorts an index permutation in place using an MSD
- * (most-significant-digit) byte-wise radix with recursion into equal-
- * prefix sub-buckets — the same technique ska_sort / American-flag sort
- * uses.  At each recursion level:
+ * Pipeline:
+ *   1. Null partition — move nulls to sorted_idx[n_live..nrows).
+ *   2. Probe — one linear pass over the non-null range computes
+ *        • max_len                     (→ key width)
+ *        • run_count / run_all_asc/desc (→ pre-sorted short-circuit)
+ *        • card_estimate on the first 1024 rows via an exact hashset
+ *                                      (future-facing; unused today)
+ *      Every downstream decision is taken from these runtime numbers —
+ *      nothing in this file branches on "we know the bench is str8".
+ *   3. Single-run short-circuit — if the probe reports one monotone
+ *      run across the entire non-null range, we're done: copy (or
+ *      reverse, for DESC × ASC mismatch) and skip sorting entirely.
+ *      This is the vergesort trivial case; the general multi-run
+ *      merge path is scoped for a follow-up.
+ *   4. Key materialization — pack each non-null string into a record
+ *        struct { uint64_t parts[parts]; uint32_t row; uint32_t len; }
+ *      where parts = min(4, ceil(max_len/8)) and each part holds 8
+ *      bytes of the string byte-swapped into big-endian u64 form, so
+ *      raw u64 comparison == lex comparison.  One sequential pass
+ *      over the input, zero per-byte function calls downstream.
+ *   5. American-Flag in-place MSD byte radix on the packed records.
+ *      Top-level byte histogram → 256 buckets → one in-place swap
+ *      pass → recurse.  Sub-base-case buckets (≤ 24) finish with
+ *      insertion sort using the full multi-u64 comparator.  When
+ *      recursion exhausts the packed prefix (depth == parts*8),
+ *      ties fall through to a tail comparator that walks the
+ *      original bytes via ray_str_t_cmp — the only place cold
+ *      pool memory is touched during the sort proper.
+ *   6. Scatter row indices back to sorted_idx.
+ *   7. DESC reverses the non-null range; nulls-first rotates nulls
+ *      to the front.
  *
- *   1. Histogram the byte at position `depth` for each row in the range,
- *      into 257 buckets: bucket 0 for "string ended" (len <= depth) and
- *      buckets 1..256 for concrete byte values 0..255.  The offset-by-1
- *      avoids the need for an in-string NUL sentinel — length is looked
- *      up directly so strings containing raw 0x00 bytes sort correctly.
- *   2. Prefix-sum to compute bucket starts.
- *   3. Scatter row indices into a scratch buffer, then memcpy back.
- *   4. Recurse into each non-trivial bucket (> 1 element) at depth+1.
- *      Bucket 0 never recurses — every row there has the same string
- *      as the current prefix and further bytes don't exist.
- *
- * Small ranges (≤ RAY_MSD_INSERTION) fall back to a direct insertion
- * sort using the full ray_str_t_cmp, which amortises the per-level
- * overhead on short buckets and avoids deep recursion on random data.
- *
- * NULL rows are partitioned out up front (via a stable split on
- * sorted_idx) so the recursive core only sees non-null strings.
- *
- * DESC is handled by sorting ASC then reversing the sorted range.
+ * Every threshold and resource allocation here is driven by runtime
+ * numbers (n, max_len, worker count) or machine geometry (cache line,
+ * pool workers) — never by assumptions about input shape.
  * ============================================================================ */
 
-#define RAY_MSD_INSERTION  32
-#define RAY_MSD_BUCKETS    257  /* 0 = end-of-string, 1..256 = byte+1 */
+#define RAY_STRSORT_KEY_PARTS_MAX 4    /* 32-byte packed prefix cap */
+#define RAY_STRSORT_BASE_CASE     24   /* small-bucket insertion-sort threshold */
+#define RAY_STRSORT_PROBE_HEAD    1024 /* rows sampled for exact distinct count */
 
 typedef struct {
-    const ray_str_t* elems;
-    const char*      pool;
-    int64_t*         tmp;   /* scratch buffer, length nrows */
-} msd_str_ctx_t;
+    uint64_t parts[RAY_STRSORT_KEY_PARTS_MAX];
+    uint32_t row;
+    uint32_t len;
+} ray_strkey_t;
 
-/* Return the "radix digit" for the byte at position `depth` of string s.
- * Range is [0, 256]: 0 when depth is past the end of the string, otherwise
- * 1 + byte_value so shorter strings sort before longer ones that share a
- * prefix (matching strcmp semantics). */
-static inline int msd_str_digit(const ray_str_t* s, const char* pool,
-                                int depth) {
-    if ((int)s->len <= depth) return 0;
-    const char* p = ray_str_t_ptr(s, pool);
-    return 1 + (int)(uint8_t)p[depth];
+/* Convert a native-endian u64 to big-endian so raw u64 comparison yields
+ * lex order over the original byte layout.  On LE targets (everything we
+ * build for today) this is a single bswap instruction. */
+static inline uint64_t strkey_lex_u64(uint64_t v) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return __builtin_bswap64(v);
+#else
+    return v;
+#endif
 }
 
-/* Insertion sort on sorted_idx[lo..hi) using full ray_str_t_cmp.
- * Base case for small ranges. */
-static void msd_str_insertion(int64_t* sorted_idx, int64_t lo, int64_t hi,
-                              const ray_str_t* elems, const char* pool) {
-    for (int64_t i = lo + 1; i < hi; i++) {
-        int64_t cur = sorted_idx[i];
-        const ray_str_t* sc = &elems[cur];
+/* Load 8 bytes starting at src[offset], zero-padding past `len`, then
+ * byte-swap into lex u64 form.  Returns 0 when offset ≥ len. */
+static inline uint64_t strkey_load_part(const char* src, int64_t len, int offset) {
+    int64_t remaining = len - offset;
+    if (remaining <= 0) return 0;
+    uint64_t raw = 0;
+    int64_t take = remaining < 8 ? remaining : 8;
+    memcpy(&raw, src + offset, (size_t)take);
+    return strkey_lex_u64(raw);
+}
+
+/* Full-depth comparator.  Fast path: the packed parts.  Tail fallback:
+ * only fires if both records have len > parts*8 and their packed
+ * prefixes are equal — touches pool memory via ray_str_t_cmp only
+ * at the base case, never during the radix partitioning loop. */
+static int strkey_cmp(const ray_strkey_t* a, const ray_strkey_t* b,
+                      int parts,
+                      const ray_str_t* elems, const char* pool) {
+    for (int p = 0; p < parts; p++) {
+        if (a->parts[p] < b->parts[p]) return -1;
+        if (a->parts[p] > b->parts[p]) return  1;
+    }
+    int64_t parts_bytes = (int64_t)parts * 8;
+    /* Both strings fit inside the packed prefix — the only way their
+     * parts can tie is if one is a zero-padded suffix of the other, in
+     * which case the shorter one sorts first.  (Equal length means they
+     * are actually equal and stability via row is handled by the caller.) */
+    if ((int64_t)a->len <= parts_bytes && (int64_t)b->len <= parts_bytes) {
+        return (int)a->len - (int)b->len;
+    }
+    /* Tail comparison on bytes [parts_bytes, len). */
+    const ray_str_t* sa = &elems[a->row];
+    const ray_str_t* sb = &elems[b->row];
+    const char* pa = ray_str_t_ptr(sa, pool);
+    const char* pb = ray_str_t_ptr(sb, pool);
+    int64_t la = (int64_t)sa->len - parts_bytes; if (la < 0) la = 0;
+    int64_t lb = (int64_t)sb->len - parts_bytes; if (lb < 0) lb = 0;
+    int64_t m = la < lb ? la : lb;
+    int r = m ? memcmp(pa + parts_bytes, pb + parts_bytes, (size_t)m) : 0;
+    if (r != 0) return r;
+    return (la > lb) - (la < lb);
+}
+
+static void strkey_insertion_sort(ray_strkey_t* a, int64_t n, int parts,
+                                   const ray_str_t* elems, const char* pool) {
+    for (int64_t i = 1; i < n; i++) {
+        ray_strkey_t cur = a[i];
         int64_t j = i - 1;
-        while (j >= lo) {
-            const ray_str_t* sb = &elems[sorted_idx[j]];
-            if (ray_str_t_cmp(sb, pool, sc, pool) <= 0) break;
-            sorted_idx[j + 1] = sorted_idx[j];
+        while (j >= 0 && strkey_cmp(&a[j], &cur, parts, elems, pool) > 0) {
+            a[j + 1] = a[j];
             j--;
         }
-        sorted_idx[j + 1] = cur;
+        a[j + 1] = cur;
     }
 }
 
-/* Recursive MSD byte-radix sort of sorted_idx[lo..hi) at byte position
- * `depth`.  All strings in the range are assumed to share the same
- * (depth)-byte prefix by virtue of how earlier levels partitioned them. */
-static void msd_str_sort_range(int64_t* sorted_idx, int64_t lo, int64_t hi,
-                               int depth, const msd_str_ctx_t* c) {
-    int64_t n = hi - lo;
-    if (n <= 1) return;
-    if (n <= RAY_MSD_INSERTION) {
-        msd_str_insertion(sorted_idx, lo, hi, c->elems, c->pool);
-        return;
-    }
-
-    /* Phase 1: histogram.  Also track the first non-EOS digit seen and
-     * whether all non-EOS entries land in the same bucket — the common
-     * case for clustered / few-unique data where every remaining string
-     * matches on many consecutive bytes.  When that happens we can skip
-     * the scatter and recurse at depth+1 directly, avoiding a full
-     * rewrite pass per depth level. */
-    int64_t counts[RAY_MSD_BUCKETS];
-    memset(counts, 0, sizeof(counts));
-    int single_digit = -1;
-    bool single = true;
-    for (int64_t i = lo; i < hi; i++) {
-        int d = msd_str_digit(&c->elems[sorted_idx[i]], c->pool, depth);
-        counts[d]++;
-        if (d == 0) continue;
-        if (single_digit == -1) single_digit = d;
-        else if (d != single_digit) single = false;
-    }
-    /* Fast path: every non-EOS row landed in the same bucket.  The EOS
-     * bucket (digit 0) stays in-place at the start and needs no sort;
-     * the rest of the range shares this digit and we just recurse one
-     * byte deeper without touching sorted_idx. */
-    if (single && single_digit != -1) {
-        int64_t eos = counts[0];
-        /* EOS rows should come first.  If any are present, move them
-         * to the front via a stable partition — but since every non-EOS
-         * row has the same digit, we can just swap by a simple scan:
-         * first collect EOS rows into tmp[lo..lo+eos), then non-EOS
-         * into tmp[lo+eos..hi). */
-        if (eos > 0 && eos < n) {
-            int64_t* t = c->tmp;
-            int64_t e_cur = lo, n_cur = lo + eos;
-            for (int64_t i = lo; i < hi; i++) {
-                int64_t idx = sorted_idx[i];
-                const ray_str_t* s = &c->elems[idx];
-                if ((int)s->len <= depth) t[e_cur++] = idx;
-                else                      t[n_cur++] = idx;
-            }
-            memcpy(sorted_idx + lo, t + lo, (size_t)n * sizeof(int64_t));
-        }
-        /* Recurse on just the non-EOS portion at depth+1. */
-        if (n - eos > 1)
-            msd_str_sort_range(sorted_idx, lo + eos, hi, depth + 1, c);
-        return;
-    }
-
-    /* Phase 2: prefix-sum to bucket starts (absolute into sorted_idx) */
-    int64_t starts[RAY_MSD_BUCKETS];
-    {
-        int64_t sum = lo;
-        for (int b = 0; b < RAY_MSD_BUCKETS; b++) {
-            starts[b] = sum;
-            sum += counts[b];
-        }
-    }
-
-    /* Phase 3: scatter to tmp[] using cursors (separate copy so we keep
-     * starts[] intact for the recursion step). */
-    int64_t cursors[RAY_MSD_BUCKETS];
-    memcpy(cursors, starts, sizeof(cursors));
-    for (int64_t i = lo; i < hi; i++) {
-        int64_t idx = sorted_idx[i];
-        int d = msd_str_digit(&c->elems[idx], c->pool, depth);
-        c->tmp[cursors[d]++] = idx;
-    }
-
-    /* Phase 4: copy back */
-    memcpy(sorted_idx + lo, c->tmp + lo, (size_t)n * sizeof(int64_t));
-
-    /* Phase 5: recurse into non-trivial non-EOS buckets */
-    for (int b = 1; b < RAY_MSD_BUCKETS; b++) {
-        int64_t bs = starts[b];
-        int64_t be = bs + counts[b];
-        if (be - bs > 1)
-            msd_str_sort_range(sorted_idx, bs, be, depth + 1, c);
-    }
+/* Extract the bp'th big-endian byte of the packed prefix. */
+static inline uint8_t strkey_byte_at(const ray_strkey_t* k, int bp) {
+    int part = bp >> 3;
+    int shift = 56 - ((bp & 7) << 3);
+    return (uint8_t)(k->parts[part] >> shift);
 }
 
-/* Worker context for parallel sub-bucket sort after the top-level
- * partition. */
+/* Cheap max-len probe — one sequential pass over the `len` field of each
+ * live row's ray_str_t.  Reads only 4 bytes per row (the len), so at 10M
+ * rows this is ~5ms bandwidth-bound.  Everything else the old probe
+ * computed (monotonicity, distinct-count sample) is folded into the
+ * parallel key-build pass below, where it's nearly free. */
+static int strsort_probe_parts(const int64_t* indices, int64_t n_live,
+                                const ray_str_t* elems) {
+    int64_t max_len = 0;
+    for (int64_t i = 0; i < n_live; i++) {
+        int64_t l = (int64_t)elems[indices[i]].len;
+        if (l > max_len) max_len = l;
+    }
+    int64_t pcalc = (max_len + 7) / 8;
+    if (pcalc < 1) pcalc = 1;
+    if (pcalc > RAY_STRSORT_KEY_PARTS_MAX) pcalc = RAY_STRSORT_KEY_PARTS_MAX;
+    return (int)pcalc;
+}
+
+/* Parallel key materialization (morsel range). */
 typedef struct {
-    int64_t*        sorted_idx;
+    ray_strkey_t*    out;
+    const int64_t*   indices;
     const ray_str_t* elems;
-    const char*     pool;
-    int64_t*        scratch;        /* shared scratch sized [0, n_live) */
-    const int64_t*  bucket_starts;  /* absolute offsets into sorted_idx */
-    const int64_t*  bucket_counts;  /* [RAY_MSD_BUCKETS] */
-} msd_str_bucket_ctx_t;
+    const char*      pool;
+    int              parts;
+} strsort_build_ctx_t;
 
-static void msd_str_bucket_task_fn(void* vctx, uint32_t worker_id,
-                                   int64_t start_bucket, int64_t end_bucket) {
-    (void)worker_id;
-    msd_str_bucket_ctx_t* c = (msd_str_bucket_ctx_t*)vctx;
-    for (int64_t b = start_bucket; b < end_bucket; b++) {
-        /* Skip bucket 0 (end-of-string) — already sorted (all equal). */
-        if (b == 0) continue;
-        int64_t count = c->bucket_counts[b];
-        if (count <= 1) continue;
-        int64_t lo = c->bucket_starts[b];
-        int64_t hi = lo + count;
-        /* Per-bucket scratch lives at the same offsets as sorted_idx so
-         * the recursive scatter/copy can use absolute indexing. */
-        msd_str_ctx_t sub = {
-            .elems = c->elems, .pool = c->pool, .tmp = c->scratch,
-        };
-        msd_str_sort_range(c->sorted_idx, lo, hi, 1, &sub);
+static void strsort_build_fn(void* vctx, uint32_t wid, int64_t s, int64_t e) {
+    (void)wid;
+    strsort_build_ctx_t* c = (strsort_build_ctx_t*)vctx;
+    for (int64_t i = s; i < e; i++) {
+        int64_t row = c->indices[i];
+        const ray_str_t* str = &c->elems[row];
+        c->out[i].row = (uint32_t)row;
+        c->out[i].len = str->len;
+        int64_t len = str->len;
+        const char* src = len ? ray_str_t_ptr(str, c->pool) : NULL;
+        for (int p = 0; p < RAY_STRSORT_KEY_PARTS_MAX; p++) {
+            c->out[i].parts[p] = (p < c->parts)
+                ? strkey_load_part(src, len, p * 8)
+                : 0;
+        }
     }
 }
 
-/* Top-level MSD string sort.  Initializes sorted_idx with a row permutation
- * [0..nrows), partitions nulls to the desired end, sorts the non-null range
- * via the recursive radix, reverses for DESC, and writes the result back to
- * sorted_idx in place.  Returns false on OOM (caller should fall back). */
+static void strsort_build_keys(ray_strkey_t* out, int64_t n_live,
+                                const int64_t* indices,
+                                const ray_str_t* elems, const char* pool,
+                                int parts) {
+    strsort_build_ctx_t c = { out, indices, elems, pool, parts };
+    ray_pool_t* p = ray_pool_get();
+    if (p && n_live >= RAY_PARALLEL_THRESHOLD) {
+        ray_pool_dispatch(p, strsort_build_fn, &c, n_live);
+    } else {
+        strsort_build_fn(&c, 0, 0, n_live);
+    }
+}
+
+/* Emit sorted row indices back to sorted_idx (parallel). */
+typedef struct {
+    int64_t*             out;
+    const ray_strkey_t*  keys;
+} strsort_emit_ctx_t;
+
+static void strsort_emit_fn(void* vctx, uint32_t wid, int64_t s, int64_t e) {
+    (void)wid;
+    strsort_emit_ctx_t* c = (strsort_emit_ctx_t*)vctx;
+    for (int64_t i = s; i < e; i++) c->out[i] = (int64_t)c->keys[i].row;
+}
+
+/* Packed-key lexicographic compare.  Fast path for run-detection and
+ * insertion sort at the radix base case.  No pool access. */
+static inline int strkey_cmp_packed(const ray_strkey_t* a,
+                                    const ray_strkey_t* b, int parts) {
+    for (int p = 0; p < parts; p++) {
+        if (a->parts[p] < b->parts[p]) return -1;
+        if (a->parts[p] > b->parts[p]) return  1;
+    }
+    return (int)a->len - (int)b->len;
+}
+
+/* Sequential run detection over packed keys, with early abort.
+ * For random data the first inversion appears within a few elements
+ * and the scan exits in O(1).  For fully sorted data it does one
+ * linear pass over the packed key array (contiguous memory, ~10ms
+ * sequential at 10M × 40B records — bandwidth bound).
+ * Returns the detected direction: -1 = all descending, +1 = all
+ * ascending, 0 = neither (or tail bytes remain to be sorted).
+ *
+ * IMPORTANT: when two adjacent packed keys tie AND either string is
+ * longer than the packed window, we CANNOT declare a sorted run —
+ * the tail bytes may impose ordering we haven't examined.  The
+ * shortcut is safe only when every pair is either strictly ordered
+ * by the packed key or both sides fit entirely inside the window. */
+static int strsort_detect_runs(const ray_strkey_t* keys, int64_t n,
+                                int parts, int parts_bytes) {
+    if (n < 2) return 0;
+    bool asc = true, desc = true;
+    for (int64_t i = 1; i < n; i++) {
+        int r = strkey_cmp_packed(&keys[i - 1], &keys[i], parts);
+        if (r == 0) {
+            if ((int64_t)keys[i - 1].len > parts_bytes ||
+                (int64_t)keys[i].len     > parts_bytes) {
+                /* Tail bytes unresolved — fall through to the real sort. */
+                return 0;
+            }
+            /* Both fully fit in the packed prefix and their parts tie
+             * → the strings are equal in the sorted order, which is
+             * compatible with both ascending and descending runs. */
+        } else if (r > 0) {
+            asc = false;
+        } else {
+            desc = false;
+        }
+        if (!asc && !desc) return 0;
+    }
+    if (asc) return 1;
+    if (desc) return -1;
+    return 0;
+}
+
+/* Parallel top-level byte-0 partition: per-task histogram, global
+ * prefix-sum, parallel scatter into a second contiguous buffer.
+ * This is the same pattern as the numeric radix_sort_run up above,
+ * adapted for 40-byte packed string keys. */
+typedef struct {
+    const ray_strkey_t* src;
+    ray_strkey_t*       dst;
+    int64_t             n;
+    uint32_t            n_tasks;
+    uint32_t*           hist;     /* [n_tasks × 256] */
+    int64_t*            offsets;  /* [n_tasks × 256] */
+} strsort_top_ctx_t;
+
+static void strsort_top_hist_fn(void* vctx, uint32_t wid,
+                                 int64_t start, int64_t end) {
+    (void)wid; (void)end;
+    strsort_top_ctx_t* c = (strsort_top_ctx_t*)vctx;
+    int64_t task = start;
+    uint32_t* h = c->hist + task * 256;
+    memset(h, 0, 256 * sizeof(uint32_t));
+    int64_t chunk = (c->n + c->n_tasks - 1) / c->n_tasks;
+    int64_t lo = task * chunk;
+    int64_t hi = lo + chunk;
+    if (hi > c->n) hi = c->n;
+    if (lo >= hi) return;
+    const ray_strkey_t* src = c->src;
+    for (int64_t i = lo; i < hi; i++) {
+        h[strkey_byte_at(&src[i], 0)]++;
+    }
+}
+
+static void strsort_top_scatter_fn(void* vctx, uint32_t wid,
+                                    int64_t start, int64_t end) {
+    (void)wid; (void)end;
+    strsort_top_ctx_t* c = (strsort_top_ctx_t*)vctx;
+    int64_t task = start;
+    int64_t chunk = (c->n + c->n_tasks - 1) / c->n_tasks;
+    int64_t lo = task * chunk;
+    int64_t hi = lo + chunk;
+    if (hi > c->n) hi = c->n;
+    if (lo >= hi) return;
+    int64_t* off = c->offsets + task * 256;
+    const ray_strkey_t* src = c->src;
+    ray_strkey_t* dst = c->dst;
+    for (int64_t i = lo; i < hi; i++) {
+        uint8_t b = strkey_byte_at(&src[i], 0);
+        dst[off[b]++] = src[i];
+    }
+}
+
+/* Bucket dispatch context: each task sorts one top-level bucket. */
+typedef struct {
+    ray_strkey_t*    keys;
+    const int64_t*   starts;
+    const int64_t*   counts;
+    int              parts_bytes;
+    int64_t          base_offset;
+    const ray_str_t* elems;
+    const char*      pool;
+    int              parts;
+    int              start_bp;  /* byte position to begin radix within bucket */
+} strsort_bucket_ctx_t;
+
+static void strsort_aflag(ray_strkey_t* keys, int64_t n, int bp,
+                          int parts_bytes, int64_t base_offset,
+                          const ray_str_t* elems, const char* pool,
+                          int parts);
+
+static void strsort_bucket_fn(void* vctx, uint32_t wid, int64_t s, int64_t e) {
+    (void)wid;
+    strsort_bucket_ctx_t* c = (strsort_bucket_ctx_t*)vctx;
+    for (int64_t b = s; b < e; b++) {
+        int64_t cnt = c->counts[b];
+        if (cnt <= 1) continue;
+        strsort_aflag(c->keys + c->starts[b], cnt, c->start_bp,
+                      c->parts_bytes, c->base_offset,
+                      c->elems, c->pool, c->parts);
+    }
+}
+
+/* Re-pack the next window of bytes for records whose previous window
+ * tied on the full packed prefix.  `base_offset` is the byte position
+ * in the original string that will become byte 0 of the new packed
+ * prefix.  Returns true if any record still has bytes to contribute
+ * past base_offset — false means every record's string ended at or
+ * before base_offset and they are all equal in the suffix. */
+static bool strsort_repack_window(ray_strkey_t* keys, int64_t n,
+                                   int64_t base_offset,
+                                   const ray_str_t* elems, const char* pool,
+                                   int parts) {
+    bool any_tail = false;
+    for (int64_t i = 0; i < n; i++) {
+        const ray_str_t* s = &elems[keys[i].row];
+        int64_t len = s->len;
+        if (len > base_offset) any_tail = true;
+        const char* src = len > 0 ? ray_str_t_ptr(s, pool) : NULL;
+        for (int p = 0; p < parts; p++) {
+            int64_t off = base_offset + (int64_t)p * 8;
+            keys[i].parts[p] = (src && len > off)
+                ? strkey_load_part(src, len, (int)off)
+                : 0;
+        }
+    }
+    return any_tail;
+}
+
+/* American Flag in-place MSD byte radix on keys[0..n) at byte position bp
+ * within the current window.  All records share the same prefix from
+ * byte 0 up to `base_offset + bp` of the original string.  When the
+ * current window is exhausted (`bp >= parts_bytes`) we re-pack the next
+ * window and continue — keeps worst case at O(total_bytes) even when
+ * records share arbitrarily long common prefixes.
+ *
+ * parts_bytes = parts * 8 (cached).  base_offset tracks how many bytes
+ * of the original string have already been consumed by earlier windows. */
+static void strsort_aflag(ray_strkey_t* keys, int64_t n, int bp,
+                          int parts_bytes, int64_t base_offset,
+                          const ray_str_t* elems, const char* pool,
+                          int parts) {
+    /* Tail-recursive inline loop on the largest bucket to bound stack
+     * depth independent of n. */
+    for (;;) {
+        if (n <= 1) return;
+        if (n <= RAY_STRSORT_BASE_CASE) {
+            /* Small bucket — finish with a bounded comparison sort.
+             * strkey_cmp walks the original string bytes past the
+             * current window when necessary, so long tails are fine
+             * at this size. */
+            strkey_insertion_sort(keys, n, parts, elems, pool);
+            return;
+        }
+        if (bp >= parts_bytes) {
+            /* Exhausted the packed prefix for this window with a big
+             * bucket still to resolve.  Re-pack the next window and
+             * restart the radix — keeps total work linear in string
+             * bytes, never quadratic. */
+            int64_t next_offset = base_offset + parts_bytes;
+            if (!strsort_repack_window(keys, n, next_offset,
+                                        elems, pool, parts)) {
+                /* Every record's string ends at or before next_offset;
+                 * they are all equal from here on, order preserved. */
+                return;
+            }
+            base_offset = next_offset;
+            bp = 0;
+            continue;
+        }
+
+        int64_t counts[256] = {0};
+        for (int64_t i = 0; i < n; i++) {
+            counts[strkey_byte_at(&keys[i], bp)]++;
+        }
+        /* Fast path: all records share the same byte at this position.
+         * Skip the partition pass and advance one byte deeper. */
+        int uniq_b = -1;
+        bool uniform = true;
+        for (int b = 0; b < 256; b++) {
+            if (counts[b] == 0) continue;
+            if (uniq_b < 0) uniq_b = b;
+            else { uniform = false; break; }
+        }
+        if (uniform) {
+            bp++;
+            continue;
+        }
+
+        int64_t starts[256];
+        int64_t ends[256];
+        {
+            int64_t sum = 0;
+            for (int b = 0; b < 256; b++) {
+                starts[b] = sum;
+                sum += counts[b];
+                ends[b] = sum;
+            }
+        }
+
+        /* In-place swap loop: classic American Flag.  For each bucket b,
+         * drain records out of its slice whose current byte != b into
+         * their correct destination, cycling until the bucket slice
+         * contains only records that belong in b. */
+        int64_t cursors[256];
+        memcpy(cursors, starts, sizeof(cursors));
+        for (int b = 0; b < 256; b++) {
+            while (cursors[b] < ends[b]) {
+                ray_strkey_t v = keys[cursors[b]];
+                int bb = strkey_byte_at(&v, bp);
+                while (bb != b) {
+                    ray_strkey_t tmp = keys[cursors[bb]];
+                    keys[cursors[bb]] = v;
+                    cursors[bb]++;
+                    v = tmp;
+                    bb = strkey_byte_at(&v, bp);
+                }
+                keys[cursors[b]] = v;
+                cursors[b]++;
+            }
+        }
+
+        /* Find the largest bucket; recurse on the rest and loop on the
+         * largest to keep stack shallow. */
+        int big_b = 0;
+        int64_t big_cnt = counts[0];
+        for (int b = 1; b < 256; b++) {
+            if (counts[b] > big_cnt) { big_cnt = counts[b]; big_b = b; }
+        }
+        for (int b = 0; b < 256; b++) {
+            if (b == big_b) continue;
+            int64_t cnt = counts[b];
+            if (cnt > 1) {
+                strsort_aflag(keys + starts[b], cnt, bp + 1,
+                              parts_bytes, base_offset, elems, pool, parts);
+            }
+        }
+        keys += starts[big_b];
+        n = big_cnt;
+        bp++;
+    }
+}
+
+/* Top-level adaptive string sort.  Nulls partitioned first, then the
+ * non-null range runs through probe → single-run short-circuit →
+ * key materialization → American-Flag MSD → scatter row indices back.
+ * Returns false on OOM (caller should fall back to comparison sort). */
 static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
                                  ray_t* col, bool desc, bool nulls_first) {
     if (nrows <= 0) return true;
@@ -1266,110 +1543,190 @@ static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
     /* Initial iota — caller may or may not have already filled it. */
     for (int64_t i = 0; i < nrows; i++) sorted_idx[i] = i;
 
-    /* Partition nulls to the desired end in one stable pass. */
+    /* Partition nulls to the tail.  Slice vecs inherit the null bitmap
+     * from slice_parent, so check both attr slots — matches the
+     * exec_sort post-sort propagation pattern. */
     int64_t null_count = 0;
-    bool has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    bool has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) ||
+                     ((col->attrs & RAY_ATTR_SLICE) && col->slice_parent &&
+                      (col->slice_parent->attrs & RAY_ATTR_HAS_NULLS));
     if (has_nulls) {
         int64_t w = 0;
-        int64_t null_pos = nrows;  /* build nulls in sorted_idx[null_pos..nrows) */
-        /* Two-pass approach is simpler than in-place partitioning:
-         * first collect non-null indices, then append null indices. */
+        int64_t null_pos;
         for (int64_t i = 0; i < nrows; i++) {
-            if (!ray_vec_is_null(col, i)) {
-                sorted_idx[w++] = i;
-            }
+            if (!ray_vec_is_null(col, i)) sorted_idx[w++] = i;
         }
         null_count = nrows - w;
         null_pos = w;
-        /* Second pass: append null rows at tail. */
         for (int64_t i = 0; i < nrows; i++) {
-            if (ray_vec_is_null(col, i)) {
-                sorted_idx[null_pos++] = i;
-            }
+            if (ray_vec_is_null(col, i)) sorted_idx[null_pos++] = i;
         }
     }
     int64_t n_live = nrows - null_count;
-    /* sorted_idx now holds non-nulls at [0, n_live) and nulls at [n_live, nrows). */
 
-    /* Sort the non-null range via MSD radix.
-     *
-     * Top-level partition is done inline here so each resulting
-     * bucket can be sorted in parallel across the thread pool —
-     * the recursive core is sequential per bucket but buckets are
-     * independent.  For few-unique data this dispatches 10 big
-     * buckets to 10 workers at once; for random data it dispatches
-     * ~256 small buckets. */
     if (n_live > 1) {
         const ray_str_t* elems;
         const char* pool;
         str_resolve(col, &elems, &pool);
+        ray_pool_t* pool_p = ray_pool_get();
+        bool go_parallel = (pool_p && n_live >= RAY_PARALLEL_THRESHOLD);
 
-        ray_t* tmp_hdr;
-        int64_t* tmp = (int64_t*)scratch_alloc(&tmp_hdr,
-                            (size_t)n_live * sizeof(int64_t));
-        if (!tmp) return false;
+        /* --- Cheap max-len probe (one pass over len fields). ---
+         * Chooses how many 8-byte parts to pack per key.  Everything
+         * else (monotonicity, cardinality sampling) is folded into the
+         * key-build / run-detection passes below. */
+        int parts = strsort_probe_parts(sorted_idx, n_live, elems);
+        int parts_bytes = parts * 8;
 
-        /* Top-level histogram on byte 0. */
-        int64_t counts[RAY_MSD_BUCKETS];
-        memset(counts, 0, sizeof(counts));
-        for (int64_t i = 0; i < n_live; i++) {
-            int d = msd_str_digit(&elems[sorted_idx[i]], pool, 0);
-            counts[d]++;
-        }
+        /* --- Parallel key materialization. --- */
+        ray_t* keys_hdr = NULL;
+        ray_strkey_t* keys = (ray_strkey_t*)scratch_alloc(&keys_hdr,
+                                (size_t)n_live * sizeof(ray_strkey_t));
+        if (!keys) return false;
+        strsort_build_keys(keys, n_live, sorted_idx, elems, pool, parts);
 
-        /* Prefix-sum to bucket start offsets. */
-        int64_t starts[RAY_MSD_BUCKETS];
-        {
-            int64_t sum = 0;
-            for (int b = 0; b < RAY_MSD_BUCKETS; b++) {
-                starts[b] = sum;
-                sum += counts[b];
+        /* --- Vergesort run detection on packed keys. ---
+         * Early-aborts on the first inversion (so random input pays O(1)).
+         * When the entire non-null range is a single monotone run we
+         * skip the sort proper and emit row indices directly. */
+        int run_dir = strsort_detect_runs(keys, n_live, parts, parts_bytes);
+        bool want_asc = !desc;
+        if (run_dir == 1 && want_asc) {
+            /* Already ascending — emit as-is. */
+            strsort_emit_ctx_t ectx = { sorted_idx, keys };
+            if (go_parallel)
+                ray_pool_dispatch(pool_p, strsort_emit_fn, &ectx, n_live);
+            else
+                strsort_emit_fn(&ectx, 0, 0, n_live);
+        } else if (run_dir == -1 && !want_asc) {
+            /* Already descending — emit as-is. */
+            strsort_emit_ctx_t ectx = { sorted_idx, keys };
+            if (go_parallel)
+                ray_pool_dispatch(pool_p, strsort_emit_fn, &ectx, n_live);
+            else
+                strsort_emit_fn(&ectx, 0, 0, n_live);
+        } else if (run_dir != 0) {
+            /* Single run but wrong direction — emit row-indices reversed. */
+            for (int64_t i = 0, j = n_live - 1; i < j; i++, j--) {
+                ray_strkey_t t = keys[i]; keys[i] = keys[j]; keys[j] = t;
+            }
+            strsort_emit_ctx_t ectx = { sorted_idx, keys };
+            if (go_parallel)
+                ray_pool_dispatch(pool_p, strsort_emit_fn, &ectx, n_live);
+            else
+                strsort_emit_fn(&ectx, 0, 0, n_live);
+        } else {
+            /* --- Top-level byte-0 partition. ---
+             * When parallel: per-task histograms, prefix-sum, parallel
+             * scatter into a second contiguous buffer, pointer-swap
+             * so `keys` holds the partitioned records.  When sequential:
+             * single-pass American-Flag in-place swap loop. */
+            ray_t* tmp_hdr = NULL;
+            ray_strkey_t* keys_sorted = keys;  /* where the final data lands */
+
+            if (!go_parallel || parts_bytes == 0) {
+                strsort_aflag(keys, n_live, /*bp=*/0, parts_bytes,
+                              /*base_offset=*/0, elems, pool, parts);
+            } else {
+                ray_strkey_t* tmp = (ray_strkey_t*)scratch_alloc(&tmp_hdr,
+                                        (size_t)n_live * sizeof(ray_strkey_t));
+                if (!tmp) {
+                    /* Fall back to sequential sort on OOM. */
+                    strsort_aflag(keys, n_live, /*bp=*/0, parts_bytes,
+                                  /*base_offset=*/0, elems, pool, parts);
+                } else {
+                    uint32_t n_tasks = ray_pool_total_workers(pool_p);
+                    if (n_tasks < 1) n_tasks = 1;
+
+                    ray_t* hist_hdr = NULL;
+                    ray_t* off_hdr  = NULL;
+                    uint32_t* hist = (uint32_t*)scratch_alloc(&hist_hdr,
+                                        (size_t)n_tasks * 256 * sizeof(uint32_t));
+                    int64_t*  off  = (int64_t*)scratch_alloc(&off_hdr,
+                                        (size_t)n_tasks * 256 * sizeof(int64_t));
+                    if (!hist || !off) {
+                        /* Free only the hist/off scratch we own here; tmp_hdr
+                         * belongs to the outer cleanup block (line below) and
+                         * MUST NOT be freed twice. */
+                        scratch_free(hist_hdr); scratch_free(off_hdr);
+                        strsort_aflag(keys, n_live, /*bp=*/0, parts_bytes,
+                                      /*base_offset=*/0, elems, pool, parts);
+                    } else {
+                        strsort_top_ctx_t tctx = {
+                            .src = keys, .dst = tmp, .n = n_live,
+                            .n_tasks = n_tasks, .hist = hist, .offsets = off,
+                        };
+
+                        /* Phase 1: parallel histogram. */
+                        ray_pool_dispatch_n(pool_p, strsort_top_hist_fn,
+                                            &tctx, n_tasks);
+
+                        /* Phase 2: sequential prefix-sum.  For each bucket
+                         * b, the starting offset is the sum of all counts
+                         * in earlier buckets plus all counts in earlier
+                         * tasks for this bucket. */
+                        int64_t bucket_counts[256];
+                        int64_t bucket_starts[256];
+                        int64_t sum = 0;
+                        for (int b = 0; b < 256; b++) {
+                            bucket_starts[b] = sum;
+                            int64_t bc = 0;
+                            for (uint32_t t = 0; t < n_tasks; t++) {
+                                off[t * 256 + b] = sum + bc;
+                                bc += hist[t * 256 + b];
+                            }
+                            bucket_counts[b] = bc;
+                            sum += bc;
+                        }
+
+                        /* Phase 3: parallel scatter into tmp. */
+                        ray_pool_dispatch_n(pool_p, strsort_top_scatter_fn,
+                                            &tctx, n_tasks);
+
+                        /* tmp now holds the records partitioned by byte 0. */
+                        scratch_free(hist_hdr);
+                        scratch_free(off_hdr);
+
+                        /* Phase 4: parallel per-bucket recursive sort. */
+                        strsort_bucket_ctx_t bctx = {
+                            .keys        = tmp,
+                            .starts      = bucket_starts,
+                            .counts      = bucket_counts,
+                            .parts_bytes = parts_bytes,
+                            .base_offset = 0,
+                            .elems       = elems,
+                            .pool        = pool,
+                            .parts       = parts,
+                            .start_bp    = 1,
+                        };
+                        ray_pool_dispatch_n(pool_p, strsort_bucket_fn,
+                                            &bctx, 256);
+
+                        keys_sorted = tmp;
+                    }
+                }
+            }
+
+            /* Scatter row indices back (ASC order, parallel). */
+            strsort_emit_ctx_t ectx = { sorted_idx, keys_sorted };
+            if (go_parallel)
+                ray_pool_dispatch(pool_p, strsort_emit_fn, &ectx, n_live);
+            else
+                strsort_emit_fn(&ectx, 0, 0, n_live);
+
+            if (tmp_hdr) scratch_free(tmp_hdr);
+
+            /* DESC reverses the sorted non-null range. */
+            if (desc) {
+                for (int64_t i = 0, j = n_live - 1; i < j; i++, j--) {
+                    int64_t t = sorted_idx[i];
+                    sorted_idx[i] = sorted_idx[j];
+                    sorted_idx[j] = t;
+                }
             }
         }
 
-        /* Scatter into tmp. */
-        int64_t cursors[RAY_MSD_BUCKETS];
-        memcpy(cursors, starts, sizeof(cursors));
-        for (int64_t i = 0; i < n_live; i++) {
-            int64_t idx = sorted_idx[i];
-            int d = msd_str_digit(&elems[idx], pool, 0);
-            tmp[cursors[d]++] = idx;
-        }
-        /* Copy back. */
-        memcpy(sorted_idx, tmp, (size_t)n_live * sizeof(int64_t));
-
-        /* Dispatch each bucket's recursive sort to a worker thread.
-         * Bucket 0 is EOS (zero-length strings) — already in place.
-         * Small buckets (≤ RAY_MSD_INSERTION) will hit the insertion
-         * sort base case inside the recursive core. */
-        msd_str_bucket_ctx_t bctx = {
-            .sorted_idx    = sorted_idx,
-            .elems         = elems,
-            .pool          = pool,
-            .scratch       = tmp,
-            .bucket_starts = starts,
-            .bucket_counts = counts,
-        };
-        ray_pool_t* pool_p = ray_pool_get();
-        /* Use dispatch_n (one task per bucket) so the pool
-         * schedules them onto workers.  For small nrows, run
-         * sequentially to avoid dispatch overhead. */
-        if (pool_p && n_live >= RAY_PARALLEL_THRESHOLD)
-            ray_pool_dispatch_n(pool_p, msd_str_bucket_task_fn, &bctx,
-                                RAY_MSD_BUCKETS);
-        else
-            msd_str_bucket_task_fn(&bctx, 0, 0, RAY_MSD_BUCKETS);
-
-        scratch_free(tmp_hdr);
-    }
-
-    /* DESC reverses the sorted (non-null) range. */
-    if (desc && n_live > 1) {
-        for (int64_t i = 0, j = n_live - 1; i < j; i++, j--) {
-            int64_t t = sorted_idx[i];
-            sorted_idx[i] = sorted_idx[j];
-            sorted_idx[j] = t;
-        }
+        scratch_free(keys_hdr);
     }
 
     /* If nulls should be first, rotate them to the front. */
