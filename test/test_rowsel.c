@@ -1,0 +1,321 @@
+/*
+ *   Copyright (c) 2025-2026 Anton Kundenko <singaraiona@gmail.com>
+ *   All rights reserved.
+ */
+
+#include "munit.h"
+#include <rayforce.h>
+#include "mem/heap.h"
+#include "ops/ops.h"
+#include "ops/rowsel.h"
+#include <string.h>
+#include <stdint.h>
+
+/* ──────────────────────────────────────────────────────────────────
+ * Helpers
+ * ────────────────────────────────────────────────────────────────── */
+
+/* Build a RAY_BOOL vec from a literal byte array. */
+static ray_t* make_pred(const uint8_t* bytes, int64_t n) {
+    ray_t* v = ray_vec_new(RAY_BOOL, n);
+    if (!v || RAY_IS_ERR(v)) return NULL;
+    v->len = n;
+    memcpy(ray_data(v), bytes, (size_t)n);
+    return v;
+}
+
+/* Naive popcount over the raw bool vec — used to cross-check the
+ * per-segment popcounts the producer encodes via seg_offsets. */
+static int64_t naive_popcount(const uint8_t* p, int64_t n) {
+    int64_t c = 0;
+    for (int64_t i = 0; i < n; i++) c += p[i] != 0;
+    return c;
+}
+
+/* Walk a rowsel block and reconstruct the global row indices it
+ * encodes (ALL segments expand to dense ranges, MIX uses idx[],
+ * NONE skipped).  Used by tests to compare against an oracle. */
+static int64_t reconstruct(ray_t* block, int64_t* out) {
+    if (!block) return -1;
+    ray_rowsel_t*   m       = ray_rowsel_meta(block);
+    const uint8_t*  flags   = ray_rowsel_flags(block);
+    const uint32_t* offsets = ray_rowsel_offsets(block);
+    const uint16_t* idx     = ray_rowsel_idx(block);
+    int64_t out_n = 0;
+    for (uint32_t s = 0; s < m->n_segs; s++) {
+        int64_t base = (int64_t)s * RAY_MORSEL_ELEMS;
+        int64_t end  = base + RAY_MORSEL_ELEMS;
+        if (end > m->nrows) end = m->nrows;
+        if (flags[s] == RAY_SEL_NONE) continue;
+        if (flags[s] == RAY_SEL_ALL) {
+            for (int64_t r = base; r < end; r++) out[out_n++] = r;
+            continue;
+        }
+        const uint16_t* slice = idx + offsets[s];
+        uint32_t n = offsets[s + 1] - offsets[s];
+        for (uint32_t i = 0; i < n; i++) out[out_n++] = base + slice[i];
+    }
+    return out_n;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Tests
+ * ────────────────────────────────────────────────────────────────── */
+
+/* Empty input pred — returns an empty selection (n_segs == 0). */
+static MunitResult test_rowsel_empty(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    ray_t* pred = make_pred((const uint8_t*)"", 0);
+    munit_assert_ptr_not_null(pred);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_ptr_not_null(sel);
+    ray_rowsel_t* m = ray_rowsel_meta(sel);
+    munit_assert_int(m->total_pass, ==, 0);
+    munit_assert_int(m->nrows, ==, 0);
+    munit_assert_int(m->n_segs, ==, 0);
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* All-true pred — convention: returns NULL meaning "all rows pass". */
+static MunitResult test_rowsel_all_pass(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    uint8_t bytes[100];
+    memset(bytes, 1, sizeof(bytes));
+    ray_t* pred = make_pred(bytes, 100);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_null(sel);  /* all-pass → NULL */
+    ray_release(pred);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* All-false pred — empty selection, all flags NONE. */
+static MunitResult test_rowsel_none_pass(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    uint8_t bytes[100] = {0};
+    ray_t* pred = make_pred(bytes, 100);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_ptr_not_null(sel);
+    ray_rowsel_t* m = ray_rowsel_meta(sel);
+    munit_assert_int(m->total_pass, ==, 0);
+    munit_assert_int(m->nrows, ==, 100);
+    munit_assert_int(m->n_segs, ==, 1);
+    munit_assert_int(ray_rowsel_flags(sel)[0], ==, RAY_SEL_NONE);
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* Single morsel, mixed pred — verify reconstruction. */
+static MunitResult test_rowsel_single_morsel_mixed(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    /* 10 rows: positions 1, 3, 4, 7 set */
+    uint8_t bytes[10] = {0,1,0,1,1,0,0,1,0,0};
+    ray_t* pred = make_pred(bytes, 10);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_ptr_not_null(sel);
+    ray_rowsel_t* m = ray_rowsel_meta(sel);
+    munit_assert_int(m->total_pass, ==, 4);
+    munit_assert_int(m->n_segs, ==, 1);
+    munit_assert_int(ray_rowsel_flags(sel)[0], ==, RAY_SEL_MIX);
+    int64_t out[10];
+    int64_t n = reconstruct(sel, out);
+    munit_assert_int(n, ==, 4);
+    munit_assert_int(out[0], ==, 1);
+    munit_assert_int(out[1], ==, 3);
+    munit_assert_int(out[2], ==, 4);
+    munit_assert_int(out[3], ==, 7);
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* Multi-morsel pred with one ALL segment, one NONE segment, one MIX
+ * segment.  Forces the producer to dispatch all three flag paths. */
+static MunitResult test_rowsel_multi_morsel(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    int64_t nrows = 3 * RAY_MORSEL_ELEMS;
+    uint8_t* bytes = (uint8_t*)ray_data(ray_alloc((size_t)nrows));
+    munit_assert_ptr_not_null(bytes);
+    /* Seg 0: all true (ALL), Seg 1: all false (NONE),
+     * Seg 2: every other row (MIX, 512 passing). */
+    for (int64_t i = 0; i < RAY_MORSEL_ELEMS; i++) bytes[i] = 1;
+    for (int64_t i = RAY_MORSEL_ELEMS; i < 2 * RAY_MORSEL_ELEMS; i++) bytes[i] = 0;
+    for (int64_t i = 0; i < RAY_MORSEL_ELEMS; i++)
+        bytes[2 * RAY_MORSEL_ELEMS + i] = (uint8_t)(i & 1);
+    ray_t* pred = make_pred(bytes, nrows);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_ptr_not_null(sel);
+
+    const uint8_t* flags = ray_rowsel_flags(sel);
+    munit_assert_int(flags[0], ==, RAY_SEL_ALL);
+    munit_assert_int(flags[1], ==, RAY_SEL_NONE);
+    munit_assert_int(flags[2], ==, RAY_SEL_MIX);
+
+    ray_rowsel_t* m = ray_rowsel_meta(sel);
+    munit_assert_int(m->n_segs, ==, 3);
+    munit_assert_int(m->total_pass, ==, RAY_MORSEL_ELEMS + RAY_MORSEL_ELEMS / 2);
+
+    /* Reconstruct and compare to oracle. */
+    int64_t* oracle = (int64_t*)ray_data(ray_alloc((size_t)m->total_pass * sizeof(int64_t)));
+    int64_t  oracle_n = 0;
+    for (int64_t i = 0; i < nrows; i++) if (bytes[i]) oracle[oracle_n++] = i;
+    munit_assert_int(oracle_n, ==, m->total_pass);
+
+    int64_t* recon = (int64_t*)ray_data(ray_alloc((size_t)m->total_pass * sizeof(int64_t)));
+    int64_t  recon_n = reconstruct(sel, recon);
+    munit_assert_int(recon_n, ==, m->total_pass);
+    for (int64_t i = 0; i < recon_n; i++)
+        munit_assert_int(recon[i], ==, oracle[i]);
+
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* Last morsel is partial (nrows not a multiple of RAY_MORSEL_ELEMS).
+ * The "ALL" determination uses the morsel's actual length, not 1024. */
+static MunitResult test_rowsel_partial_last_morsel(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    int64_t nrows = RAY_MORSEL_ELEMS + 5;  /* one full morsel + 5 rows */
+    uint8_t* bytes = (uint8_t*)ray_data(ray_alloc((size_t)nrows));
+    /* Seg 0: alternating (MIX, 512 passing).
+     * Seg 1: 5 rows, all true → ALL. */
+    for (int64_t i = 0; i < RAY_MORSEL_ELEMS; i++) bytes[i] = (uint8_t)(i & 1);
+    for (int64_t i = 0; i < 5; i++) bytes[RAY_MORSEL_ELEMS + i] = 1;
+    ray_t* pred = make_pred(bytes, nrows);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_ptr_not_null(sel);
+
+    const uint8_t* flags = ray_rowsel_flags(sel);
+    munit_assert_int(flags[0], ==, RAY_SEL_MIX);
+    munit_assert_int(flags[1], ==, RAY_SEL_ALL);
+    munit_assert_int(ray_rowsel_meta(sel)->total_pass, ==, RAY_MORSEL_ELEMS / 2 + 5);
+    munit_assert_int(ray_rowsel_meta(sel)->n_segs, ==, 2);
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* Producer over a range that crosses the parallel threshold so the
+ * pool dispatch fires.  Cross-checks reconstruction against the
+ * naive oracle. */
+static MunitResult test_rowsel_parallel(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    int64_t nrows = RAY_PARALLEL_THRESHOLD * 2 + 173;  /* parallel path + odd remainder */
+    uint8_t* bytes = (uint8_t*)ray_data(ray_alloc((size_t)nrows));
+    for (int64_t i = 0; i < nrows; i++) bytes[i] = (i % 7 == 0);
+    ray_t* pred = make_pred(bytes, nrows);
+    ray_t* sel = ray_rowsel_from_pred(pred);
+    munit_assert_ptr_not_null(sel);
+
+    int64_t expected_pass = naive_popcount(bytes, nrows);
+    munit_assert_int(ray_rowsel_meta(sel)->total_pass, ==, expected_pass);
+
+    int64_t* recon = (int64_t*)ray_data(ray_alloc((size_t)expected_pass * sizeof(int64_t)));
+    int64_t  recon_n = reconstruct(sel, recon);
+    munit_assert_int(recon_n, ==, expected_pass);
+    int64_t check = 0;
+    for (int64_t i = 0; i < nrows; i++) {
+        if (bytes[i]) {
+            munit_assert_int(recon[check], ==, i);
+            check++;
+        }
+    }
+    munit_assert_int(check, ==, expected_pass);
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* Refine: existing rowsel ANDed with a second pred shrinks correctly. */
+static MunitResult test_rowsel_refine(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    int64_t nrows = 100;
+    uint8_t a[100], b[100];
+    for (int64_t i = 0; i < nrows; i++) {
+        a[i] = (i % 2 == 0);   /* even */
+        b[i] = (i % 3 == 0);   /* mult-of-3 */
+    }
+    ray_t* pa = make_pred(a, nrows);
+    ray_t* pb = make_pred(b, nrows);
+
+    ray_t* s1 = ray_rowsel_from_pred(pa);
+    munit_assert_ptr_not_null(s1);
+    ray_t* s2 = ray_rowsel_refine(s1, pb);
+    munit_assert_ptr_not_null(s2);
+
+    /* Expected survivors: even AND multiple of 3 → 0, 6, 12, …, 96 → 17 rows. */
+    int64_t expect = 0;
+    for (int64_t i = 0; i < nrows; i++) if (a[i] && b[i]) expect++;
+    munit_assert_int(ray_rowsel_meta(s2)->total_pass, ==, expect);
+
+    int64_t recon[100];
+    int64_t recon_n = reconstruct(s2, recon);
+    munit_assert_int(recon_n, ==, expect);
+    int64_t check = 0;
+    for (int64_t i = 0; i < nrows; i++) {
+        if (a[i] && b[i]) {
+            munit_assert_int(recon[check], ==, i);
+            check++;
+        }
+    }
+    ray_rowsel_release(s2);
+    ray_rowsel_release(s1);
+    ray_release(pa);
+    ray_release(pb);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* Refine on a NULL existing — should behave like from_pred(pred). */
+static MunitResult test_rowsel_refine_null_existing(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_heap_init();
+    uint8_t bytes[10] = {1,0,1,0,1,0,1,0,1,0};
+    ray_t* pred = make_pred(bytes, 10);
+    ray_t* sel = ray_rowsel_refine(NULL, pred);
+    munit_assert_ptr_not_null(sel);
+    munit_assert_int(ray_rowsel_meta(sel)->total_pass, ==, 5);
+    ray_rowsel_release(sel);
+    ray_release(pred);
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * Suite registration
+ * ────────────────────────────────────────────────────────────────── */
+
+static MunitTest rowsel_tests[] = {
+    { "/empty",                  test_rowsel_empty,                  NULL, NULL, 0, NULL },
+    { "/all_pass",               test_rowsel_all_pass,               NULL, NULL, 0, NULL },
+    { "/none_pass",              test_rowsel_none_pass,              NULL, NULL, 0, NULL },
+    { "/single_morsel_mixed",    test_rowsel_single_morsel_mixed,    NULL, NULL, 0, NULL },
+    { "/multi_morsel",           test_rowsel_multi_morsel,           NULL, NULL, 0, NULL },
+    { "/partial_last_morsel",    test_rowsel_partial_last_morsel,    NULL, NULL, 0, NULL },
+    { "/parallel",               test_rowsel_parallel,               NULL, NULL, 0, NULL },
+    { "/refine",                 test_rowsel_refine,                 NULL, NULL, 0, NULL },
+    { "/refine_null_existing",   test_rowsel_refine_null_existing,   NULL, NULL, 0, NULL },
+    { NULL, NULL, NULL, NULL, 0, NULL }
+};
+
+MunitSuite test_rowsel_suite = {
+    "/rowsel", rowsel_tests, NULL, 1, 0
+};
