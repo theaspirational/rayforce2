@@ -2556,17 +2556,28 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
      * gather — same fast path exec_sort uses.  LIST columns are gathered
      * element-wise with retain; all other columns go through the
      * partitioned_gather / multi_gather_fn paths.  Null bits, str_pool,
-     * and sym_dict are propagated after the gather runs. */
+     * and sym_dict are propagated after the gather runs.
+     *
+     * Heap-allocate the per-column scratch arrays so the fast path
+     * handles arbitrarily wide tables — avoids a VLA stack blow-up
+     * and matches the pre-regression xasc behavior which supported
+     * any column count via gather_by_idx. */
     ray_pool_t* gather_pool = (nrows > RAY_PARALLEL_THRESHOLD)
                               ? ray_pool_get() : NULL;
-    if (ncols > 4096) {
+
+    ray_t* nc_hdr = NULL;
+    ray_t** new_cols = (ray_t**)scratch_alloc(&nc_hdr,
+                             (size_t)ncols * sizeof(ray_t*));
+    ray_t* cn_hdr = NULL;
+    int64_t* col_names = (int64_t*)scratch_alloc(&cn_hdr,
+                             (size_t)ncols * sizeof(int64_t));
+    if (!new_cols || !col_names) {
+        if (nc_hdr) scratch_free(nc_hdr);
+        if (cn_hdr) scratch_free(cn_hdr);
         if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
         ray_release(idx);
-        return ray_error("nyi", NULL);
+        return ray_error("oom", NULL);
     }
-
-    ray_t* new_cols[ncols];
-    int64_t col_names[ncols];
     for (int64_t c = 0; c < ncols; c++) new_cols[c] = NULL;
 
     for (int64_t c = 0; c < ncols; c++) {
@@ -2581,6 +2592,8 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
         if (!nc || RAY_IS_ERR(nc)) {
             for (int64_t j = 0; j < c; j++)
                 if (new_cols[j]) ray_release(new_cols[j]);
+            scratch_free(nc_hdr);
+            scratch_free(cn_hdr);
             if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
             ray_release(idx);
             return nc ? nc : ray_error("oom", NULL);
@@ -2679,6 +2692,8 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
     if (!result || RAY_IS_ERR(result)) {
         for (int64_t c = 0; c < ncols; c++)
             if (new_cols[c]) ray_release(new_cols[c]);
+        scratch_free(nc_hdr);
+        scratch_free(cn_hdr);
         if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
         ray_release(idx);
         return result ? result : ray_error("oom", NULL);
@@ -2689,6 +2704,8 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
         ray_release(new_cols[c]);
     }
 
+    scratch_free(nc_hdr);
+    scratch_free(cn_hdr);
     if (sorted_keys_hdr) scratch_free(sorted_keys_hdr);
     ray_release(idx);
     return result;
