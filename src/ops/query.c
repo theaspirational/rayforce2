@@ -858,9 +858,11 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         if (!pred) {
             ray_graph_free(g); ray_release(tbl);
             return ray_error("domain",
-                "WHERE predicate not supported by DAG compiler "
-                "(try rewriting without lambda invocations, "
-                "`let`, or unsupported special forms)");
+                "WHERE predicate not supported by DAG compiler — "
+                "most common causes: arity mismatch "
+                "(e.g. `(in v)` instead of `(in col v)`), "
+                "unknown function name, unsupported special form, "
+                "or a sub-expression the compiler can't lower");
         }
         root = ray_filter(g, root, pred);
     }
