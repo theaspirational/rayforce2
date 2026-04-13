@@ -492,6 +492,16 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
 
     int64_t nrows = ray_table_nrows(tbl);
     ray_rowsel_t* meta = ray_rowsel_meta(sel);
+
+    /* Defensive: the selection must have been built for a table
+     * with this exact row count.  Mismatch means the caller passed
+     * a stale selection — aborting here is strictly safer than
+     * silently gathering via out-of-range indices. */
+    if (meta->nrows != nrows)
+        return ray_error("domain",
+            "sel_compact: selection nrows mismatch (sel=%lld tbl=%lld)",
+            (long long)meta->nrows, (long long)nrows);
+
     int64_t pass_count = meta->total_pass;
 
     /* All-pass: nothing to compact.  (In practice this path is

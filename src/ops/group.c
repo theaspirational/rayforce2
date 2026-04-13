@@ -2030,19 +2030,26 @@ ray_t* exec_group(ray_graph_t* g, ray_op_t* op, ray_t* tbl,
      * [0, n_scan) and read row=match_idx[i].  When no selection is
      * present, match_idx is NULL and n_scan equals nrows.  The
      * match_idx_block must be released on every exec_group exit
-     * path — see the various `goto cleanup` and early returns below. */
+     * path — see the various `goto cleanup` and early returns below.
+     *
+     * If g->selection is set but was built for a different table
+     * shape (nrows mismatch), that's a graph-construction bug — the
+     * caller passed a selection that doesn't apply here.  Fail loud
+     * rather than silently running the aggregation on unfiltered
+     * data. */
     ray_t* match_idx_block = NULL;
     const int64_t* match_idx = NULL;
     int64_t n_scan = nrows;
     if (g->selection) {
         ray_rowsel_t* sm = ray_rowsel_meta(g->selection);
-        if (sm->nrows == nrows) {
-            match_idx_block = ray_rowsel_to_indices(g->selection);
-            if (match_idx_block) {
-                match_idx = (const int64_t*)ray_data(match_idx_block);
-                n_scan = sm->total_pass;
-            }
-        }
+        if (sm->nrows != nrows)
+            return ray_error("domain",
+                "exec_group: selection nrows mismatch (sel=%lld tbl=%lld)",
+                (long long)sm->nrows, (long long)nrows);
+        match_idx_block = ray_rowsel_to_indices(g->selection);
+        if (!match_idx_block) return ray_error("oom", NULL);
+        match_idx = (const int64_t*)ray_data(match_idx_block);
+        n_scan = sm->total_pass;
     }
 
     /* Resolve key columns (VLA — n_keys ≤ 8; use ≥1 to avoid zero-size VLA UB) */
