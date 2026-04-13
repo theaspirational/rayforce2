@@ -43,6 +43,7 @@
 #include "core/pool.h"
 #include "ops/hash.h"
 #include "table/sym.h"
+#include "vec/str.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -714,12 +715,15 @@ static int64_t build_row_offsets(const char* buf, size_t buf_size,
 
 static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
                                 const csv_type_t* col_types,
+                                const int8_t* resolved_types,
                                 void** col_data, int64_t n_rows,
                                 int64_t* col_max_ids,
                                 uint8_t** col_nullmaps) {
     bool ok = true;
     for (int c = 0; c < n_cols; c++) {
         if (col_types[c] != CSV_TYPE_STR) continue;
+        /* RAY_STR columns are materialized directly; skip sym interning. */
+        if (resolved_types[c] == RAY_STR) continue;
         csv_strref_t* refs = str_refs[c];
         uint32_t* ids = (uint32_t*)col_data[c];
         uint8_t* nm = col_nullmaps ? col_nullmaps[c] : NULL;
@@ -744,6 +748,62 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
         if (col_max_ids) col_max_ids[c] = max_id;
     }
     return ok;
+}
+
+/* Materialize RAY_STR columns from parsed strrefs. Two-pass so the per-column
+ * string pool is sized exactly once — avoids the repeated realloc/COW path
+ * that ray_str_vec_set would take for a freshly-owned vector. */
+static bool csv_fill_str_cols(csv_strref_t** str_refs, int n_cols,
+                              const int8_t* resolved_types,
+                              ray_t** col_vecs, int64_t n_rows,
+                              uint8_t** col_nullmaps) {
+    for (int c = 0; c < n_cols; c++) {
+        if (resolved_types[c] != RAY_STR) continue;
+        csv_strref_t* refs = str_refs[c];
+        uint8_t* nm = col_nullmaps ? col_nullmaps[c] : NULL;
+        ray_t* vec = col_vecs[c];
+        ray_str_t* dst = (ray_str_t*)ray_data(vec);
+
+        /* ray_str_t.pool_off is u32 — the per-column pool is capped at 4 GiB.
+         * Sum as u64 so the add itself can't wrap, then bail if the total
+         * wouldn't fit in the u32 offset field. */
+        uint64_t pool_bytes = 0;
+        for (int64_t r = 0; r < n_rows; r++) {
+            if (nm && (nm[r >> 3] & (1u << (r & 7)))) continue;
+            uint32_t l = refs[r].len;
+            if (l > RAY_STR_INLINE_MAX) pool_bytes += l;
+        }
+        if (pool_bytes > UINT32_MAX) return false;
+
+        if (pool_bytes > 0) {
+            ray_t* pool = ray_alloc((size_t)pool_bytes);
+            if (!pool || RAY_IS_ERR(pool)) return false;
+            pool->type = RAY_U8;
+            pool->len = 0;
+            vec->str_pool = pool;
+        }
+
+        char* pool_base = vec->str_pool ? (char*)ray_data(vec->str_pool) : NULL;
+        uint32_t pool_off = 0;
+
+        for (int64_t r = 0; r < n_rows; r++) {
+            memset(&dst[r], 0, sizeof(ray_str_t));
+            if (nm && (nm[r >> 3] & (1u << (r & 7)))) continue;
+            const char* p = refs[r].ptr;
+            uint32_t l = refs[r].len;
+            dst[r].len = l;
+            if (l <= RAY_STR_INLINE_MAX) {
+                if (l > 0) memcpy(dst[r].data, p, l);
+            } else {
+                memcpy(dst[r].prefix, p, 4);
+                dst[r].pool_off = pool_off;
+                memcpy(pool_base + pool_off, p, l);
+                pool_off += l;  /* cannot wrap: pool_bytes <= UINT32_MAX */
+            }
+        }
+        if (vec->str_pool) vec->str_pool->len = (int64_t)pool_off;
+    }
+    return true;
 }
 
 /* --------------------------------------------------------------------------
@@ -1205,7 +1265,10 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
 
     for (int c = 0; c < ncols; c++) {
         ray_t* vec = col_vecs[c];
-        if (n_rows <= 128) {
+        /* RAY_STR aliases bytes 8-15 of the header with str_pool — inline
+         * nullmap would corrupt the pool pointer, so force external. */
+        bool force_ext = (resolved_types[c] == RAY_STR);
+        if (n_rows <= 128 && !force_ext) {
             vec->attrs |= RAY_ATTR_HAS_NULLS;
             memset(vec->nullmap, 0, 16);
             col_nullmaps[c] = vec->nullmap;
@@ -1312,10 +1375,18 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
         }
     }
 
-    /* ---- 9b. Batch-intern string columns ---- */
+    /* ---- 9b. Batch-intern sym columns / materialize RAY_STR columns ---- */
     if (has_str_cols) {
+        bool fill_ok = csv_fill_str_cols(str_ref_bufs, ncols, resolved_types,
+                           col_vecs, n_rows, col_nullmaps);
+        if (!fill_ok) {
+            for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
+            for (int c = 0; c < ncols; c++) ray_release(col_vecs[c]);
+            goto fail_offsets;
+        }
         bool intern_ok = csv_intern_strings(str_ref_bufs, ncols, parse_types,
-                           col_data, n_rows, sym_max_ids, col_nullmaps);
+                           resolved_types, col_data, n_rows, sym_max_ids,
+                           col_nullmaps);
         if (!intern_ok) {
             for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
             for (int c = 0; c < ncols; c++) ray_release(col_vecs[c]);
@@ -1335,7 +1406,8 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
             vec->ext_nullmap = NULL;
         }
         vec->attrs &= (uint8_t)~(RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT);
-        memset(vec->nullmap, 0, 16);
+        /* RAY_STR stores str_pool in bytes 8-15 of the header — don't wipe. */
+        if (vec->type != RAY_STR) memset(vec->nullmap, 0, 16);
     }
 
     /* ---- 10. Narrow sym columns to optimal width ---- */

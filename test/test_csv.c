@@ -369,6 +369,51 @@ static MunitResult test_csv_null_mixed_columns(const void* params, void* data) {
     return MUNIT_OK;
 }
 
+/* Explicit RAY_STR schema must yield a RAY_STR vector, not a sym column.
+ * Regression: csv loader used to funnel all string-parsed columns through
+ * the sym intern table, silently corrupting RAY_STR-typed outputs. */
+static MunitResult test_csv_explicit_str_schema(const void* params, void* data) {
+    (void)params; (void)data;
+    ray_heap_init();
+    (void)ray_sym_init();
+
+    FILE* f = fopen(TMP_CSV, "w");
+    /* Mix inline (<=12B), pooled (>12B), empty/null, and a short */
+    fprintf(f, "id,note\n"
+               "1,hi\n"
+               "2,this-is-a-long-string-over-12-bytes\n"
+               "3,\n"
+               "4,tiny\n");
+    fclose(f);
+
+    int8_t schema[2] = { RAY_I64, RAY_STR };
+    ray_t* loaded = ray_read_csv_opts(TMP_CSV, 0, true, schema, 2);
+    munit_assert_false(RAY_IS_ERR(loaded));
+    munit_assert_int(ray_table_nrows(loaded), ==, 4);
+
+    ray_t* note = ray_table_get_col_idx(loaded, 1);
+    munit_assert_int(note->type, ==, RAY_STR);
+
+    size_t l;
+    const char* s;
+    s = ray_str_vec_get(note, 0, &l);
+    munit_assert_int((int)l, ==, 2);
+    munit_assert_memory_equal(2, s, "hi");
+    s = ray_str_vec_get(note, 1, &l);
+    munit_assert_int((int)l, ==, 35);
+    munit_assert_memory_equal(35, s, "this-is-a-long-string-over-12-bytes");
+    munit_assert_true(ray_vec_is_null(note, 2));
+    s = ray_str_vec_get(note, 3, &l);
+    munit_assert_int((int)l, ==, 4);
+    munit_assert_memory_equal(4, s, "tiny");
+
+    ray_release(loaded);
+    unlink(TMP_CSV);
+    ray_sym_destroy();
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
 static MunitTest csv_tests[] = {
     { "/roundtrip_i64",  test_csv_roundtrip_i64,  NULL, NULL, 0, NULL },
     { "/roundtrip_f64",  test_csv_roundtrip_f64,  NULL, NULL, 0, NULL },
@@ -381,6 +426,7 @@ static MunitTest csv_tests[] = {
     { "/null_sym",              test_csv_null_sym,              NULL, NULL, 0, NULL },
     { "/no_nulls_no_nullmap",   test_csv_no_nulls_no_nullmap,  NULL, NULL, 0, NULL },
     { "/null_mixed_columns",    test_csv_null_mixed_columns,    NULL, NULL, 0, NULL },
+    { "/explicit_str_schema",   test_csv_explicit_str_schema,   NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL }
 };
 
