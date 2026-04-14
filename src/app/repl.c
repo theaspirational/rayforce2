@@ -31,6 +31,7 @@
 #include "app/repl.h"
 #include "app/term.h"
 #include "core/poll.h"
+#include "core/pool.h"
 #include "lang/env.h"
 #include "lang/eval.h"
 #include "lang/nfo.h"
@@ -197,17 +198,34 @@ static void print_banner(void) {
     int64_t mem_mb = get_total_mem_mb();
     int ncores = (int)sysconf(_SC_NPROCESSORS_ONLN);
 
+    /* "Using" count reflects the actual worker-pool size, not ncores.
+     * ray_pool_get() is a lazy initializer — callers might not have
+     * touched it yet, so compute the effective pool size the same way
+     * the pool default does. */
+    uint32_t pool_workers = 0;
+    {
+        ray_pool_t* p = ray_pool_get();
+        if (p) pool_workers = ray_pool_total_workers(p);
+    }
+    if (pool_workers == 0)
+        pool_workers = (uint32_t)ncores;
+
     fprintf(stdout,
         "\033[1m"
         "  RayforceDB: %s %s\n"
         "  %s %"PRId64"(MB) %d core(s)\n"
-        "  Using %d cores(s)\n"
+        "  Using %u worker(s)\n"
+#ifdef DEBUG
+        "  Build: debug (ASan + UBSan, -O0)\n"
+#else
+        "  Build: release\n"
+#endif
         "  Documentation: https://rayforcedb.com/\n"
         "  Github: https://github.com/RayforceDB/rayforce\n"
         "\033[0m",
         ray_version_string(), RAYFORCE_BUILD_DATE,
         cpu, mem_mb, ncores,
-        ncores);
+        pool_workers);
 }
 
 #define PIPE_BUF_SIZE 4096
@@ -482,11 +500,12 @@ static bool handle_command(ray_repl_t* repl, const char* str, size_t len) {
         fprintf(stdout, "\n");
         if (color) fprintf(stdout, "\033[90m");
         fprintf(stdout,
-            "  :?      - Displays help.\n"
-            "  :t      - Toggle profiling on/off. Use (timeit expr) for one-off.\n"
-            "  :env    - Lists defined variables.\n"
-            "  :clear  - Clears screen.\n"
-            "  :q      - Exits the application.");
+            "  :?         - Displays help.\n"
+            "  :t         - Toggle profiling on/off.\n"
+            "  :t <expr>  - Evaluate <expr> and print elapsed wall time.\n"
+            "  :env       - Lists defined variables.\n"
+            "  :clear     - Clears screen.\n"
+            "  :q         - Exits the application.");
         if (color) fprintf(stdout, "\033[0m");
         fprintf(stdout, "\n");
         return true;
@@ -495,8 +514,29 @@ static bool handle_command(ray_repl_t* repl, const char* str, size_t len) {
     if (cmd_match(cmd, clen, "t", 1, &arg, &arg_len) ||
         cmd_match(cmd, clen, "timeit", 6, &arg, &arg_len)) {
         if (arg && arg_len > 0) {
+            /* :t <expr> — evaluate expr once, print its result and
+             * the wall-clock elapsed ms. Does not toggle the profiler.
+             * Keep the expression's result visible (unlike the timeit
+             * builtin, which discards it).
+             * cmd_match returns a non-null-terminated slice; eval_and_print
+             * needs a C string, so copy into a stack-sized buffer. */
+            char buf_stack[4096];
+            if (arg_len >= sizeof(buf_stack)) {
+                if (color) fprintf(stdout, "\033[1;33m");
+                fprintf(stdout, ". :t expression too long (max %zu bytes).",
+                        sizeof(buf_stack) - 1);
+                if (color) fprintf(stdout, "\033[0m");
+                fprintf(stdout, "\n");
+                return true;
+            }
+            memcpy(buf_stack, arg, arg_len);
+            buf_stack[arg_len] = '\0';
+            int64_t t0 = ray_profile_now_ns();
+            eval_and_print(repl->term, buf_stack, color, false);
+            int64_t t1 = ray_profile_now_ns();
+            double ms = (double)(t1 - t0) / 1e6;
             if (color) fprintf(stdout, "\033[1;33m");
-            fprintf(stdout, ". :t takes no arguments. Use (timeit expr) for per-expression timing.");
+            fprintf(stdout, ". elapsed %.3f ms", ms);
             if (color) fprintf(stdout, "\033[0m");
             fprintf(stdout, "\n");
             return true;

@@ -23,6 +23,7 @@
 
 #include "core/poll.h"
 #include "core/ipc.h"
+#include "core/pool.h"
 #include "app/repl.h"
 #include "core/runtime.h"
 #include <rayforce.h>
@@ -39,15 +40,21 @@ int main(int argc, char** argv) {
     int interactive = 0;
     const char* file = NULL;
     uint16_t port = 0;
+    int n_threads = -1;   /* -1 = auto (ncpu - 1) */
     const char* auth_pw = NULL;
     bool auth_restricted = false;
 
-    /* Parse args: [-i] [-p PORT] [file.rfl] */
+    /* Parse args: [-i] [-p PORT] [-t N] [-u|-U PW] [file.rfl] */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interactive") == 0)
             interactive = 1;
         else if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) && i + 1 < argc)
             port = (uint16_t)atoi(argv[++i]);
+        else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--threads") == 0) && i + 1 < argc) {
+            int v = atoi(argv[++i]);
+            if (v < 0) v = 0;
+            n_threads = v;
+        }
         else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             auth_pw = argv[++i];
             auth_restricted = false;
@@ -56,8 +63,32 @@ int main(int argc, char** argv) {
             auth_pw = argv[++i];
             auth_restricted = true;
         }
+        else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            fprintf(stdout,
+                "usage: %s [-i] [-p PORT] [-t N] [-u PW | -U PW] [file.rfl]\n"
+                "  -i, --interactive   start the REPL even after running a file\n"
+                "  -p, --port PORT     listen for IPC clients on PORT\n"
+                "  -t, --threads N     worker-pool size (default: ncpu - 1,\n"
+                "                      0 disables the pool entirely)\n"
+                "  -u PW               set plain auth password\n"
+                "  -U PW               set restricted auth password\n"
+                "  -h, --help          show this message\n",
+                argv[0]);
+            ray_runtime_destroy(rt);
+            return 0;
+        }
         else
             file = argv[i];
+    }
+
+    /* Initialise the worker pool before anything else that might use it
+     * (file load, REPL eval, builtins).  If -t wasn't given, leave the
+     * pool to its lazy default on first use. */
+    if (n_threads >= 0) {
+        ray_err_t err = ray_pool_init((uint32_t)n_threads);
+        if (err != RAY_OK)
+            fprintf(stderr, "warning: ray_pool_init(%d) failed (%d)\n",
+                    n_threads, (int)err);
     }
 
     ray_poll_t* poll = ray_poll_create();
