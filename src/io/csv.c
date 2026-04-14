@@ -41,9 +41,15 @@
 #include "mem/heap.h"
 #include "mem/sys.h"
 #include "core/pool.h"
+#include "lang/format.h"
 #include "ops/hash.h"
+#include "store/fileio.h"
 #include "table/sym.h"
 #include "vec/str.h"
+
+#include <inttypes.h>
+#include <math.h>
+#include <stdarg.h>
 
 #include <string.h>
 #include <stdio.h>
@@ -1487,8 +1493,49 @@ ray_t* ray_read_csv(const char* path) {
  * Returns RAY_OK on success, error code on failure.
  * ============================================================================ */
 
+/* -----------------------------------------------------------------------------
+ * write-csv writer state
+ *
+ * Wraps FILE* with a sticky error flag so the dispatch loop can stay flat
+ * and still report the first I/O error.  On any write failure subsequent
+ * writes are skipped and the final ray_write_csv returns RAY_ERR_IO.
+ * --------------------------------------------------------------------------- */
+
+typedef struct csv_writer_t {
+    FILE*     fp;
+    int       err;  /* 0 = OK, non-zero = sticky error */
+} csv_writer_t;
+
+static inline void cw_putc(csv_writer_t* w, int c) {
+    if (w->err) return;
+    if (fputc(c, w->fp) == EOF) w->err = 1;
+}
+
+static inline void cw_write(csv_writer_t* w, const char* s, size_t len) {
+    if (w->err || len == 0) return;
+    if (fwrite(s, 1, len, w->fp) != len) w->err = 1;
+}
+
+static inline void cw_puts(csv_writer_t* w, const char* s) {
+    if (!s) return;
+    cw_write(w, s, strlen(s));
+}
+
+/* bounded, error-propagating fprintf replacement */
+static void cw_printf(csv_writer_t* w, const char* fmt, ...) {
+    if (w->err) return;
+    char buf[64];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0) { w->err = 1; return; }
+    if ((size_t)n >= sizeof(buf)) { w->err = 1; return; }
+    cw_write(w, buf, (size_t)n);
+}
+
 /* Write a string value, quoting if it contains special chars */
-static void csv_write_str(FILE* fp, const char* s, size_t len) {
+static void csv_write_str(csv_writer_t* w, const char* s, size_t len) {
     int need_quote = 0;
     for (size_t i = 0; i < len; i++) {
         if (s[i] == ',' || s[i] == '"' || s[i] == '\n' || s[i] == '\r') {
@@ -1497,145 +1544,275 @@ static void csv_write_str(FILE* fp, const char* s, size_t len) {
         }
     }
     if (need_quote) {
-        fputc('"', fp);
+        cw_putc(w, '"');
+        size_t start = 0;
         for (size_t i = 0; i < len; i++) {
-            if (s[i] == '"') fputc('"', fp);
-            fputc(s[i], fp);
+            if (s[i] == '"') {
+                cw_write(w, s + start, i - start);
+                cw_putc(w, '"');   /* escaped quote */
+                start = i;
+            }
         }
-        fputc('"', fp);
+        cw_write(w, s + start, len - start);
+        cw_putc(w, '"');
     } else {
-        fwrite(s, 1, len, fp);
+        cw_write(w, s, len);
+    }
+}
+
+static void csv_write_date(csv_writer_t* w, int32_t v) {
+    /* days since 2000-01-01 → YYYY-MM-DD, civil_from_days (Hinnant) */
+    int32_t z = v + 10957 + 719468;
+    int32_t era = (z >= 0 ? z : z - 146096) / 146097;
+    uint32_t doe = (uint32_t)(z - era * 146097);
+    uint32_t yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+    int32_t  y = (int32_t)yoe + era * 400;
+    uint32_t doy = doe - (365*yoe + yoe/4 - yoe/100);
+    uint32_t mp = (5*doy + 2) / 153;
+    int32_t  d = (int32_t)(doy - (153*mp + 2)/5 + 1);
+    int32_t  m = (int32_t)(mp < 10 ? mp + 3 : mp - 9);
+    if (m <= 2) y++;
+    cw_printf(w, "%04d-%02d-%02d", y, m, d);
+}
+
+static void csv_write_time(csv_writer_t* w, int32_t ms) {
+    /* ms since midnight (may be negative). Normalise modulo one day. */
+    int32_t day_ms = 86400000;
+    int32_t t = ms % day_ms;
+    if (t < 0) t += day_ms;
+    uint32_t ums = (uint32_t)t;
+    uint32_t h = ums / 3600000;
+    uint32_t mi = (ums % 3600000) / 60000;
+    uint32_t s = (ums % 60000) / 1000;
+    uint32_t frac = ums % 1000;
+    if (frac) cw_printf(w, "%02u:%02u:%02u.%03u", h, mi, s, frac);
+    else      cw_printf(w, "%02u:%02u:%02u", h, mi, s);
+}
+
+static void csv_write_timestamp(csv_writer_t* w, int64_t us) {
+    /* Floored-division split into days + intraday microseconds so
+     * negative timestamps produce a well-formed date. C's / rounds
+     * toward zero, so correct after the fact. */
+    int64_t day_us = 86400000000LL;
+    int64_t days   = us / day_us;
+    int64_t time_us = us % day_us;
+    if (time_us < 0) { days--; time_us += day_us; }
+    csv_write_date(w, (int32_t)days);
+    cw_putc(w, 'T');
+    uint64_t tus = (uint64_t)time_us;
+    uint32_t h    = (uint32_t)(tus / 3600000000ULL);
+    uint32_t mi   = (uint32_t)((tus % 3600000000ULL) / 60000000ULL);
+    uint32_t s    = (uint32_t)((tus % 60000000ULL) / 1000000ULL);
+    uint32_t frac = (uint32_t)(tus % 1000000ULL);
+    if (frac) cw_printf(w, "%02u:%02u:%02u.%06u", h, mi, s, frac);
+    else      cw_printf(w, "%02u:%02u:%02u", h, mi, s);
+}
+
+static void csv_write_f64(csv_writer_t* w, double v) {
+    if (isnan(v)) { cw_puts(w, "nan"); return; }
+    if (isinf(v)) { cw_puts(w, v < 0 ? "-inf" : "inf"); return; }
+    /* %.17g is the standard round-trip format; wrap in cw_printf so
+     * a 64-byte buffer stack overflow guards the write. */
+    cw_printf(w, "%.17g", v);
+}
+
+static void csv_write_guid(csv_writer_t* w, const uint8_t* g) {
+    /* RFC 4122 canonical: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx */
+    cw_printf(w,
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        g[0], g[1], g[2],  g[3],  g[4],  g[5],  g[6],  g[7],
+        g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]);
+}
+
+/* Per-column resolution: slice-aware data pointer, base row offset,
+ * underlying parent (for ray_vec_is_null), and a cached null flag. */
+typedef struct csv_col_info_t {
+    ray_t*        col;            /* original column (may be sliced) */
+    ray_t*        data_owner;     /* slice_parent or col */
+    int64_t       base_row;       /* slice_offset or 0 */
+    const void*   data;           /* ray_data(data_owner) */
+    int8_t        type;
+    uint8_t       attrs;          /* of data_owner */
+    bool          has_nulls;      /* requires per-row ray_vec_is_null probe */
+} csv_col_info_t;
+
+static void csv_col_info_init(csv_col_info_t* ci, ray_t* col) {
+    ci->col        = col;
+    ci->data_owner = col;
+    ci->base_row   = 0;
+    if (col && (col->attrs & RAY_ATTR_SLICE) && col->slice_parent) {
+        ci->data_owner = col->slice_parent;
+        ci->base_row   = col->slice_offset;
+    }
+    ci->type  = col ? col->type : 0;
+    ci->attrs = ci->data_owner ? ci->data_owner->attrs : 0;
+    ci->data  = ci->data_owner ? ray_data(ci->data_owner) : NULL;
+    /* has_nulls must consult the slice_parent, since a slice view
+     * never carries its own nullmap — ray_vec_is_null handles the
+     * redirect but we still want a fast bypass when neither has nulls. */
+    ci->has_nulls = false;
+    if (col && (col->attrs & RAY_ATTR_HAS_NULLS)) ci->has_nulls = true;
+    if (ci->data_owner && (ci->data_owner->attrs & RAY_ATTR_HAS_NULLS))
+        ci->has_nulls = true;
+}
+
+static void csv_write_cell(csv_writer_t* w, const csv_col_info_t* ci, int64_t r) {
+    if (!ci->col) return;
+    /* Null cell -> empty field (consistent with read-csv). */
+    if (ci->has_nulls && ray_vec_is_null(ci->col, r)) return;
+
+    int64_t dr = ci->base_row + r;
+    int8_t t   = ci->type;
+    const void* d = ci->data;
+
+    switch (t) {
+    case RAY_I64: case RAY_TIMESTAMP: break; /* handled below */
+    default: break;
+    }
+
+    switch (t) {
+    case RAY_I64:
+        cw_printf(w, "%" PRId64, ((const int64_t*)d)[dr]);
+        break;
+    case RAY_I32:
+        cw_printf(w, "%" PRId32, ((const int32_t*)d)[dr]);
+        break;
+    case RAY_I16:
+        cw_printf(w, "%d", (int)((const int16_t*)d)[dr]);
+        break;
+    case RAY_BOOL:
+        cw_puts(w, ((const uint8_t*)d)[dr] ? "true" : "false");
+        break;
+    case RAY_U8:
+        cw_printf(w, "%u", (unsigned)((const uint8_t*)d)[dr]);
+        break;
+    case RAY_F64:
+        csv_write_f64(w, ((const double*)d)[dr]);
+        break;
+    case RAY_DATE:
+        csv_write_date(w, ((const int32_t*)d)[dr]);
+        break;
+    case RAY_TIME:
+        csv_write_time(w, ((const int32_t*)d)[dr]);
+        break;
+    case RAY_TIMESTAMP:
+        csv_write_timestamp(w, ((const int64_t*)d)[dr]);
+        break;
+    case RAY_SYM: {
+        int64_t sym = ray_read_sym(d, dr, t, ci->attrs);
+        ray_t* s = ray_sym_str(sym);
+        if (s) csv_write_str(w, ray_str_ptr(s), ray_str_len(s));
+        /* unknown sym id -> empty field rather than a phantom value */
+        break;
+    }
+    case RAY_STR: {
+        /* ray_str_vec_get accepts the original (possibly sliced) col and
+         * resolves the parent+offset internally.  It returns NULL for
+         * nulls, which we already filtered above, so treat NULL as
+         * empty-but-valid (e.g. a 0-length inline string). */
+        size_t slen = 0;
+        const char* sp = ray_str_vec_get(ci->col, r, &slen);
+        csv_write_str(w, sp ? sp : "", slen);
+        break;
+    }
+    case RAY_GUID:
+        csv_write_guid(w, (const uint8_t*)d + dr * 16);
+        break;
+    case RAY_LIST: {
+        /* LIST cells: recursively format each element as a string via
+         * the atom's printable representation.  For nested tables /
+         * lists-of-lists this produces a best-effort flat string; the
+         * whole list field is quoted to keep commas inside from
+         * breaking column alignment.  A LIST element is itself a
+         * ray_t*, so reuse ray_fmt to get a string form. */
+        ray_t** elems = (ray_t**)d;
+        ray_t* e = elems[dr];
+        if (!e || RAY_IS_ERR(e)) return;
+        ray_t* fmt = ray_fmt(e, false);
+        if (!fmt || RAY_IS_ERR(fmt)) return;
+        csv_write_str(w, ray_str_ptr(fmt), ray_str_len(fmt));
+        ray_release(fmt);
+        break;
+    }
+    default:
+        /* Unhandled type: emit an empty field rather than corrupting
+         * downstream columns.  Callers can inspect the file and see
+         * the missing data explicitly. */
+        break;
     }
 }
 
 ray_err_t ray_write_csv(ray_t* table, const char* path) {
-    if (!table || !path) return RAY_ERR_TYPE;
+    if (!table || !path || path[0] == '\0') return RAY_ERR_TYPE;
 
     int64_t ncols = ray_table_ncols(table);
     int64_t nrows = ray_table_nrows(table);
     if (ncols <= 0) return RAY_ERR_TYPE;
 
-    FILE* fp = fopen(path, "w");
+    /* Crash-safe atomic write: tmp -> fsync -> rename. Mirrors
+     * ray_col_save so an interrupted write never replaces the
+     * destination with a partial file. */
+    char tmp_path[1024];
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path) >= (int)sizeof(tmp_path))
+        return RAY_ERR_IO;
+
+    FILE* fp = fopen(tmp_path, "wb");
     if (!fp) return RAY_ERR_IO;
+
+    csv_writer_t w = { .fp = fp, .err = 0 };
+
+    /* Resolve every column once (slice parent, nullability, type) so
+     * the hot loop just indexes into pre-computed pointers. */
+    ray_t* col_info_block = ray_alloc((size_t)ncols * sizeof(csv_col_info_t));
+    if (!col_info_block || RAY_IS_ERR(col_info_block)) {
+        fclose(fp);
+        remove(tmp_path);
+        return RAY_ERR_OOM;
+    }
+    csv_col_info_t* ci = (csv_col_info_t*)ray_data(col_info_block);
+    for (int64_t c = 0; c < ncols; c++)
+        csv_col_info_init(&ci[c], ray_table_get_col_idx(table, c));
 
     /* Header row: column names */
     for (int64_t c = 0; c < ncols; c++) {
-        if (c > 0) fputc(',', fp);
+        if (c > 0) cw_putc(&w, ',');
         int64_t name_id = ray_table_col_name(table, c);
         ray_t* name_atom = ray_sym_str(name_id);
-        if (name_atom) {
-            const char* s = ray_str_ptr(name_atom);
-            size_t slen = ray_str_len(name_atom);
-            csv_write_str(fp, s, slen);
-        }
+        if (name_atom)
+            csv_write_str(&w, ray_str_ptr(name_atom), ray_str_len(name_atom));
     }
-    fputc('\n', fp);
+    cw_putc(&w, '\n');
 
     /* Data rows */
-    for (int64_t r = 0; r < nrows; r++) {
+    for (int64_t r = 0; r < nrows && !w.err; r++) {
         for (int64_t c = 0; c < ncols; c++) {
-            if (c > 0) fputc(',', fp);
-            ray_t* col = ray_table_get_col_idx(table, c);
-            if (!col) continue;
-            int8_t t = col->type;
-            switch (t) {
-            case RAY_I64: {
-                int64_t v = ((const int64_t*)ray_data(col))[r];
-                fprintf(fp, "%ld", (long)v);
-                break;
-            }
-            case RAY_I32: {
-                int32_t v = ((const int32_t*)ray_data(col))[r];
-                fprintf(fp, "%d", v);
-                break;
-            }
-            case RAY_F64: {
-                double v = ((const double*)ray_data(col))[r];
-                fprintf(fp, "%.17g", v);
-                break;
-            }
-            case RAY_BOOL: case RAY_U8: {
-                uint8_t v = ((const uint8_t*)ray_data(col))[r];
-                if (t == RAY_BOOL) fputs(v ? "true" : "false", fp);
-                else fprintf(fp, "%u", (unsigned)v);
-                break;
-            }
-            case RAY_DATE: {
-                int32_t v = ((const int32_t*)ray_data(col))[r];
-                /* days since 2000-01-01 → YYYY-MM-DD */
-                int32_t y, m, d;
-                { /* civil_from_days: algorithm from Howard Hinnant */
-                    int32_t z = v + 10957 + 719468;
-                    int32_t era = (z >= 0 ? z : z - 146096) / 146097;
-                    uint32_t doe = (uint32_t)(z - era * 146097);
-                    uint32_t yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
-                    y = (int32_t)yoe + era * 400;
-                    uint32_t doy = doe - (365*yoe + yoe/4 - yoe/100);
-                    uint32_t mp = (5*doy + 2) / 153;
-                    d = (int32_t)(doy - (153*mp + 2)/5 + 1);
-                    m = (int32_t)(mp < 10 ? mp + 3 : mp - 9);
-                    if (m <= 2) y++;
-                }
-                fprintf(fp, "%04d-%02d-%02d", y, m, d);
-                break;
-            }
-            case RAY_TIME: {
-                int32_t ms = ((const int32_t*)ray_data(col))[r];
-                uint32_t ums = (uint32_t)ms;
-                uint32_t h = ums / 3600000;
-                uint32_t mi = (ums % 3600000) / 60000;
-                uint32_t s = (ums % 60000) / 1000;
-                uint32_t frac = ums % 1000;
-                if (frac) fprintf(fp, "%02u:%02u:%02u.%03u", h, mi, s, frac);
-                else      fprintf(fp, "%02u:%02u:%02u", h, mi, s);
-                break;
-            }
-            case RAY_TIMESTAMP: {
-                int64_t us = ((const int64_t*)ray_data(col))[r];
-                int32_t days = (int32_t)(us / 86400000000LL);
-                int64_t time_us = us % 86400000000LL;
-                if (time_us < 0) { days--; time_us += 86400000000LL; }
-                /* days since 2000-01-01 → YYYY-MM-DD */
-                int32_t y, mo, d;
-                {
-                    int32_t z = days + 10957 + 719468;
-                    int32_t era = (z >= 0 ? z : z - 146096) / 146097;
-                    uint32_t doe = (uint32_t)(z - era * 146097);
-                    uint32_t yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
-                    y = (int32_t)yoe + era * 400;
-                    uint32_t doy = doe - (365*yoe + yoe/4 - yoe/100);
-                    uint32_t mp = (5*doy + 2) / 153;
-                    d = (int32_t)(doy - (153*mp + 2)/5 + 1);
-                    mo = (int32_t)(mp < 10 ? mp + 3 : mp - 9);
-                    if (mo <= 2) y++;
-                }
-                uint64_t tus = (uint64_t)time_us;
-                uint32_t h = (uint32_t)(tus / 3600000000ULL);
-                uint32_t mi = (uint32_t)((tus % 3600000000ULL) / 60000000ULL);
-                uint32_t s = (uint32_t)((tus % 60000000ULL) / 1000000ULL);
-                uint32_t frac = (uint32_t)(tus % 1000000ULL);
-                if (frac) fprintf(fp, "%04d-%02d-%02dT%02u:%02u:%02u.%06u", y, mo, d, h, mi, s, frac);
-                else      fprintf(fp, "%04d-%02d-%02dT%02u:%02u:%02u", y, mo, d, h, mi, s);
-                break;
-            }
-            case RAY_I16: {
-                int16_t v = ((const int16_t*)ray_data(col))[r];
-                fprintf(fp, "%d", (int)v);
-                break;
-            }
-            case RAY_SYM: {
-                int64_t sym = ray_read_sym(ray_data(col), r, col->type, col->attrs);
-                ray_t* s = ray_sym_str(sym);
-                if (s) csv_write_str(fp, ray_str_ptr(s), ray_str_len(s));
-                break;
-            }
-            default:
-                break;
-            }
+            if (c > 0) cw_putc(&w, ',');
+            csv_write_cell(&w, &ci[c], r);
         }
-        fputc('\n', fp);
+        cw_putc(&w, '\n');
     }
 
-    fclose(fp);
+    ray_free(col_info_block);
+
+    /* Flush user-space buffer before fsync/rename. */
+    if (fflush(fp) != 0) w.err = 1;
+    int close_err = (fclose(fp) != 0);
+    if (close_err) w.err = 1;
+
+    if (w.err) {
+        remove(tmp_path);
+        return RAY_ERR_IO;
+    }
+
+    /* fsync the temp file so the rename is backed by durable bytes. */
+    ray_fd_t fd = ray_file_open(tmp_path, RAY_OPEN_READ | RAY_OPEN_WRITE);
+    if (fd == RAY_FD_INVALID) { remove(tmp_path); return RAY_ERR_IO; }
+    ray_err_t sync_err = ray_file_sync(fd);
+    ray_file_close(fd);
+    if (sync_err != RAY_OK) { remove(tmp_path); return sync_err; }
+
+    ray_err_t rn_err = ray_file_rename(tmp_path, path);
+    if (rn_err != RAY_OK) { remove(tmp_path); return rn_err; }
+
     return RAY_OK;
 }

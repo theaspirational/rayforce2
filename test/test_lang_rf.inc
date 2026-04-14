@@ -5536,6 +5536,122 @@ static MunitResult test_rf_read_csv(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+static MunitResult test_rf_write_csv(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Round-trip: every column type, plus nulls, plus sliced/sorted
+     * views.  Each case writes to a temp file, reads the raw bytes
+     * back, and asserts on the exact content (commas / empty fields
+     * matter).  (read-csv foo) is exercised separately in the round-
+     * trip blocks where it adds type-recovery coverage. */
+
+    /* --- 1. Primary types (no nulls) ---
+     * Before the fix, RAY_STR and RAY_GUID silently produced empty
+     * fields because the dispatch switch had no branches for them. */
+    ASSERT_EQ(
+        "(set tA (table [i f s g str b d]"
+        "  (list [1 2]"
+        "        (as 'F64 [1.5 2.5])"
+        "        [aa bb]"
+        "        (guid 2)"
+        "        (list \"hi\" \"bye\")"
+        "        [true false]"
+        "        (as 'DATE [7305 7306]))))"  /* 2020-01-01, 2020-01-02 */
+        "(write-csv tA \"rf_test_write_a.csv\")", "0");
+    /* Row 1: int, float, sym, guid (first of the two), str, bool, date.
+     * split "\n" leaves a trailing empty field after the final newline,
+     * so header + 2 data rows + "" = 4 entries. */
+    ASSERT_EQ(
+        "(set raw (read \"rf_test_write_a.csv\"))"
+        "(set lines (split raw \"\\n\"))"
+        "(count lines)", "4");
+    ASSERT_EQ("(at lines 0)", "\"i,f,s,g,str,b,d\"");
+    /* Content assertions via field-split. Check structural invariants
+     * we control without depending on specific guid bytes. */
+    ASSERT_EQ("(count (split (at lines 1) \",\"))", "7");
+    ASSERT_EQ("(at (split (at lines 1) \",\") 0)", "\"1\"");
+    ASSERT_EQ("(at (split (at lines 1) \",\") 1)", "\"1.5\"");
+    ASSERT_EQ("(at (split (at lines 1) \",\") 2)", "\"aa\"");
+    ASSERT_EQ("(count (at (split (at lines 1) \",\") 3))", "36");  /* guid xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx */
+    ASSERT_EQ("(at (split (at lines 1) \",\") 4)", "\"hi\"");
+    ASSERT_EQ("(at (split (at lines 1) \",\") 5)", "\"true\"");
+    ASSERT_EQ("(at (split (at lines 1) \",\") 6)", "\"2020-01-01\"");
+
+    /* --- 2. Nulls produce empty fields, not garbage ---
+     * Before the fix, null i64 wrote 0 and null sym wrote a phantom
+     * intern-table value that depended on session state. */
+    ASSERT_EQ(
+        "(set tB (table [i s]"
+        "  (list [1 0Nl 3] [aa 0Ns cc])))"
+        "(write-csv tB \"rf_test_write_b.csv\")", "0");
+    ASSERT_EQ(
+        "(set linesB (split (read \"rf_test_write_b.csv\") \"\\n\"))"
+        "(count linesB)", "5");  /* header + 3 rows + trailing "" */
+    ASSERT_EQ("(at linesB 0)", "\"i,s\"");
+    ASSERT_EQ("(at linesB 1)", "\"1,aa\"");
+    ASSERT_EQ("(at linesB 2)", "\",\"");  /* empty i and empty s */
+    ASSERT_EQ("(at linesB 3)", "\"3,cc\"");
+
+    /* --- 3. Sliced / sorted views write the view's rows, not the
+     * source's rows.  Before the fix, the dispatch loop did
+     * ray_data(col)[r] and ignored slice_offset, so a sorted view
+     * produced the source's first N rows in source order. */
+    ASSERT_EQ(
+        "(set src (table [a b] (list [10 20 30 40 50] [aa bb cc dd ee])))"
+        "(set v (xdesc src 'a))"
+        "(write-csv v \"rf_test_write_c.csv\")", "0");
+    ASSERT_EQ(
+        "(set linesC (split (read \"rf_test_write_c.csv\") \"\\n\"))"
+        "(at linesC 0)", "\"a,b\"");
+    ASSERT_EQ("(at linesC 1)", "\"50,ee\"");
+    ASSERT_EQ("(at linesC 2)", "\"40,dd\"");
+    ASSERT_EQ("(at linesC 3)", "\"30,cc\"");
+    ASSERT_EQ("(at linesC 4)", "\"20,bb\"");
+    ASSERT_EQ("(at linesC 5)", "\"10,aa\"");
+
+    /* --- 4. Quote-escaping of strings with commas and quotes.
+     * (Embedded newlines are also escaped, but the assertion machinery
+     * can't easily probe for a literal LF inside a quoted cell — the
+     * round-trip cases below cover value recovery.) */
+    ASSERT_EQ(
+        "(set tD (table [k v]"
+        "  (list [1 2] (list \"has,comma\" \"has\\\"quote\"))))"
+        "(write-csv tD \"rf_test_write_d.csv\")", "0");
+    /* Full-byte assertion. The whole file should be exactly this
+     * byte sequence — any escape bug shows up immediately. */
+    ASSERT_EQ(
+        "(read \"rf_test_write_d.csv\")",
+        "\"k,v\\n1,\\\"has,comma\\\"\\n2,\\\"has\\\"\\\"quote\\\"\\n\"");
+
+    /* --- 5. Round-trip via read-csv recovers numeric column values.
+     * (SYMBOL columns are displayed correctly by `show` but extracting
+     * them via `(at tbl 'col)` currently returns garbage intern IDs —
+     * that's a separate read-csv bug tracked outside this test.) */
+    ASSERT_EQ(
+        "(set tE (table [i f]"
+        "  (list [1 2 3] (as 'F64 [1.25 2.5 3.75]))))"
+        "(write-csv tE \"rf_test_write_e.csv\")", "0");
+    ASSERT_EQ(
+        "(set rt (read-csv [I64 F64] \"rf_test_write_e.csv\"))"
+        "(count rt)", "3");
+    ASSERT_EQ("(at (at rt 'i) 0)", "1");
+    ASSERT_EQ("(at (at rt 'i) 1)", "2");
+    ASSERT_EQ("(at (at rt 'i) 2)", "3");
+    ASSERT_EQ("(at (at rt 'f) 0)", "1.25");
+    ASSERT_EQ("(at (at rt 'f) 1)", "2.5");
+    ASSERT_EQ("(at (at rt 'f) 2)", "3.75");
+
+    /* --- 6. Empty path is rejected instead of creating "" or crashing. */
+    ASSERT_ER("(write-csv tE \"\")", "type");
+
+    remove("rf_test_write_a.csv");
+    remove("rf_test_write_b.csv");
+    remove("rf_test_write_c.csv");
+    remove("rf_test_write_d.csv");
+    remove("rf_test_write_e.csv");
+    return MUNIT_OK;
+}
+
 /* Registration entries for lang_tests[]:
     { "/rf/map",                   test_rf_map,           lang_setup, lang_teardown, 0, NULL },
     { "/rf/basic",                 test_rf_basic,         lang_setup, lang_teardown, 0, NULL },

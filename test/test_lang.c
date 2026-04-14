@@ -3368,6 +3368,7 @@ static MunitTest lang_tests[] = {
     { "/rf/error",                 test_rf_error,         lang_setup, lang_teardown, 0, NULL },
     { "/rf/safety",                test_rf_safety,        lang_setup, lang_teardown, 0, NULL },
     { "/rf/read_csv",              test_rf_read_csv,      lang_setup, lang_teardown, 0, NULL },
+    { "/rf/write_csv",             test_rf_write_csv,     lang_setup, lang_teardown, 0, NULL },
     { "/datalog/fixpoint",          test_datalog_fixpoint, lang_setup, lang_teardown, 0, NULL },
     { "/datalog/query_inline_rules", test_datalog_query_inline_rules, lang_setup, lang_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
