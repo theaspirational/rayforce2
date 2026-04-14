@@ -217,8 +217,6 @@ static void print_banner(void) {
         "  Using %u worker(s)\n"
 #ifdef DEBUG
         "  Build: debug (ASan + UBSan, -O0)\n"
-#else
-        "  Build: release\n"
 #endif
         "  Documentation: https://rayforcedb.com/\n"
         "  Github: https://github.com/RayforceDB/rayforce\n"
@@ -939,18 +937,38 @@ int ray_repl_run_file(const char* path) {
 
     if (nread == 0) { ray_release(block); return 0; }
 
-    /* Honour -t 1 / :t 1 / g_ray_profile.active in file mode too:
-     * wrap the whole file eval in a top-level span and dump the tree
-     * afterwards, matching what eval_and_print does for REPL input. */
+    /* File mode matches eval_and_print's structure so -t 1 / :t 1
+     * produces the same span layout (parse / eval / materialize) as
+     * REPL input, not one opaque "eval" tick.  Colors follow whether
+     * stdout is a TTY — a piped run stays ANSI-free. */
+    bool use_color = isatty(fileno(stdout));
     bool profiling = g_ray_profile.active;
+
     if (profiling) {
         ray_profile_reset();
         ray_profile_span_start("top-level");
     }
 
-    ray_t* result = ray_eval_str(buf);
-    if (profiling) ray_profile_tick("eval");
+    ray_t* nfo = ray_nfo_create(path, strlen(path), buf, nread);
+    ray_clear_error_trace();
+
+    ray_t* parsed = ray_parse_with_nfo(buf, nfo);
+    if (profiling) ray_profile_tick("parse");
+
+    ray_t* result;
+    if (RAY_IS_ERR(parsed)) {
+        result = parsed;
+    } else {
+        ray_t* prev_nfo = ray_eval_get_nfo();
+        ray_eval_set_nfo(nfo);
+        result = ray_eval(parsed);
+        ray_eval_set_nfo(prev_nfo);
+        if (profiling) ray_profile_tick("eval");
+        ray_release(parsed);
+    }
+    ray_release(nfo);
     ray_release(block);
+
     if (ray_is_lazy(result)) {
         result = ray_lazy_materialize(result);
         if (profiling) ray_profile_tick("materialize");
@@ -960,16 +978,16 @@ int ray_repl_run_file(const char* path) {
 
     int rc;
     if (RAY_IS_ERR(result)) {
-        repl_print_result(stderr, result, false);
+        repl_print_result(stderr, result, use_color);
         rc = 1;
     } else {
         if (result) {
-            repl_print_result(stdout, result, false);
+            repl_print_result(stdout, result, use_color);
             ray_release(result);
         }
         rc = 0;
     }
 
-    if (profiling) profile_print(false);
+    if (profiling) profile_print(use_color);
     return rc;
 }
