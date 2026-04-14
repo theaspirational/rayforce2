@@ -939,16 +939,37 @@ int ray_repl_run_file(const char* path) {
 
     if (nread == 0) { ray_release(block); return 0; }
 
+    /* Honour -t 1 / :t 1 / g_ray_profile.active in file mode too:
+     * wrap the whole file eval in a top-level span and dump the tree
+     * afterwards, matching what eval_and_print does for REPL input. */
+    bool profiling = g_ray_profile.active;
+    if (profiling) {
+        ray_profile_reset();
+        ray_profile_span_start("top-level");
+    }
+
     ray_t* result = ray_eval_str(buf);
+    if (profiling) ray_profile_tick("eval");
     ray_release(block);
-    if (ray_is_lazy(result))
+    if (ray_is_lazy(result)) {
         result = ray_lazy_materialize(result);
+        if (profiling) ray_profile_tick("materialize");
+    }
+
+    if (profiling) ray_profile_span_end("top-level");
+
+    int rc;
     if (RAY_IS_ERR(result)) {
         repl_print_result(stderr, result, false);
-        return 1;
-    } else if (result) {
-        repl_print_result(stdout, result, false);
-        ray_release(result);
+        rc = 1;
+    } else {
+        if (result) {
+            repl_print_result(stdout, result, false);
+            ray_release(result);
+        }
+        rc = 0;
     }
-    return 0;
+
+    if (profiling) profile_print(false);
+    return rc;
 }
