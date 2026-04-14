@@ -85,6 +85,9 @@ int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
             int32_t vb = ((int32_t*)ray_data(col))[b];
             if (va < vb) cmp = -1;
             else if (va > vb) cmp = 1;
+        } else if (col->type == RAY_GUID) {
+            const uint8_t* base = (const uint8_t*)ray_data(col);
+            cmp = memcmp(base + a * 16, base + b * 16, 16);
         } else if (col->type == RAY_STR) {
             const ray_str_t* elems;
             const char* pool;
@@ -2416,26 +2419,29 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
         }
 
         /* Check if all sort keys are radix-sortable types.
-         * RAY_STR is accepted for multi-key sorts only: it has no packed
-         * uint64 encoding, so the composite-radix path can't fit it, but
-         * the rank-then-compose fallback handles it via the single-key
-         * RAY_STR MSD byte-radix path. */
+         * RAY_STR and RAY_GUID are accepted for multi-key sorts only:
+         * they have no packed uint64 encoding, so the composite-radix
+         * path can't fit them, but the rank-then-compose fallback handles
+         * them via single-key sort_indices_ex recursion (which hits the
+         * RAY_STR MSD byte-radix path for strings, or the merge-sort
+         * path with the new RAY_GUID comparator for guids). */
         bool can_radix = true;
-        bool has_str_key = false;
+        bool has_wide_key = false;  /* RAY_STR or RAY_GUID — forces rank fallback */
         for (uint8_t k = 0; k < n_cols; k++) {
             if (!cols[k]) { can_radix = false; break; }
             int8_t t = cols[k]->type;
-            if (t == RAY_STR) { has_str_key = true; continue; }
+            if (t == RAY_STR || t == RAY_GUID) { has_wide_key = true; continue; }
             if (t != RAY_I64 && t != RAY_F64 && t != RAY_I32 && t != RAY_I16 &&
                 t != RAY_BOOL && t != RAY_U8 && t != RAY_SYM &&
                 t != RAY_DATE && t != RAY_TIME && t != RAY_TIMESTAMP) {
                 can_radix = false; break;
             }
         }
-        /* Single-key RAY_STR already has its own fast path earlier; if a
-         * lone key slipped through here (shouldn't, but defensive), it
-         * would still need to go through merge sort. */
-        if (has_str_key && n_cols == 1) can_radix = false;
+        /* Single-key wide types: RAY_STR has its own MSD fast path above;
+         * single-key RAY_GUID falls through to merge sort with the new
+         * comparator. In both cases the multi-key composite path is not
+         * applicable, so disable the radix branch. */
+        if (has_wide_key && n_cols == 1) can_radix = false;
 
         if (can_radix) {
             ray_pool_t* pool = ray_pool_get();
@@ -2640,9 +2646,9 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                 bool fits = true;
 
                 ray_pool_t* mk_prescan_pool = (nrows >= SMALL_POOL_THRESHOLD) ? pool : NULL;
-                if (has_str_key) {
-                    /* RAY_STR can't be packed into a composite uint64
-                     * key. Force the rank-then-compose fallback. */
+                if (has_wide_key) {
+                    /* RAY_STR / RAY_GUID can't be packed into a composite
+                     * uint64 key. Force the rank-then-compose fallback. */
                     total_bits = UINT16_MAX;
                     fits = false;
                 } else if (n_cols <= MK_PRESCAN_MAX_KEYS && mk_prescan_pool) {

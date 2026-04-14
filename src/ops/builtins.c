@@ -1541,6 +1541,30 @@ ray_t* ray_where_fn(ray_t* x) {
 }
 
 /* (group vec) -> dict mapping each unique value to its indices */
+/* Grow the per-group bookkeeping arrays used by ray_group_fn.
+ * Doubles capacity; copies existing entries; returns false on OOM.
+ * Caller is responsible for cleaning up and returning an error if this fails. */
+static bool group_grow(ray_t** val_block, ray_t** ivblock,
+                       int64_t** gvals, ray_t*** idx_vecs,
+                       int64_t cur_count, int64_t* max_groups) {
+    int64_t new_max = *max_groups * 2;
+    if (new_max <= *max_groups) return false;  /* overflow */
+    ray_t* new_val = ray_alloc((size_t)new_max * sizeof(int64_t));
+    if (!new_val || RAY_IS_ERR(new_val)) return false;
+    ray_t* new_iv = ray_alloc((size_t)new_max * sizeof(ray_t*));
+    if (!new_iv || RAY_IS_ERR(new_iv)) { ray_free(new_val); return false; }
+    memcpy(ray_data(new_val), *gvals, (size_t)cur_count * sizeof(int64_t));
+    memcpy(ray_data(new_iv), *idx_vecs, (size_t)cur_count * sizeof(ray_t*));
+    ray_free(*val_block);
+    ray_free(*ivblock);
+    *val_block = new_val;
+    *ivblock = new_iv;
+    *gvals = (int64_t*)ray_data(new_val);
+    *idx_vecs = (ray_t**)ray_data(new_iv);
+    *max_groups = new_max;
+    return true;
+}
+
 ray_t* ray_group_fn(ray_t* x) {
     if (!ray_is_vec(x) && x->type != RAY_LIST)
         return ray_error("type", NULL);
@@ -1551,9 +1575,11 @@ ray_t* ray_group_fn(ray_t* x) {
         return d;
     }
 
-    /* Use a fixed-size approach: collect unique values with ray_alloc blocks */
-    /* Max groups = n (all unique). Store in a large ray_alloc block. */
-    int64_t max_groups = n < 1024 ? n : 1024;
+    /* Collect unique values; grow the gvals / idx_vecs arrays on demand.
+     * Starting small avoids wasting 16 KB on short columns; doubling keeps
+     * amortised growth O(n). A previous hard cap of 1024 caused large-n
+     * group-by on wide keys (GUID / STR / LIST) to return "limit". */
+    int64_t max_groups = n < 16 ? (n > 0 ? n : 16) : 64;
     ray_t* val_block = ray_alloc((size_t)(max_groups * sizeof(int64_t)));
     if (RAY_IS_ERR(val_block)) return val_block;
     int64_t* gvals = (int64_t*)ray_data(val_block);
@@ -1606,6 +1632,49 @@ ray_t* ray_group_fn(ray_t* x) {
             if (RAY_IS_ERR(dict)) { ray_free(kblock); goto gfail; }
         }
         ray_free(val_block); ray_free(ivblock); ray_free(kblock);
+        return dict;
+    }
+
+    /* RAY_GUID: 16-byte fixed-width grouping via memcmp */
+    if (x->type == RAY_GUID) {
+        const uint8_t* base = (const uint8_t*)ray_data(x);
+        for (int64_t i = 0; i < n; i++) {
+            const uint8_t* cur = base + i * 16;
+            int64_t gi = -1;
+            for (int64_t g = 0; g < ngroups; g++) {
+                const uint8_t* gp = base + gvals[g] * 16;
+                if (memcmp(gp, cur, 16) == 0) { gi = g; break; }
+            }
+            if (gi < 0) {
+                if (ngroups >= max_groups) {
+                    if (!group_grow(&val_block, &ivblock, &gvals, &idx_vecs,
+                                    ngroups, &max_groups)) {
+                        for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                        ray_free(val_block); ray_free(ivblock);
+                        return ray_error("oom", NULL);
+                    }
+                }
+                gi = ngroups++;
+                gvals[gi] = i;  /* store row index of first occurrence */
+                idx_vecs[gi] = ray_vec_new(RAY_I64, 0);
+            }
+            idx_vecs[gi] = ray_vec_append(idx_vecs[gi], &i);
+        }
+        ray_t* dict = ray_list_new((int32_t)(ngroups * 2));
+        if (RAY_IS_ERR(dict)) goto gfail;
+        dict->attrs |= RAY_ATTR_DICT;
+        for (int64_t g = 0; g < ngroups; g++) {
+            ray_t* k = ray_guid(base + gvals[g] * 16);
+            if (RAY_IS_ERR(k)) { ray_release(dict); goto gfail; }
+            dict = ray_list_append(dict, k);
+            ray_release(k);
+            if (RAY_IS_ERR(dict)) goto gfail;
+            dict = ray_list_append(dict, idx_vecs[g]);
+            ray_release(idx_vecs[g]);
+            idx_vecs[g] = NULL;
+            if (RAY_IS_ERR(dict)) goto gfail;
+        }
+        ray_free(val_block); ray_free(ivblock);
         return dict;
     }
 
@@ -1685,9 +1754,12 @@ ray_t* ray_group_fn(ray_t* x) {
         }
         if (gi < 0) {
             if (ngroups >= max_groups) {
-                for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
-                ray_free(val_block); ray_free(ivblock);
-                return ray_error("limit", NULL);
+                if (!group_grow(&val_block, &ivblock, &gvals, &idx_vecs,
+                                ngroups, &max_groups)) {
+                    for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                    ray_free(val_block); ray_free(ivblock);
+                    return ray_error("oom", NULL);
+                }
             }
             gi = ngroups++;
             gvals[gi] = v;

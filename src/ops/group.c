@@ -2915,9 +2915,10 @@ ht_path:;
         if (aop == OP_MAX) ght_need |= GHT_NEED_MAX;
     }
 
-    /* RAY_STR keys not yet supported in HT path (16-byte elements vs 8-byte slots) */
+    /* RAY_STR / RAY_GUID keys not yet supported in HT path
+     * (16-byte elements vs 8-byte slots) */
     for (uint8_t k = 0; k < n_keys; k++) {
-        if (key_types[k] == RAY_STR) {
+        if (key_types[k] == RAY_STR || key_types[k] == RAY_GUID) {
             for (uint8_t kk = 0; kk < n_keys; kk++)
                 if (key_owned[kk] && key_vecs[kk]) ray_release(key_vecs[kk]);
             for (uint8_t a = 0; a < n_aggs; a++)
