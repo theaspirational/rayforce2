@@ -2415,17 +2415,27 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
             /* OOM — fall through to comparison merge sort. */
         }
 
-        /* Check if all sort keys are radix-sortable types */
+        /* Check if all sort keys are radix-sortable types.
+         * RAY_STR is accepted for multi-key sorts only: it has no packed
+         * uint64 encoding, so the composite-radix path can't fit it, but
+         * the rank-then-compose fallback handles it via the single-key
+         * RAY_STR MSD byte-radix path. */
         bool can_radix = true;
+        bool has_str_key = false;
         for (uint8_t k = 0; k < n_cols; k++) {
             if (!cols[k]) { can_radix = false; break; }
             int8_t t = cols[k]->type;
+            if (t == RAY_STR) { has_str_key = true; continue; }
             if (t != RAY_I64 && t != RAY_F64 && t != RAY_I32 && t != RAY_I16 &&
                 t != RAY_BOOL && t != RAY_U8 && t != RAY_SYM &&
                 t != RAY_DATE && t != RAY_TIME && t != RAY_TIMESTAMP) {
                 can_radix = false; break;
             }
         }
+        /* Single-key RAY_STR already has its own fast path earlier; if a
+         * lone key slipped through here (shouldn't, but defensive), it
+         * would still need to go through merge sort. */
+        if (has_str_key && n_cols == 1) can_radix = false;
 
         if (can_radix) {
             ray_pool_t* pool = ray_pool_get();
@@ -2623,11 +2633,19 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
             } else if (can_radix && n_cols > 1) {
                 /* --- Multi-key composite radix sort --- */
                 int64_t mins[n_cols], maxs[n_cols];
-                uint8_t total_bits = 0;
+                /* Wider accumulator: up to 16 keys * 63 bits = 1008,
+                 * which would wrap a uint8_t and let an oversized
+                 * budget falsely pass the <=64 fits check. */
+                uint16_t total_bits = 0;
                 bool fits = true;
 
                 ray_pool_t* mk_prescan_pool = (nrows >= SMALL_POOL_THRESHOLD) ? pool : NULL;
-                if (n_cols <= MK_PRESCAN_MAX_KEYS && mk_prescan_pool) {
+                if (has_str_key) {
+                    /* RAY_STR can't be packed into a composite uint64
+                     * key. Force the rank-then-compose fallback. */
+                    total_bits = UINT16_MAX;
+                    fits = false;
+                } else if (n_cols <= MK_PRESCAN_MAX_KEYS && mk_prescan_pool) {
                     uint32_t nw = ray_pool_total_workers(mk_prescan_pool);
                     size_t pw_count = (size_t)nw * n_cols;
                     int64_t pw_mins_stack[512], pw_maxs_stack[512];
@@ -2664,7 +2682,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                         uint8_t bits = 1;
                         while (((uint64_t)1 << bits) <= range && bits < 64)
                             bits++;
-                        total_bits += bits;
+                        total_bits = (uint16_t)(total_bits + bits);
                     }
                     if (pw_mins_hdr) scratch_free(pw_mins_hdr);
                     if (pw_maxs_hdr) scratch_free(pw_maxs_hdr);
@@ -2689,6 +2707,16 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                             for (int64_t i = 0; i < nrows; i++) {
                                 if (d[i] < kmin) kmin = d[i];
                                 if (d[i] > kmax) kmax = d[i];
+                            }
+                        } else if (col->type == RAY_F64) {
+                            const double* d = (const double*)ray_data(col);
+                            for (int64_t i = 0; i < nrows; i++) {
+                                uint64_t bits;
+                                memcpy(&bits, &d[i], 8);
+                                uint64_t mask = -(bits >> 63) | ((uint64_t)1 << 63);
+                                int64_t v = (int64_t)(bits ^ mask);
+                                if (v < kmin) kmin = v;
+                                if (v > kmax) kmax = v;
                             }
                         } else if (col->type == RAY_I32 || col->type == RAY_DATE || col->type == RAY_TIME) {
                             const int32_t* d = (const int32_t*)ray_data(col);
@@ -2716,11 +2744,126 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                         uint8_t bits = 1;
                         while (((uint64_t)1 << bits) <= range && bits < 64)
                             bits++;
-                        total_bits += bits;
+                        total_bits = (uint16_t)(total_bits + bits);
                     }
                 }
 
-                if (total_bits > 64) fits = false;
+                if (total_bits > 64) {
+                    fits = false;
+                    /* --- Rank-then-compose fallback ---
+                     * The composite bit budget overflows because at least
+                     * one key has a value range that doesn't fit (typical:
+                     * F64 columns whose sign-flipped IEEE-754 encoding
+                     * spans most of the 64-bit space).  Fall back to a
+                     * rank-encoded composite: for each key, run a single-
+                     * key sort to produce a dense rank in [0..K_k), then
+                     * compose the ranks.  Bits per key shrinks from
+                     * "data range" to "ceil(log2 distinct_count)", which
+                     * always fits for n_cols * ceil(log2 nrows) <= 64. */
+                    ray_t* rank_hdrs[n_cols];
+                    uint32_t* ranks[n_cols];
+                    uint32_t rank_max[n_cols];
+                    bool rank_ok = true;
+                    for (uint8_t k = 0; k < n_cols; k++) {
+                        rank_hdrs[k] = NULL; ranks[k] = NULL; rank_max[k] = 0;
+                    }
+                    for (uint8_t k = 0; k < n_cols && rank_ok; k++) {
+                        uint8_t kdesc = descs ? descs[k] : 0;
+                        uint8_t knf   = nulls_first ? nulls_first[k] : !kdesc;
+                        ray_t* col_arg[1] = { cols[k] };
+                        uint8_t desc_arg[1] = { kdesc };
+                        uint8_t nf_arg[1]   = { knf };
+                        ray_t* sk_idx = sort_indices_ex(col_arg, desc_arg,
+                                                         nf_arg, 1, nrows,
+                                                         NULL, NULL);
+                        if (!sk_idx || RAY_IS_ERR(sk_idx)) { rank_ok = false; break; }
+                        int64_t* sk_idx_data = (int64_t*)ray_data(sk_idx);
+                        uint32_t* r = (uint32_t*)scratch_alloc(&rank_hdrs[k],
+                                          (size_t)nrows * sizeof(uint32_t));
+                        if (!r) { ray_release(sk_idx); rank_ok = false; break; }
+                        ranks[k] = r;
+                        /* Dense-rank tie detection must use the same null
+                         * ordering as the sub-sort so that null/non-null
+                         * pairs aren't treated as ties (and so that two
+                         * nulls do collapse to the same rank). */
+                        sort_cmp_ctx_t cctx = {
+                            .vecs = col_arg, .desc = desc_arg,
+                            .nulls_first = nf_arg, .n_sort = 1,
+                        };
+                        uint32_t cur = 0;
+                        r[sk_idx_data[0]] = 0;
+                        for (int64_t i = 1; i < nrows; i++) {
+                            if (sort_cmp(&cctx, sk_idx_data[i-1], sk_idx_data[i]) != 0)
+                                cur++;
+                            r[sk_idx_data[i]] = cur;
+                        }
+                        rank_max[k] = cur;
+                        ray_release(sk_idx);
+                    }
+                    if (rank_ok) {
+                        uint8_t rank_bits[n_cols];
+                        /* Accumulate in a wider type: up to 16 keys * 63
+                         * bits each = 1008, which would wrap a uint8_t. */
+                        uint16_t rank_total = 0;
+                        for (uint8_t k = 0; k < n_cols; k++) {
+                            uint8_t b = 1;
+                            while (((uint64_t)1 << b) <= rank_max[k] && b < 64) b++;
+                            rank_bits[k] = b;
+                            rank_total = (uint16_t)(rank_total + b);
+                        }
+                        if (rank_total <= 64) {
+                            uint8_t rshift[n_cols];
+                            uint16_t accum = 0;
+                            for (int k = n_cols - 1; k >= 0; k--) {
+                                rshift[k] = (uint8_t)accum;
+                                accum = (uint16_t)(accum + rank_bits[k]);
+                            }
+                            uint8_t rcomp_nbytes = (uint8_t)((rank_total + 7) / 8);
+                            if (rcomp_nbytes < 1) rcomp_nbytes = 1;
+                            ray_pool_t* rk_pool =
+                                (nrows >= SMALL_POOL_THRESHOLD) ? pool : NULL;
+                            ray_t* rkeys_hdr;
+                            uint64_t* rkeys = (uint64_t*)scratch_alloc(&rkeys_hdr,
+                                                  (size_t)nrows * sizeof(uint64_t));
+                            if (rkeys) {
+                                for (int64_t i = 0; i < nrows; i++) {
+                                    uint64_t composite = 0;
+                                    for (uint8_t k = 0; k < n_cols; k++)
+                                        composite |= ((uint64_t)ranks[k][i]) << rshift[k];
+                                    rkeys[i] = composite;
+                                    indices[i] = i;
+                                }
+                                iota_done = true;
+                                if (nrows <= RADIX_SORT_THRESHOLD) {
+                                    key_introsort(rkeys, indices, nrows);
+                                    sorted_idx = indices;
+                                    radix_done = true;
+                                } else {
+                                    ray_t *rktmp_hdr, *ritmp_hdr;
+                                    uint64_t* rktmp = (uint64_t*)scratch_alloc(&rktmp_hdr,
+                                                          (size_t)nrows * sizeof(uint64_t));
+                                    int64_t* ritmp = (int64_t*)scratch_alloc(&ritmp_hdr,
+                                                         (size_t)nrows * sizeof(int64_t));
+                                    if (rktmp && ritmp) {
+                                        sorted_idx = msd_radix_sort_run(
+                                            rk_pool, rkeys, indices,
+                                            rktmp, ritmp, nrows, rcomp_nbytes, NULL);
+                                        radix_done = (sorted_idx != NULL);
+                                    }
+                                    if (rktmp_hdr) scratch_free(rktmp_hdr);
+                                    if (sorted_idx != ritmp) {
+                                        if (ritmp_hdr) scratch_free(ritmp_hdr);
+                                    } else {
+                                        radix_itmp_hdr = ritmp_hdr;
+                                    }
+                                }
+                                scratch_free(rkeys_hdr);
+                            }
+                        }
+                    }
+                    for (uint8_t k = 0; k < n_cols; k++)
+                        if (rank_hdrs[k]) scratch_free(rank_hdrs[k]);
+                }
 
                 if (fits) {
                     /* Compute bit-shift for each key: primary key in MSBs */
