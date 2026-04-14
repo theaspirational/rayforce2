@@ -107,7 +107,11 @@ ray_err_t ray_pool_create(ray_pool_t* pool, uint32_t n_workers) {
     atomic_init(&pool->pending, 0);
     atomic_init(&pool->cancelled, 0);
 
-    if (n_workers == 0) {
+    /* RAY_POOL_AUTO (UINT32_MAX) requests auto-sizing; any explicit
+     * count (including 0) is honoured verbatim so callers can ask
+     * for single-threaded mode by passing 0.  The previous 0=auto
+     * semantics made "no workers" unreachable from the public API. */
+    if (n_workers == RAY_POOL_AUTO) {
         uint32_t ncpu = ray_thread_count();
         n_workers = (ncpu > 1) ? ncpu - 1 : 0;
     }
@@ -422,7 +426,9 @@ ray_pool_t* ray_pool_get(void) {
         if (atomic_compare_exchange_strong_explicit(&g_pool_init_state, &expected, 1,
                                                     memory_order_acq_rel,
                                                     memory_order_acquire)) {
-            ray_err_t err = ray_pool_create(&g_pool, 0);
+            /* Lazy default: auto-size. Explicit opt-in via
+             * ray_pool_init() before first use overrides this. */
+            ray_err_t err = ray_pool_create(&g_pool, RAY_POOL_AUTO);
             if (err == RAY_OK) {
                 atomic_store_explicit(&g_pool_init_state, 2, memory_order_release);
                 return &g_pool;

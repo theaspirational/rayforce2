@@ -70,8 +70,14 @@ struct ray_pool {
 /* Total workers = n_workers + 1 (main thread is worker 0) */
 #define ray_pool_total_workers(p) ((p)->n_workers + 1)
 
+/* Sentinel for "auto-detect nproc - 1". Any other value (including 0)
+ * is honoured verbatim — pass 0 for a single-threaded pool with only
+ * the main thread as worker 0. */
+#define RAY_POOL_AUTO  ((uint32_t)-1)
+
 /* Initialize pool with n_workers background threads.
- * Pass 0 to auto-detect (nproc - 1). */
+ * Pass RAY_POOL_AUTO to auto-detect (nproc - 1); pass 0 for single-
+ * threaded mode. */
 ray_err_t ray_pool_create(ray_pool_t* pool, uint32_t n_workers);
 
 /* Shutdown and free all resources */
