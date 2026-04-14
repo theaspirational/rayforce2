@@ -573,27 +573,32 @@ RAY_INLINE int32_t fast_time(const char* p, size_t len, bool* is_null) {
     return ms;
 }
 
-/* Timestamp time component → int64_t microseconds (higher precision) */
-RAY_INLINE int64_t fast_time_us(const char* p, size_t len, bool* is_null) {
+/* Timestamp time component → int64_t nanoseconds.
+ * RAY_TIMESTAMP is nanoseconds since 2000-01-01 (matching
+ * src/lang/format.c:ts_to_parts and csv_write_timestamp).  Accept up
+ * to 9 fractional digits; shorter fractions are right-padded with
+ * zeros, longer ones are truncated. */
+RAY_INLINE int64_t fast_time_ns(const char* p, size_t len, bool* is_null) {
     if (RAY_UNLIKELY(len < 8)) { *is_null = true; return 0; }
     *is_null = false;
     int h  = (p[0]-'0')*10 + (p[1]-'0');
     int mi = (p[3]-'0')*10 + (p[4]-'0');
     int s  = (p[6]-'0')*10 + (p[7]-'0');
     if (RAY_UNLIKELY(h > 23 || mi > 59 || s > 59)) { *is_null = true; return 0; }
-    int64_t us = (int64_t)h * 3600000000LL + (int64_t)mi * 60000000LL +
-                 (int64_t)s * 1000000LL;
+    int64_t ns = (int64_t)h * 3600000000000LL + (int64_t)mi * 60000000000LL +
+                 (int64_t)s * 1000000000LL;
     if (len > 8 && p[8] == '.') {
-        int frac = 0, digits = 0;
-        for (size_t i = 9; i < len && digits < 6; i++, digits++) {
+        int64_t frac = 0;
+        int digits = 0;
+        for (size_t i = 9; i < len && digits < 9; i++, digits++) {
             unsigned di = (unsigned char)p[i] - '0';
             if (di > 9) break;
-            frac = frac * 10 + (int)di;
+            frac = frac * 10 + (int64_t)di;
         }
-        while (digits < 6) { frac *= 10; digits++; }
-        us += frac;
+        while (digits < 9) { frac *= 10; digits++; }
+        ns += frac;
     }
-    return us;
+    return ns;
 }
 
 RAY_INLINE int64_t fast_timestamp(const char* p, size_t len, bool* is_null) {
@@ -602,9 +607,10 @@ RAY_INLINE int64_t fast_timestamp(const char* p, size_t len, bool* is_null) {
     int32_t days = fast_date(p, 10, is_null);
     if (*is_null) return 0;
     bool time_null = false;
-    int64_t time_us = fast_time_us(p + 11, len - 11, &time_null);
+    int64_t time_ns = fast_time_ns(p + 11, len - 11, &time_null);
     if (time_null) { *is_null = true; return 0; }
-    return (int64_t)days * 86400000000LL + time_us;
+    const int64_t NS_PER_DAY = 86400000000000LL;
+    return (int64_t)days * NS_PER_DAY + time_ns;
 }
 
 /* --------------------------------------------------------------------------

@@ -5644,11 +5644,38 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     /* --- 6. Empty path is rejected instead of creating "" or crashing. */
     ASSERT_ER("(write-csv tE \"\")", "type");
 
+    /* --- 7. Temporal round-trip via read-csv.
+     * RAY_TIMESTAMP is stored as nanoseconds since 2000-01-01, and the
+     * CSV emitter writes 9 fractional digits.  read-csv's fast_time_ns
+     * parser must match, otherwise a load-after-save silently rescales
+     * timestamps by 1000x. */
+    ASSERT_EQ(
+        "(set tT (table [d tm ts]"
+        "  (list (as 'DATE [7305])"
+        "        (as 'TIME [3723000])"  /* 01:02:03.000 */
+        "        (as 'TIMESTAMP [86400000000000]))))"  /* 1 day = 2000-01-02 */
+        "(write-csv tT \"rf_test_write_t.csv\")", "0");
+    ASSERT_EQ(
+        "(set rt (read-csv [DATE TIME TIMESTAMP] \"rf_test_write_t.csv\"))"
+        "(at (at rt 'd) 0)", "2020.01.01");
+    ASSERT_EQ("(at (at rt 'tm) 0)", "01:02:03.000");
+    /* Raw underlying ns value preserved: 86.4e12 ns = exactly 1 day. */
+    ASSERT_EQ("(as 'I64 (at (at rt 'ts) 0))", "86400000000000");
+    /* Sub-second precision: 9 digits on write must round-trip. */
+    ASSERT_EQ(
+        "(set tT2 (table [ts] (list (as 'TIMESTAMP [123456789]))))"  /* 123456789 ns */
+        "(write-csv tT2 \"rf_test_write_t2.csv\")", "0");
+    ASSERT_EQ(
+        "(set rt2 (read-csv [TIMESTAMP] \"rf_test_write_t2.csv\"))"
+        "(as 'I64 (at (at rt2 'ts) 0))", "123456789");
+
     remove("rf_test_write_a.csv");
     remove("rf_test_write_b.csv");
     remove("rf_test_write_c.csv");
     remove("rf_test_write_d.csv");
     remove("rf_test_write_e.csv");
+    remove("rf_test_write_t.csv");
+    remove("rf_test_write_t2.csv");
     return MUNIT_OK;
 }
 
