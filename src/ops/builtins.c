@@ -1575,11 +1575,12 @@ ray_t* ray_group_fn(ray_t* x) {
         return d;
     }
 
-    /* Collect unique values; grow the gvals / idx_vecs arrays on demand.
-     * Starting small avoids wasting 16 KB on short columns; doubling keeps
-     * amortised growth O(n). A previous hard cap of 1024 caused large-n
-     * group-by on wide keys (GUID / STR / LIST) to return "limit". */
-    int64_t max_groups = n < 16 ? (n > 0 ? n : 16) : 64;
+    /* Collect unique values; the scalar and RAY_GUID paths grow these
+     * arrays on demand via group_grow().  The RAY_LIST and RAY_STR
+     * paths below still cap at this initial size (they have their own
+     * side buffers that aren't yet wired into group_grow); starting at
+     * 1024 preserves their prior behaviour. */
+    int64_t max_groups = n < 1024 ? n : 1024;
     ray_t* val_block = ray_alloc((size_t)(max_groups * sizeof(int64_t)));
     if (RAY_IS_ERR(val_block)) return val_block;
     int64_t* gvals = (int64_t*)ray_data(val_block);

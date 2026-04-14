@@ -3832,67 +3832,165 @@ static MunitResult test_rf_distinct(const void* params, void* fixture) {
     ASSERT_EQ("(at (at (xasc mk ['x 'y]) 'y) 1)", "10");
     ASSERT_EQ("(at (at (xasc mk ['x 'y]) 'y) 2)", "20");
 
-    // --- rank-then-compose fallback for multi-key sorts whose composite
-    //     bit budget overflows (F64 keys). Tests the fix that made
-    //     (xasc t [Symbol Price]) and friends stop hanging at scale. ---
+    // --- Multi-key sort with overflowing bit budget / wide keys.
+    //     Same fix (rank-then-compose fallback) is exercised by two
+    //     complementary tiers of tests:
+    //
+    //     Tier A (tiny n):  nrows <= 64.  The radix block is skipped
+    //     entirely and the merge-sort path runs with sort_cmp,
+    //     exercising the comparator's per-type branches (including
+    //     the new RAY_GUID memcmp branch).
+    //
+    //     Tier B (n > 64):  enters the radix block, hits the composite
+    //     overflow / has_wide_key gate, and exercises the rank-then-
+    //     compose fallback proper.  Without Tier B the rank-fallback
+    //     branch would never run under test. ---
 
-    // sym + f64: composite budget would be ~3 + 63 = 66 bits.
-    // Must order by symbol alphabetically, then by price ascending.
-    ASSERT_EQ(
-        "(set rk (table [s p] (list [bb aa bb aa] (as 'F64 [2.0 1.0 1.0 2.0]))))"
-        "(at (at (xasc rk ['s 'p]) 's) 0)", "'aa");
-    ASSERT_EQ("(at (at (xasc rk ['s 'p]) 'p) 0)", "1.0");
-    ASSERT_EQ("(at (at (xasc rk ['s 'p]) 'p) 1)", "2.0");
-    ASSERT_EQ("(at (at (xasc rk ['s 'p]) 's) 2)", "'bb");
-    ASSERT_EQ("(at (at (xasc rk ['s 'p]) 'p) 2)", "1.0");
-    ASSERT_EQ("(at (at (xasc rk ['s 'p]) 'p) 3)", "2.0");
-    // xdesc on sym + f64: reverse order.
-    ASSERT_EQ("(at (at (xdesc rk ['s 'p]) 's) 0)", "'bb");
-    ASSERT_EQ("(at (at (xdesc rk ['s 'p]) 'p) 0)", "2.0");
+    // ---- Tier A: merge-sort / small-n coverage ---- */
 
-    // f64 + i64: composite budget ~63 + 2 = 65 bits.
+    // sym + f64, 4 rows: merge sort via sort_cmp's RAY_SYM+RAY_F64 branches.
     ASSERT_EQ(
-        "(set rk2 (table [p s] (list (as 'F64 [3.0 1.0 2.0 1.0]) [2 1 3 2])))"
-        "(at (at (xasc rk2 ['p 's]) 'p) 0)", "1.0");
-    ASSERT_EQ("(at (at (xasc rk2 ['p 's]) 's) 0)", "1");
-    ASSERT_EQ("(at (at (xasc rk2 ['p 's]) 's) 1)", "2");  // tie on p=1.0
-    ASSERT_EQ("(at (at (xasc rk2 ['p 's]) 'p) 2)", "2.0");
-    ASSERT_EQ("(at (at (xasc rk2 ['p 's]) 'p) 3)", "3.0");
+        "(set srka (table [s p] (list [bb aa bb aa] (as 'F64 [2.0 1.0 1.0 2.0]))))"
+        "(at (at (xasc srka ['s 'p]) 's) 0)", "'aa");
+    ASSERT_EQ("(at (at (xasc srka ['s 'p]) 'p) 0)", "1.0");
+    ASSERT_EQ("(at (at (xasc srka ['s 'p]) 'p) 1)", "2.0");
+    ASSERT_EQ("(at (at (xasc srka ['s 'p]) 's) 2)", "'bb");
+    ASSERT_EQ("(at (at (xdesc srka ['s 'p]) 's) 0)", "'bb");
+    ASSERT_EQ("(at (at (xdesc srka ['s 'p]) 'p) 0)", "2.0");
 
-    // Nulls propagate through rank fallback: tied nulls must share a rank
-    // so the secondary key decides ordering among them.
+    // RAY_GUID small-n: merge sort via sort_cmp's new RAY_GUID branch.
+    // Before the fix this returned 0 for every guid pair and produced
+    // an arbitrary order; verify against single-key (asc gs).
     ASSERT_EQ(
-        "(set rk3 (table [s p] (list [0Ns 0Ns aa] (as 'F64 [1.0 2.0 0.5]))))"
-        "(nil? (at (at (xasc rk3 ['s 'p]) 's) 0))", "true");
-    ASSERT_EQ("(at (at (xasc rk3 ['s 'p]) 'p) 0)", "1.0");  // null, then p=1.0
-    ASSERT_EQ("(nil? (at (at (xasc rk3 ['s 'p]) 's) 1))", "true");
-    ASSERT_EQ("(at (at (xasc rk3 ['s 'p]) 'p) 1)", "2.0");
-    ASSERT_EQ("(at (at (xasc rk3 ['s 'p]) 's) 2)", "'aa");
-    ASSERT_EQ("(at (at (xasc rk3 ['s 'p]) 'p) 2)", "0.50");
+        "(set gsa (guid 4)) "
+        "(set srkb (table [g p] (list gsa (as 'F64 [4.0 3.0 2.0 1.0]))))"
+        "(sum (as 'I64 (== (at (xasc srkb ['g 'p]) 'g) (asc gsa))))", "4");
 
-    // RAY_STR as a sort key: previously excluded from can_radix, now
-    // routed through the rank fallback via has_wide_key.
-    ASSERT_EQ(
-        "(set rk4 (table [t p] (list (list \"cc\" \"aa\" \"bb\") (as 'F64 [3.0 1.0 2.0]))))"
-        "(at (at (xasc rk4 ['t 'p]) 't) 0)", "\"aa\"");
-    ASSERT_EQ("(at (at (xasc rk4 ['t 'p]) 't) 1)", "\"bb\"");
-    ASSERT_EQ("(at (at (xasc rk4 ['t 'p]) 't) 2)", "\"cc\"");
+    // ---- Tier B: rank-then-compose fallback (nrows > 64) ----
+    // sort_indices_ex gates the entire radix block on `nrows > 64`;
+    // below that threshold the fallback is never reached. Tables below
+    // deliberately have >= 99 rows. ---
 
-    // RAY_GUID as a sort key: newly accepted by the multi-key path and
-    // compared via 16-byte memcmp. Before the fix this route corrupted
-    // data because can_radix excluded GUID and sort_cmp returned 0 for
-    // every guid pair. Verify the sort completes with all rows intact
-    // and that the g column in the result equals single-key ascending
-    // order of the same guids.
+    // sym + f64 at 100 rows. Uses 0 as one of the prices: 0.0's
+    // sign-flip encoding is INT64_MIN, so the encoded range from 0.0
+    // to any normal value spans ~63 bits; combined with 3 bits for sym
+    // that overflows the 64-bit composite budget and triggers the
+    // rank-then-compose fallback.
+    // s cycles [aa bb] (period 2), p cycles (as 'F64 [0 1 2]) (period
+    // 3), LCM=6. 100/6 = 16 cycles + 4. Sorted groups:
+    //   (aa,0) x17, (aa,1) x16, (aa,2) x17,
+    //   (bb,0) x17, (bb,1) x17, (bb,2) x16
     ASSERT_EQ(
-        "(set gs (guid 4)) "
-        "(set rk5 (table [g p] (list gs (as 'F64 [4.0 3.0 2.0 1.0]))))"
-        "(count (xasc rk5 ['g 'p]))", "4");
-    ASSERT_EQ("(count (xdesc rk5 ['g 'p]))", "4");
-    /* Verify the multi-key guid sort produces the same guid ordering
-     * as the single-key ascending sort of the same guids (which goes
-     * through merge sort + the new RAY_GUID sort_cmp branch). */
-    ASSERT_EQ("(sum (as 'I64 (== (at (xasc rk5 ['g 'p]) 'g) (asc gs))))", "4");
+        "(set rk (table [s p] (list (take [aa bb] 100) (as 'F64 (take [0 1 2] 100)))))"
+        "(set rks (xasc rk ['s 'p]))"
+        "(count rks)", "100");
+    ASSERT_EQ("(at (at rks 's) 0)",  "'aa");
+    ASSERT_EQ("(at (at rks 'p) 0)",  "0.0");
+    ASSERT_EQ("(at (at rks 's) 16)", "'aa");
+    ASSERT_EQ("(at (at rks 'p) 16)", "0.0");
+    ASSERT_EQ("(at (at rks 's) 17)", "'aa");
+    ASSERT_EQ("(at (at rks 'p) 17)", "1.0");
+    ASSERT_EQ("(at (at rks 's) 32)", "'aa");
+    ASSERT_EQ("(at (at rks 'p) 32)", "1.0");
+    ASSERT_EQ("(at (at rks 's) 33)", "'aa");
+    ASSERT_EQ("(at (at rks 'p) 33)", "2.0");
+    ASSERT_EQ("(at (at rks 's) 49)", "'aa");
+    ASSERT_EQ("(at (at rks 'p) 49)", "2.0");
+    ASSERT_EQ("(at (at rks 's) 50)", "'bb");
+    ASSERT_EQ("(at (at rks 'p) 50)", "0.0");
+    ASSERT_EQ("(at (at rks 's) 99)", "'bb");
+    ASSERT_EQ("(at (at rks 'p) 99)", "2.0");
+    // xdesc reverses both key orders.
+    ASSERT_EQ(
+        "(set rksd (xdesc rk ['s 'p]))"
+        "(at (at rksd 's) 0)",  "'bb");
+    ASSERT_EQ("(at (at rksd 'p) 0)",  "2.0");
+    ASSERT_EQ("(at (at rksd 's) 99)", "'aa");
+    ASSERT_EQ("(at (at rksd 'p) 99)", "0.0");
+
+    // f64 + i64 at 100 rows. Includes 0 cast to f64 so the encoded
+    // f64 range spans ~63 bits, blowing the composite budget (63 + 2).
+    // p cycles (as 'F64 [3 0 2]), s cycles [2 1 3]; both period 3, so
+    // 100/3 = 33 cycles + 1. Each (p,s) combo: (3.0,2), (0.0,1),
+    // (2.0,3) repeated.  The extra element (position 99) lands on
+    // cycle index 0 -> (3.0,2) appearing 34 times, the others 33 each.
+    ASSERT_EQ(
+        "(set rk2 (table [p s] (list (as 'F64 (take [3 0 2] 100)) (take [2 1 3] 100))))"
+        "(set rk2s (xasc rk2 ['p 's]))"
+        "(count rk2s)", "100");
+    // Sort order:
+    //   (0.0, 1) x 33 -> 0..32
+    //   (2.0, 3) x 33 -> 33..65
+    //   (3.0, 2) x 34 -> 66..99
+    ASSERT_EQ("(at (at rk2s 'p) 0)",  "0.0");
+    ASSERT_EQ("(at (at rk2s 's) 0)",  "1");
+    ASSERT_EQ("(at (at rk2s 'p) 32)", "0.0");
+    ASSERT_EQ("(at (at rk2s 's) 32)", "1");
+    ASSERT_EQ("(at (at rk2s 'p) 33)", "2.0");
+    ASSERT_EQ("(at (at rk2s 's) 33)", "3");
+    ASSERT_EQ("(at (at rk2s 'p) 65)", "2.0");
+    ASSERT_EQ("(at (at rk2s 's) 65)", "3");
+    ASSERT_EQ("(at (at rk2s 'p) 66)", "3.0");
+    ASSERT_EQ("(at (at rk2s 's) 66)", "2");
+    ASSERT_EQ("(at (at rk2s 'p) 99)", "3.0");
+    ASSERT_EQ("(at (at rk2s 's) 99)", "2");
+
+    // Nulls propagate through rank fallback at scale: tied nulls must
+    // share a rank so the secondary key decides ordering among them.
+    // 99 rows, cycled [0Ns 0Ns aa] and (as 'F64 [1 2 0]). Prices
+    // include 0.0 so the encoded f64 range forces the composite
+    // budget to overflow -> rank fallback runs -> null rank collapsing
+    // is exercised. Pairs: (null,1.0), (null,2.0), (aa,0.0).
+    // After asc sort with default nulls-first: 66 null rows first
+    // (33 with p=1.0, 33 with p=2.0), then 33 aa rows with p=0.0.
+    ASSERT_EQ(
+        "(set rk3 (table [s p] (list (take [0Ns 0Ns aa] 99) (as 'F64 (take [1 2 0] 99)))))"
+        "(set rk3s (xasc rk3 ['s 'p]))"
+        "(count rk3s)", "99");
+    ASSERT_EQ("(nil? (at (at rk3s 's) 0))",  "true");
+    ASSERT_EQ("(at (at rk3s 'p) 0)",         "1.0");
+    ASSERT_EQ("(nil? (at (at rk3s 's) 32))", "true");
+    ASSERT_EQ("(at (at rk3s 'p) 32)",        "1.0");
+    ASSERT_EQ("(nil? (at (at rk3s 's) 33))", "true");
+    ASSERT_EQ("(at (at rk3s 'p) 33)",        "2.0");
+    ASSERT_EQ("(nil? (at (at rk3s 's) 65))", "true");
+    ASSERT_EQ("(at (at rk3s 'p) 65)",        "2.0");
+    ASSERT_EQ("(at (at rk3s 's) 66)",        "'aa");
+    ASSERT_EQ("(at (at rk3s 'p) 66)",        "0.0");
+    ASSERT_EQ("(at (at rk3s 's) 98)",        "'aa");
+
+    // RAY_STR multi-key. 100 rows, three distinct strings, three
+    // distinct prices.  Pre-fix, has_wide_key didn't exist and RAY_STR
+    // wasn't in can_radix, so this would fall into merge sort; now it
+    // takes the rank fallback via the recursive single-key RAY_STR
+    // MSD byte-radix.
+    ASSERT_EQ(
+        "(set rk4 (table [t p] (list (map (fn [x] (as 'STR x)) (take [cc aa bb] 100)) (as 'F64 (take [3.0 1.0 2.0] 100)))))"
+        "(set rk4s (xasc rk4 ['t 'p]))"
+        "(count rk4s)", "100");
+    // aa x 33 (positions 0..32), bb x 33 (33..65), cc x 34 (66..99)
+    ASSERT_EQ("(at (at rk4s 't) 0)",  "\"aa\"");
+    ASSERT_EQ("(at (at rk4s 't) 32)", "\"aa\"");
+    ASSERT_EQ("(at (at rk4s 't) 33)", "\"bb\"");
+    ASSERT_EQ("(at (at rk4s 't) 65)", "\"bb\"");
+    ASSERT_EQ("(at (at rk4s 't) 66)", "\"cc\"");
+    ASSERT_EQ("(at (at rk4s 't) 99)", "\"cc\"");
+
+    // RAY_GUID multi-key. 100 rows built by taking 5 distinct guids and
+    // cycling them 20 times.  has_wide_key routing kicks in, the
+    // recursive single-key sub-sort on guid goes through merge sort
+    // with the new sort_cmp memcmp branch.  Verify the multi-key sort
+    // produces the same guid ordering as the single-key asc sort over
+    // the same guids — if sort_cmp returned 0 for all guid pairs (the
+    // pre-fix symptom) the equality check would fail.
+    ASSERT_EQ(
+        "(set gs (take (guid 5) 100))"
+        "(set rk5 (table [g p] (list gs (as 'F64 (til 100)))))"
+        "(set rk5s (xasc rk5 ['g 'p]))"
+        "(count rk5s)", "100");
+    ASSERT_EQ("(sum (as 'I64 (== (at rk5s 'g) (asc gs))))", "100");
+    // desc also works end to end
+    ASSERT_EQ("(count (xdesc rk5 ['g 'p]))", "100");
 
     return MUNIT_OK;
 }

@@ -3301,7 +3301,16 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
         ray_t* col = ray_table_get_col_idx(tbl, c);
         if (!col) continue;
         col_propagate_str_pool(new_cols[c], col);
-        if (col->type == RAY_SYM && col->sym_dict) {
+        /* sym_dict lives in bytes 8-15 of the header union, which also
+         * hold inline-nullmap bits and slice_offset. Only read it when
+         * the header layout actually exposes the sym_dict/ext_nullmap
+         * interpretation: no slice, and either no nulls or external
+         * nullmap. Otherwise those bytes are bitmap payload / slice
+         * metadata and dereferencing them hands ray_retain garbage. */
+        if (col->type == RAY_SYM &&
+            !(col->attrs & RAY_ATTR_SLICE) &&
+            (!(col->attrs & RAY_ATTR_HAS_NULLS) || (col->attrs & RAY_ATTR_NULLMAP_EXT)) &&
+            col->sym_dict) {
             ray_retain(col->sym_dict);
             new_cols[c]->sym_dict = col->sym_dict;
         }
@@ -3585,7 +3594,16 @@ ray_t* sort_table_by_keys(ray_t* tbl, ray_t* keys, uint8_t descending) {
         ray_t* col = ray_table_get_col_idx(tbl, c);
         if (!col) continue;
         col_propagate_str_pool(new_cols[c], col);
-        if (col->type == RAY_SYM && col->sym_dict) {
+        /* sym_dict lives in bytes 8-15 of the header union, which also
+         * hold inline-nullmap bits and slice_offset. Only read it when
+         * the header layout actually exposes the sym_dict/ext_nullmap
+         * interpretation: no slice, and either no nulls or external
+         * nullmap. Otherwise those bytes are bitmap payload / slice
+         * metadata and dereferencing them hands ray_retain garbage. */
+        if (col->type == RAY_SYM &&
+            !(col->attrs & RAY_ATTR_SLICE) &&
+            (!(col->attrs & RAY_ATTR_HAS_NULLS) || (col->attrs & RAY_ATTR_NULLMAP_EXT)) &&
+            col->sym_dict) {
             ray_retain(col->sym_dict);
             new_cols[c]->sym_dict = col->sym_dict;
         }
