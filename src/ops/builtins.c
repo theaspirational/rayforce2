@@ -1541,6 +1541,115 @@ ray_t* ray_where_fn(ray_t* x) {
 }
 
 /* (group vec) -> dict mapping each unique value to its indices */
+/* ---------------------------------------------------------------------------
+ * Open-address hash set for ray_group_fn's scalar / GUID fast paths.
+ *
+ * Each slot holds either GHT_EMPTY or an already-allocated group index.
+ * Lookups compare keys by calling back into the caller with the stored
+ * group index — the caller already knows whether the key shape is a
+ * plain int64 (scalar) or 16 bytes of guid material in the source
+ * column.  Load factor is capped at 0.5; grow on overflow.
+ *
+ * The table is ref-counted via ray_alloc so the main bookkeeping code
+ * can free it in one place on every exit path.
+ * ------------------------------------------------------------------------- */
+
+#define GHT_EMPTY 0xFFFFFFFFu
+
+typedef struct group_ht_t {
+    ray_t*     block;   /* backing ray_alloc block */
+    uint32_t*  slots;   /* cap entries */
+    uint32_t   cap;     /* power of 2 */
+    uint32_t   mask;    /* cap - 1 */
+    uint32_t   count;   /* live entries */
+} group_ht_t;
+
+static bool group_ht_init(group_ht_t* h, uint32_t initial_cap) {
+    uint32_t cap = 16;
+    while (cap < initial_cap) cap *= 2;
+    h->block = ray_alloc((size_t)cap * sizeof(uint32_t));
+    if (!h->block || RAY_IS_ERR(h->block)) { h->block = NULL; return false; }
+    h->slots = (uint32_t*)ray_data(h->block);
+    h->cap   = cap;
+    h->mask  = cap - 1;
+    h->count = 0;
+    for (uint32_t i = 0; i < cap; i++) h->slots[i] = GHT_EMPTY;
+    return true;
+}
+
+static void group_ht_free(group_ht_t* h) {
+    if (h->block) ray_free(h->block);
+    h->block = NULL;
+    h->slots = NULL;
+    h->cap = h->mask = h->count = 0;
+}
+
+/* Rehash callback: given the stored group index, return the hash for
+ * it.  This lets us grow without recomputing raw keys — caller knows
+ * how to translate gi back to a key. */
+typedef uint64_t (*group_ht_gi_hash_fn)(uint32_t gi, void* ctx);
+
+static bool group_ht_grow(group_ht_t* h, group_ht_gi_hash_fn hash_gi, void* ctx) {
+    uint32_t new_cap = h->cap * 2;
+    if (new_cap < h->cap) return false;  /* overflow */
+    ray_t* new_block = ray_alloc((size_t)new_cap * sizeof(uint32_t));
+    if (!new_block || RAY_IS_ERR(new_block)) return false;
+    uint32_t* new_slots = (uint32_t*)ray_data(new_block);
+    uint32_t new_mask = new_cap - 1;
+    for (uint32_t i = 0; i < new_cap; i++) new_slots[i] = GHT_EMPTY;
+    for (uint32_t i = 0; i < h->cap; i++) {
+        uint32_t gi = h->slots[i];
+        if (gi == GHT_EMPTY) continue;
+        uint64_t hh = hash_gi(gi, ctx);
+        uint32_t slot = (uint32_t)(hh & new_mask);
+        while (new_slots[slot] != GHT_EMPTY) slot = (slot + 1) & new_mask;
+        new_slots[slot] = gi;
+    }
+    ray_free(h->block);
+    h->block = new_block;
+    h->slots = new_slots;
+    h->cap   = new_cap;
+    h->mask  = new_mask;
+    return true;
+}
+
+static inline uint64_t mix64(uint64_t h) {
+    /* Murmur3 fmix64 */
+    h ^= h >> 33; h *= 0xFF51AFD7ED558CCDULL;
+    h ^= h >> 33; h *= 0xC4CEB9FE1A85EC53ULL;
+    h ^= h >> 33;
+    return h;
+}
+
+static inline uint64_t hash_guid(const uint8_t* g) {
+    uint64_t a, b;
+    memcpy(&a, g,     8);
+    memcpy(&b, g + 8, 8);
+    return mix64(a ^ (b * 0x9E3779B97F4A7C15ULL));
+}
+
+static inline uint64_t hash_i64(int64_t v) {
+    return mix64((uint64_t)v);
+}
+
+/* Context for GUID rehash: the 16-byte source base and, indirectly,
+ * gvals — which stores the row_idx of the first occurrence per group. */
+typedef struct {
+    const uint8_t* base;
+    const int64_t* gvals;
+} ght_guid_ctx_t;
+
+static uint64_t ght_guid_hash_gi(uint32_t gi, void* ctx) {
+    ght_guid_ctx_t* c = (ght_guid_ctx_t*)ctx;
+    return hash_guid(c->base + c->gvals[gi] * 16);
+}
+
+typedef struct { const int64_t* gvals; } ght_i64_ctx_t;
+static uint64_t ght_i64_hash_gi(uint32_t gi, void* ctx) {
+    ght_i64_ctx_t* c = (ght_i64_ctx_t*)ctx;
+    return hash_i64(c->gvals[gi]);
+}
+
 /* Grow the per-group bookkeeping arrays used by ray_group_fn.
  * Doubles capacity; copies existing entries; returns false on OOM.
  * Caller is responsible for cleaning up and returning an error if this fails. */
@@ -1636,31 +1745,65 @@ ray_t* ray_group_fn(ray_t* x) {
         return dict;
     }
 
-    /* RAY_GUID: 16-byte fixed-width grouping via memcmp */
+    /* RAY_GUID: 16-byte fixed-width grouping via open-address hash set
+     * keyed on the guid bytes.  Previously this was an O(N²) linear
+     * scan against every existing group, which made (group guid_col)
+     * and (select ... by: OrderId) on a 10M row table effectively
+     * infinite. */
     if (x->type == RAY_GUID) {
         const uint8_t* base = (const uint8_t*)ray_data(x);
+        group_ht_t ht;
+        uint32_t seed_cap = (uint32_t)(n < 64 ? 64 : (n < 1048576 ? (n * 2) : 2097152));
+        if (!group_ht_init(&ht, seed_cap)) {
+            ray_free(val_block); ray_free(ivblock);
+            return ray_error("oom", NULL);
+        }
+        ght_guid_ctx_t gctx = { .base = base, .gvals = gvals };
         for (int64_t i = 0; i < n; i++) {
             const uint8_t* cur = base + i * 16;
-            int64_t gi = -1;
-            for (int64_t g = 0; g < ngroups; g++) {
-                const uint8_t* gp = base + gvals[g] * 16;
-                if (memcmp(gp, cur, 16) == 0) { gi = g; break; }
+            uint64_t h = hash_guid(cur);
+            uint32_t slot = (uint32_t)(h & ht.mask);
+            uint32_t gi_found = GHT_EMPTY;
+            while (ht.slots[slot] != GHT_EMPTY) {
+                uint32_t gi = ht.slots[slot];
+                if (memcmp(base + gvals[gi] * 16, cur, 16) == 0) {
+                    gi_found = gi;
+                    break;
+                }
+                slot = (slot + 1) & ht.mask;
             }
-            if (gi < 0) {
+            int64_t gi;
+            if (gi_found != GHT_EMPTY) {
+                gi = gi_found;
+            } else {
                 if (ngroups >= max_groups) {
                     if (!group_grow(&val_block, &ivblock, &gvals, &idx_vecs,
                                     ngroups, &max_groups)) {
                         for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                        group_ht_free(&ht);
                         ray_free(val_block); ray_free(ivblock);
                         return ray_error("oom", NULL);
                     }
+                    gctx.gvals = gvals;
                 }
                 gi = ngroups++;
                 gvals[gi] = i;  /* store row index of first occurrence */
                 idx_vecs[gi] = ray_vec_new(RAY_I64, 0);
+                ht.slots[slot] = (uint32_t)gi;
+                ht.count++;
+                /* Grow at load factor 0.5 */
+                if (ht.count * 2 > ht.cap) {
+                    if (!group_ht_grow(&ht, ght_guid_hash_gi, &gctx)) {
+                        for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                        group_ht_free(&ht);
+                        ray_free(val_block); ray_free(ivblock);
+                        return ray_error("oom", NULL);
+                    }
+                }
             }
             idx_vecs[gi] = ray_vec_append(idx_vecs[gi], &i);
         }
+        group_ht_free(&ht);
         ray_t* dict = ray_list_new((int32_t)(ngroups * 2));
         if (RAY_IS_ERR(dict)) goto gfail;
         dict->attrs |= RAY_ATTR_DICT;
@@ -1738,6 +1881,17 @@ ray_t* ray_group_fn(ray_t* x) {
         return dict;
     }
 
+    /* Scalar fast path: every primitive-typed vector packs its group
+     * key into an int64 (sym id, raw integer, date/time/timestamp, bool).
+     * Use an open-address hash set so high-cardinality group-by stays
+     * linear in n rather than the historical O(N²) per-row linear scan. */
+    group_ht_t ht;
+    uint32_t seed_cap = (uint32_t)(n < 64 ? 64 : (n < 1048576 ? (n * 2) : 2097152));
+    if (!group_ht_init(&ht, seed_cap)) {
+        ray_free(val_block); ray_free(ivblock);
+        return ray_error("oom", NULL);
+    }
+    ght_i64_ctx_t sctx = { .gvals = gvals };
     for (int64_t i = 0; i < n; i++) {
         int64_t v;
         if (x->type == RAY_SYM || x->type == RAY_I64 || x->type == RAY_TIMESTAMP)
@@ -1749,25 +1903,45 @@ ray_t* ray_group_fn(ray_t* x) {
         else
             v = i;
 
-        int64_t gi = -1;
-        for (int64_t g = 0; g < ngroups; g++) {
-            if (gvals[g] == v) { gi = g; break; }
+        uint64_t h = hash_i64(v);
+        uint32_t slot = (uint32_t)(h & ht.mask);
+        uint32_t gi_found = GHT_EMPTY;
+        while (ht.slots[slot] != GHT_EMPTY) {
+            uint32_t gi = ht.slots[slot];
+            if (gvals[gi] == v) { gi_found = gi; break; }
+            slot = (slot + 1) & ht.mask;
         }
-        if (gi < 0) {
+        int64_t gi;
+        if (gi_found != GHT_EMPTY) {
+            gi = gi_found;
+        } else {
             if (ngroups >= max_groups) {
                 if (!group_grow(&val_block, &ivblock, &gvals, &idx_vecs,
                                 ngroups, &max_groups)) {
                     for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                    group_ht_free(&ht);
                     ray_free(val_block); ray_free(ivblock);
                     return ray_error("oom", NULL);
                 }
+                sctx.gvals = gvals;
             }
             gi = ngroups++;
             gvals[gi] = v;
             idx_vecs[gi] = ray_vec_new(RAY_I64, 0);
+            ht.slots[slot] = (uint32_t)gi;
+            ht.count++;
+            if (ht.count * 2 > ht.cap) {
+                if (!group_ht_grow(&ht, ght_i64_hash_gi, &sctx)) {
+                    for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                    group_ht_free(&ht);
+                    ray_free(val_block); ray_free(ivblock);
+                    return ray_error("oom", NULL);
+                }
+            }
         }
         idx_vecs[gi] = ray_vec_append(idx_vecs[gi], &i);
     }
+    group_ht_free(&ht);
 
     /* Build dict */
     ray_t* dict = ray_list_new((int32_t)(ngroups * 2));

@@ -1576,35 +1576,44 @@ static void csv_write_date(csv_writer_t* w, int32_t v) {
 }
 
 static void csv_write_time(csv_writer_t* w, int32_t ms) {
-    /* ms since midnight (may be negative). Normalise modulo one day. */
-    int32_t day_ms = 86400000;
-    int32_t t = ms % day_ms;
-    if (t < 0) t += day_ms;
-    uint32_t ums = (uint32_t)t;
-    uint32_t h = ums / 3600000;
-    uint32_t mi = (ums % 3600000) / 60000;
-    uint32_t s = (ums % 60000) / 1000;
-    uint32_t frac = ums % 1000;
+    /* RAY_TIME is a signed ms-of-day. Negative values represent
+     * negative durations (kdb+/rayforce1 convention); render them
+     * with a leading "-" and the absolute magnitude rather than
+     * wrapping modulo one day, which would lose the sign. */
+    int32_t sign = ms < 0 ? -1 : 1;
+    /* Absolute value: handle INT32_MIN by widening. */
+    uint32_t u = (ms == INT32_MIN) ? (uint32_t)INT32_MAX + 1u : (uint32_t)(sign == -1 ? -ms : ms);
+    uint32_t h    = u / 3600000u;
+    uint32_t mi   = (u % 3600000u) / 60000u;
+    uint32_t s    = (u % 60000u)   / 1000u;
+    uint32_t frac = u % 1000u;
+    if (sign == -1) cw_putc(w, '-');
     if (frac) cw_printf(w, "%02u:%02u:%02u.%03u", h, mi, s, frac);
     else      cw_printf(w, "%02u:%02u:%02u", h, mi, s);
 }
 
-static void csv_write_timestamp(csv_writer_t* w, int64_t us) {
-    /* Floored-division split into days + intraday microseconds so
-     * negative timestamps produce a well-formed date. C's / rounds
-     * toward zero, so correct after the fact. */
-    int64_t day_us = 86400000000LL;
-    int64_t days   = us / day_us;
-    int64_t time_us = us % day_us;
-    if (time_us < 0) { days--; time_us += day_us; }
+static void csv_write_timestamp(csv_writer_t* w, int64_t ns) {
+    /* RAY_TIMESTAMP stores *nanoseconds* since 2000-01-01, matching
+     * the language-level formatter (src/lang/format.c:ts_to_parts).
+     * Splitting with C's truncating / and % rounds toward zero, so
+     * fix up after the fact for negative values. */
+    const int64_t NS_PER_DAY = 86400000000000LL;
+    int64_t days   = ns / NS_PER_DAY;
+    int64_t ns_in  = ns % NS_PER_DAY;
+    if (ns_in < 0) { days--; ns_in += NS_PER_DAY; }
+    /* int64 ns / NS_PER_DAY is bounded by ±~106,752 days above INT32,
+     * so even INT64_MIN fits once converted to days. Still, use
+     * int64 through csv_write_date by taking the low bits — any
+     * timestamp that actually fits in an int64 ns count produces a
+     * days value well within int32 range (~±5.88M years). */
     csv_write_date(w, (int32_t)days);
     cw_putc(w, 'T');
-    uint64_t tus = (uint64_t)time_us;
-    uint32_t h    = (uint32_t)(tus / 3600000000ULL);
-    uint32_t mi   = (uint32_t)((tus % 3600000000ULL) / 60000000ULL);
-    uint32_t s    = (uint32_t)((tus % 60000000ULL) / 1000000ULL);
-    uint32_t frac = (uint32_t)(tus % 1000000ULL);
-    if (frac) cw_printf(w, "%02u:%02u:%02u.%06u", h, mi, s, frac);
+    uint64_t tns  = (uint64_t)ns_in;
+    uint32_t h    = (uint32_t)(tns / 3600000000000ULL);
+    uint32_t mi   = (uint32_t)((tns % 3600000000000ULL) / 60000000000ULL);
+    uint32_t s    = (uint32_t)((tns % 60000000000ULL)   / 1000000000ULL);
+    uint32_t frac = (uint32_t)(tns % 1000000000ULL);
+    if (frac) cw_printf(w, "%02u:%02u:%02u.%09u", h, mi, s, frac);
     else      cw_printf(w, "%02u:%02u:%02u", h, mi, s);
 }
 
