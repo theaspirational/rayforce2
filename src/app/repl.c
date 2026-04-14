@@ -939,9 +939,11 @@ int ray_repl_run_file(const char* path) {
 
     /* File mode matches eval_and_print's structure so -t 1 / :t 1
      * produces the same span layout (parse / eval / materialize) as
-     * REPL input, not one opaque "eval" tick.  Colors follow whether
-     * stdout is a TTY — a piped run stays ANSI-free. */
-    bool use_color = isatty(fileno(stdout));
+     * REPL input, not one opaque "eval" tick.  Colors are keyed per
+     * stream: stdout (result + profile tree) and stderr (errors)
+     * may be redirected independently, e.g. `rayforce -t 1 f.rfl 2>log`. */
+    bool color_out = isatty(fileno(stdout));
+    bool color_err = isatty(fileno(stderr));
     bool profiling = g_ray_profile.active;
 
     if (profiling) {
@@ -978,16 +980,17 @@ int ray_repl_run_file(const char* path) {
 
     int rc;
     if (RAY_IS_ERR(result)) {
-        repl_print_result(stderr, result, use_color);
+        repl_print_result(stderr, result, color_err);
         rc = 1;
     } else {
         if (result) {
-            repl_print_result(stdout, result, use_color);
+            repl_print_result(stdout, result, color_out);
             ray_release(result);
         }
         rc = 0;
     }
 
-    if (profiling) profile_print(use_color);
+    /* profile tree goes to stdout via profile_print; honour stdout's tty. */
+    if (profiling) profile_print(color_out);
     return rc;
 }
