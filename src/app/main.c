@@ -24,6 +24,7 @@
 #include "core/poll.h"
 #include "core/ipc.h"
 #include "core/pool.h"
+#include "core/profile.h"
 #include "app/repl.h"
 #include "core/runtime.h"
 #include <rayforce.h>
@@ -40,20 +41,38 @@ int main(int argc, char** argv) {
     int interactive = 0;
     const char* file = NULL;
     uint16_t port = 0;
-    int n_threads = -1;   /* -1 = auto (ncpu - 1) */
+    int n_cores = -1;      /* -1 = leave pool at lazy ncpu-1 default */
+    int timeit_init = 0;   /* -t N: enable profiler at startup */
     const char* auth_pw = NULL;
     bool auth_restricted = false;
 
-    /* Parse args: [-i] [-p PORT] [-t N] [-u|-U PW] [file.rfl] */
+    /* Parse args. Flag set matches rayforce1:
+     *   -f FILE          run script file
+     *   -p PORT          IPC listen port
+     *   -c N             worker-pool size (0 = auto: ncpu - 1)
+     *   -t N             enable timeit at startup (N != 0 turns on)
+     *   -r N             repl mode (1 = enabled, 0 = disabled)
+     *   -i               interactive
+     * Plus rayforce2-specific:
+     *   -u PW / -U PW    auth password (plain / restricted)
+     *   -h               help
+     */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--interactive") == 0)
             interactive = 1;
         else if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) && i + 1 < argc)
             port = (uint16_t)atoi(argv[++i]);
-        else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--threads") == 0) && i + 1 < argc) {
+        else if ((strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--cores") == 0) && i + 1 < argc) {
             int v = atoi(argv[++i]);
             if (v < 0) v = 0;
-            n_threads = v;
+            n_cores = v;
+        }
+        else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--timeit") == 0) && i + 1 < argc) {
+            int v = atoi(argv[++i]);
+            timeit_init = (v != 0);
+        }
+        else if ((strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--file") == 0) && i + 1 < argc) {
+            file = argv[++i];
         }
         else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             auth_pw = argv[++i];
@@ -65,11 +84,13 @@ int main(int argc, char** argv) {
         }
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stdout,
-                "usage: %s [-i] [-p PORT] [-t N] [-u PW | -U PW] [file.rfl]\n"
-                "  -i, --interactive   start the REPL even after running a file\n"
+                "usage: %s [-f file] [-p port] [-c cores] [-t 0|1] [-i]"
+                " [-u PW | -U PW] [file.rfl]\n"
+                "  -f, --file FILE     run script file (or pass as a positional arg)\n"
                 "  -p, --port PORT     listen for IPC clients on PORT\n"
-                "  -t, --threads N     worker-pool size (default: ncpu - 1,\n"
-                "                      0 disables the pool entirely)\n"
+                "  -c, --cores N       worker-pool size (0 = auto: ncpu - 1, default)\n"
+                "  -t, --timeit N      enable profiler at startup (N != 0)\n"
+                "  -i, --interactive   start the REPL even after running a file\n"
                 "  -u PW               set plain auth password\n"
                 "  -U PW               set restricted auth password\n"
                 "  -h, --help          show this message\n",
@@ -82,14 +103,19 @@ int main(int argc, char** argv) {
     }
 
     /* Initialise the worker pool before anything else that might use it
-     * (file load, REPL eval, builtins).  If -t wasn't given, leave the
+     * (file load, REPL eval, builtins).  If -c wasn't given, leave the
      * pool to its lazy default on first use. */
-    if (n_threads >= 0) {
-        ray_err_t err = ray_pool_init((uint32_t)n_threads);
+    if (n_cores >= 0) {
+        ray_err_t err = ray_pool_init((uint32_t)n_cores);
         if (err != RAY_OK)
             fprintf(stderr, "warning: ray_pool_init(%d) failed (%d)\n",
-                    n_threads, (int)err);
+                    n_cores, (int)err);
     }
+
+    /* -t at startup flips the global profiler flag. The REPL reads
+     * g_ray_profile.active into repl->timeit on create. */
+    if (timeit_init)
+        g_ray_profile.active = true;
 
     ray_poll_t* poll = ray_poll_create();
 

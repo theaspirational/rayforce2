@@ -372,6 +372,9 @@ ray_repl_t* ray_repl_create(ray_poll_t* poll) {
     repl->_block = block;
     repl->poll   = poll;
     repl->id     = -1;
+    /* Inherit profiler state set at startup (-t N) so the banner
+     * and the first eval-and-print both see the correct flag. */
+    repl->timeit = g_ray_profile.active;
 
     if (isatty(STDIN_FD)) {
         repl->term = ray_term_create();
@@ -502,7 +505,7 @@ static bool handle_command(ray_repl_t* repl, const char* str, size_t len) {
         fprintf(stdout,
             "  :?         - Displays help.\n"
             "  :t         - Toggle profiling on/off.\n"
-            "  :t <expr>  - Evaluate <expr> and print elapsed wall time.\n"
+            "  :t 0|1     - Explicitly disable / enable profiling.\n"
             "  :env       - Lists defined variables.\n"
             "  :clear     - Clears screen.\n"
             "  :q         - Exits the application.");
@@ -513,35 +516,36 @@ static bool handle_command(ray_repl_t* repl, const char* str, size_t len) {
 
     if (cmd_match(cmd, clen, "t", 1, &arg, &arg_len) ||
         cmd_match(cmd, clen, "timeit", 6, &arg, &arg_len)) {
+        /* ":t N"  (N != 0) -> enable profiler
+         * ":t 0"           -> disable profiler
+         * ":t"             -> toggle (convenience, no rayforce1 equivalent) */
         if (arg && arg_len > 0) {
-            /* :t <expr> — evaluate expr once, print its result and
-             * the wall-clock elapsed ms. Does not toggle the profiler.
-             * Keep the expression's result visible (unlike the timeit
-             * builtin, which discards it).
-             * cmd_match returns a non-null-terminated slice; eval_and_print
-             * needs a C string, so copy into a stack-sized buffer. */
-            char buf_stack[4096];
-            if (arg_len >= sizeof(buf_stack)) {
+            /* Parse a small integer prefix from arg. Reject anything
+             * else so ":t foo" doesn't silently turn profiling off. */
+            size_t i = 0;
+            while (i < arg_len && (arg[i] == ' ' || arg[i] == '\t')) i++;
+            int sign = 1;
+            if (i < arg_len && (arg[i] == '+' || arg[i] == '-')) {
+                if (arg[i] == '-') sign = -1;
+                i++;
+            }
+            if (i >= arg_len || arg[i] < '0' || arg[i] > '9') {
                 if (color) fprintf(stdout, "\033[1;33m");
-                fprintf(stdout, ". :t expression too long (max %zu bytes).",
-                        sizeof(buf_stack) - 1);
+                fprintf(stdout, ". :t expects an integer (0 = off, 1 = on).");
                 if (color) fprintf(stdout, "\033[0m");
                 fprintf(stdout, "\n");
                 return true;
             }
-            memcpy(buf_stack, arg, arg_len);
-            buf_stack[arg_len] = '\0';
-            int64_t t0 = ray_profile_now_ns();
-            eval_and_print(repl->term, buf_stack, color, false);
-            int64_t t1 = ray_profile_now_ns();
-            double ms = (double)(t1 - t0) / 1e6;
-            if (color) fprintf(stdout, "\033[1;33m");
-            fprintf(stdout, ". elapsed %.3f ms", ms);
-            if (color) fprintf(stdout, "\033[0m");
-            fprintf(stdout, "\n");
-            return true;
+            int64_t val = 0;
+            while (i < arg_len && arg[i] >= '0' && arg[i] <= '9') {
+                val = val * 10 + (arg[i] - '0');
+                i++;
+            }
+            val *= sign;
+            repl->timeit = (val != 0);
+        } else {
+            repl->timeit = !repl->timeit;
         }
-        repl->timeit = !repl->timeit;
         g_ray_profile.active = repl->timeit;
         if (color) fprintf(stdout, "\033[1;33m");
         fprintf(stdout, ". Timeit is %s.", repl->timeit ? "on" : "off");
