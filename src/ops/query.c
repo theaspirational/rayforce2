@@ -111,16 +111,20 @@ static uint16_t resolve_agg_opcode(int64_t sym_id) {
     if (!s) return 0;
     const char* name = ray_str_ptr(s);
     size_t len = ray_str_len(s);
-    if (len == 3 && memcmp(name, "sum", 3) == 0) return OP_SUM;
-    if (len == 3 && memcmp(name, "avg", 3) == 0) return OP_AVG;
-    if (len == 3 && memcmp(name, "min", 3) == 0) return OP_MIN;
-    if (len == 3 && memcmp(name, "max", 3) == 0) return OP_MAX;
-    if (len == 3 && memcmp(name, "dev", 3) == 0) return OP_STDDEV;
-    if (len == 3 && memcmp(name, "var", 3) == 0) return OP_VAR;
-    if (len == 4 && memcmp(name, "prod", 4) == 0) return OP_PROD;
-    if (len == 4 && memcmp(name, "last", 4) == 0) return OP_LAST;
+    if (len == 3 && memcmp(name, "sum",   3) == 0) return OP_SUM;
+    if (len == 3 && memcmp(name, "avg",   3) == 0) return OP_AVG;
+    if (len == 3 && memcmp(name, "min",   3) == 0) return OP_MIN;
+    if (len == 3 && memcmp(name, "max",   3) == 0) return OP_MAX;
+    if (len == 3 && memcmp(name, "dev",   3) == 0) return OP_STDDEV;
+    if (len == 3 && memcmp(name, "var",   3) == 0) return OP_VAR;
+    if (len == 4 && memcmp(name, "prod",  4) == 0) return OP_PROD;
+    if (len == 4 && memcmp(name, "last",  4) == 0) return OP_LAST;
     if (len == 5 && memcmp(name, "count", 5) == 0) return OP_COUNT;
     if (len == 5 && memcmp(name, "first", 5) == 0) return OP_FIRST;
+    if (len == 6 && memcmp(name, "stddev",6) == 0) return OP_STDDEV;
+    if (len == 7 && memcmp(name, "dev_pop",      7) == 0) return OP_STDDEV_POP;
+    if (len == 7 && memcmp(name, "var_pop",      7) == 0) return OP_VAR_POP;
+    if (len == 10 && memcmp(name, "stddev_pop", 10) == 0) return OP_STDDEV_POP;
     return 0;
 }
 
@@ -696,16 +700,18 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
                 ray_op_t* arg = compile_expr_dag(g, elems[1]);
                 if (!arg) return NULL;
                 switch (agg_op) {
-                    case OP_SUM:    return ray_sum(g, arg);
-                    case OP_AVG:    return ray_avg(g, arg);
-                    case OP_MIN:    return ray_min_op(g, arg);
-                    case OP_MAX:    return ray_max_op(g, arg);
-                    case OP_COUNT:  return ray_count(g, arg);
-                    case OP_FIRST:  return ray_first(g, arg);
-                    case OP_LAST:   return ray_last(g, arg);
-                    case OP_PROD:   return ray_prod(g, arg);
-                    case OP_STDDEV: return ray_stddev(g, arg);
-                    case OP_VAR:    return ray_var(g, arg);
+                    case OP_SUM:         return ray_sum(g, arg);
+                    case OP_AVG:         return ray_avg(g, arg);
+                    case OP_MIN:         return ray_min_op(g, arg);
+                    case OP_MAX:         return ray_max_op(g, arg);
+                    case OP_COUNT:       return ray_count(g, arg);
+                    case OP_FIRST:       return ray_first(g, arg);
+                    case OP_LAST:        return ray_last(g, arg);
+                    case OP_PROD:        return ray_prod(g, arg);
+                    case OP_STDDEV:      return ray_stddev(g, arg);
+                    case OP_STDDEV_POP:  return ray_stddev_pop(g, arg);
+                    case OP_VAR:         return ray_var(g, arg);
+                    case OP_VAR_POP:     return ray_var_pop(g, arg);
                     default: return NULL;
                 }
             }
@@ -3628,6 +3634,353 @@ static ray_t* antijoin_impl(ray_t** args, int64_t n) {
 
 ray_t* ray_anti_join_fn(ray_t** args, int64_t n) { return antijoin_impl(args, n); }
 
+/* ------------------------------------------------------------------------ */
+/* window-join parallel worker                                              */
+/* ------------------------------------------------------------------------ */
+
+#define WJ_MAX_AGG 16
+
+typedef struct {
+    int64_t cnt;
+    int64_t sum_i;
+    double  sum_f;
+    int64_t sum_sq_i;
+    double  sum_sq_f;
+    int64_t extreme_i;
+    double  extreme_f;
+    int64_t prod_i;
+    double  prod_f;
+} wj_acc_t;
+
+typedef struct {
+    int64_t  left_nrows;
+    int64_t  right_nrows;
+    int64_t  n_eq;
+    int64_t  n_agg;
+
+    /* Left-row metadata — pre-extracted to int64 so workers can read
+     * without touching any ray_t objects (no locking, no allocation). */
+    const int64_t*  lo_arr;
+    const int64_t*  hi_arr;
+    const int64_t*  left_eq_arr[WJ_MAX_AGG];
+
+    /* Right-side sort order and time column (sorted rank -> original idx) */
+    const int64_t*  right_sort;
+    const int64_t*  rt_time_i;
+
+    /* Right equality columns (raw), kept for binary-search compares */
+    const void*     eq_data[WJ_MAX_AGG];
+    int8_t          eq_type[WJ_MAX_AGG];
+    uint8_t         eq_attrs[WJ_MAX_AGG];
+
+    /* Per-agg metadata and preloaded sorted source vectors */
+    uint8_t         agg_raw[WJ_MAX_AGG];
+    uint16_t        agg_ops[WJ_MAX_AGG];
+    int8_t          agg_result_types[WJ_MAX_AGG];
+    int             agg_is_float[WJ_MAX_AGG];
+    const int64_t*  sorted_i[WJ_MAX_AGG];
+    const double*   sorted_f[WJ_MAX_AGG];
+    const uint8_t*  sorted_nn[WJ_MAX_AGG];
+
+    /* Per-agg result output — writers index by lr directly */
+    void*           result_data[WJ_MAX_AGG];
+    uint8_t*        result_null[WJ_MAX_AGG];  /* 1 byte per row: 1 = null */
+} wj_scan_ctx_t;
+
+static void wj_scan_fn(void* ctx_, uint32_t worker_id, int64_t start, int64_t end) {
+    (void)worker_id;
+    wj_scan_ctx_t* c = (wj_scan_ctx_t*)ctx_;
+    wj_acc_t acc[WJ_MAX_AGG];
+    int64_t  n_eq   = c->n_eq;
+    int64_t  n_agg  = c->n_agg;
+    int64_t  rn     = c->right_nrows;
+    const int64_t* right_sort = c->right_sort;
+    const int64_t* rt_time_i  = c->rt_time_i;
+
+    for (int64_t lr = start; lr < end; lr++) {
+        int64_t lo = c->lo_arr[lr];
+        int64_t hi = c->hi_arr[lr];
+
+        int64_t target_eq[WJ_MAX_AGG];
+        for (int64_t e = 0; e < n_eq; e++)
+            target_eq[e] = c->left_eq_arr[e][lr];
+
+        /* lower_bound: first rank with (eq, time) >= (target_eq, lo) */
+        int64_t lb = 0, lb_hi = rn;
+        while (lb < lb_hi) {
+            int64_t m = (lb + lb_hi) >> 1;
+            int64_t ri = right_sort[m];
+            int cmp = 0;
+            for (int64_t e = 0; e < n_eq && cmp == 0; e++) {
+                int64_t rv = read_col_i64(c->eq_data[e], ri, c->eq_type[e], c->eq_attrs[e]);
+                if (rv < target_eq[e]) cmp = -1;
+                else if (rv > target_eq[e]) cmp = 1;
+            }
+            if (cmp == 0 && rt_time_i[ri] < lo) cmp = -1;
+            if (cmp < 0) lb = m + 1; else lb_hi = m;
+        }
+        int64_t ub = lb, ub_hi = rn;
+        while (ub < ub_hi) {
+            int64_t m = (ub + ub_hi) >> 1;
+            int64_t ri = right_sort[m];
+            int cmp = 0;
+            for (int64_t e = 0; e < n_eq && cmp == 0; e++) {
+                int64_t rv = read_col_i64(c->eq_data[e], ri, c->eq_type[e], c->eq_attrs[e]);
+                if (rv < target_eq[e]) cmp = -1;
+                else if (rv > target_eq[e]) cmp = 1;
+            }
+            if (cmp == 0 && rt_time_i[ri] <= hi) cmp = -1;
+            if (cmp < 0) ub = m + 1; else ub_hi = m;
+        }
+
+        memset(acc, 0, sizeof(acc));
+        for (int64_t a = 0; a < n_agg; a++) {
+            if (c->agg_ops[a] == OP_PROD) { acc[a].prod_i = 1; acc[a].prod_f = 1.0; }
+        }
+
+        /* Per-agg tight scan (hoisted switch, sequential SIMD-friendly read) */
+        for (int64_t a = 0; a < n_agg; a++) {
+            if (c->agg_raw[a]) continue;
+            wj_acc_t* A = &acc[a];
+            uint16_t op = c->agg_ops[a];
+            if (op == OP_COUNT) { A->cnt += (ub - lb); continue; }
+
+            const uint8_t* nn = c->sorted_nn[a];
+            if (c->agg_is_float[a]) {
+                const double* ss = c->sorted_f[a];
+                switch (op) {
+                case OP_SUM: case OP_AVG: {
+                    double sum = 0; int64_t cnt = 0;
+                    if (nn) { for (int64_t k = lb; k < ub; k++) if (nn[k]) { sum += ss[k]; cnt++; } }
+                    else    { for (int64_t k = lb; k < ub; k++) sum += ss[k]; cnt = ub - lb; }
+                    A->sum_f = sum; A->cnt = cnt; break;
+                }
+                case OP_VAR: case OP_VAR_POP:
+                case OP_STDDEV: case OP_STDDEV_POP: {
+                    double sum = 0, sum2 = 0; int64_t cnt = 0;
+                    if (nn) {
+                        for (int64_t k = lb; k < ub; k++)
+                            if (nn[k]) { double v = ss[k]; sum += v; sum2 += v * v; cnt++; }
+                    } else {
+                        for (int64_t k = lb; k < ub; k++) { double v = ss[k]; sum += v; sum2 += v * v; }
+                        cnt = ub - lb;
+                    }
+                    A->sum_f = sum; A->sum_sq_f = sum2; A->cnt = cnt; break;
+                }
+                case OP_PROD: {
+                    double p = 1.0; int64_t cnt = 0;
+                    if (nn) { for (int64_t k = lb; k < ub; k++) if (nn[k]) { p *= ss[k]; cnt++; } }
+                    else    { for (int64_t k = lb; k < ub; k++) p *= ss[k]; cnt = ub - lb; }
+                    A->prod_f = p; A->cnt = cnt; break;
+                }
+                case OP_MIN: {
+                    int64_t k = lb;
+                    if (nn) {
+                        double best = 0; int64_t cnt = 0;
+                        for (; k < ub; k++) if (nn[k]) { best = ss[k]; cnt = 1; k++; break; }
+                        for (; k < ub; k++) if (nn[k]) { double v = ss[k]; if (v < best) best = v; cnt++; }
+                        A->extreme_f = best; A->cnt = cnt;
+                    } else if (k < ub) {
+                        double best = ss[k++];
+                        for (; k < ub; k++) { double v = ss[k]; if (v < best) best = v; }
+                        A->extreme_f = best; A->cnt = ub - lb;
+                    }
+                    break;
+                }
+                case OP_MAX: {
+                    int64_t k = lb;
+                    if (nn) {
+                        double best = 0; int64_t cnt = 0;
+                        for (; k < ub; k++) if (nn[k]) { best = ss[k]; cnt = 1; k++; break; }
+                        for (; k < ub; k++) if (nn[k]) { double v = ss[k]; if (v > best) best = v; cnt++; }
+                        A->extreme_f = best; A->cnt = cnt;
+                    } else if (k < ub) {
+                        double best = ss[k++];
+                        for (; k < ub; k++) { double v = ss[k]; if (v > best) best = v; }
+                        A->extreme_f = best; A->cnt = ub - lb;
+                    }
+                    break;
+                }
+                case OP_FIRST: {
+                    if (nn) {
+                        int64_t cnt = 0;
+                        for (int64_t k = lb; k < ub; k++) if (nn[k]) {
+                            if (cnt == 0) A->extreme_f = ss[k];
+                            cnt++;
+                        }
+                        A->cnt = cnt;
+                    } else if (lb < ub) {
+                        A->extreme_f = ss[lb]; A->cnt = ub - lb;
+                    }
+                    break;
+                }
+                case OP_LAST: {
+                    if (nn) {
+                        int64_t cnt = 0, last_k = -1;
+                        for (int64_t k = lb; k < ub; k++) if (nn[k]) { last_k = k; cnt++; }
+                        if (last_k >= 0) A->extreme_f = ss[last_k];
+                        A->cnt = cnt;
+                    } else if (lb < ub) {
+                        A->extreme_f = ss[ub - 1]; A->cnt = ub - lb;
+                    }
+                    break;
+                }
+                default: break;
+                }
+            } else {
+                const int64_t* ss = c->sorted_i[a];
+                switch (op) {
+                case OP_SUM: case OP_AVG: {
+                    int64_t sum = 0; int64_t cnt = 0;
+                    if (nn) { for (int64_t k = lb; k < ub; k++) if (nn[k]) { sum += ss[k]; cnt++; } }
+                    else    { for (int64_t k = lb; k < ub; k++) sum += ss[k]; cnt = ub - lb; }
+                    A->sum_i = sum; A->cnt = cnt; break;
+                }
+                case OP_VAR: case OP_VAR_POP:
+                case OP_STDDEV: case OP_STDDEV_POP: {
+                    int64_t sum = 0, sum2 = 0; int64_t cnt = 0;
+                    if (nn) {
+                        for (int64_t k = lb; k < ub; k++)
+                            if (nn[k]) { int64_t v = ss[k]; sum += v; sum2 += v * v; cnt++; }
+                    } else {
+                        for (int64_t k = lb; k < ub; k++) { int64_t v = ss[k]; sum += v; sum2 += v * v; }
+                        cnt = ub - lb;
+                    }
+                    A->sum_i = sum; A->sum_sq_i = sum2; A->cnt = cnt; break;
+                }
+                case OP_PROD: {
+                    int64_t p = 1; int64_t cnt = 0;
+                    if (nn) { for (int64_t k = lb; k < ub; k++) if (nn[k]) { p *= ss[k]; cnt++; } }
+                    else    { for (int64_t k = lb; k < ub; k++) p *= ss[k]; cnt = ub - lb; }
+                    A->prod_i = p; A->cnt = cnt; break;
+                }
+                case OP_MIN: {
+                    int64_t k = lb;
+                    if (nn) {
+                        int64_t best = 0, cnt = 0;
+                        for (; k < ub; k++) if (nn[k]) { best = ss[k]; cnt = 1; k++; break; }
+                        for (; k < ub; k++) if (nn[k]) { int64_t v = ss[k]; if (v < best) best = v; cnt++; }
+                        A->extreme_i = best; A->cnt = cnt;
+                    } else if (k < ub) {
+                        int64_t best = ss[k++];
+                        for (; k < ub; k++) { int64_t v = ss[k]; if (v < best) best = v; }
+                        A->extreme_i = best; A->cnt = ub - lb;
+                    }
+                    break;
+                }
+                case OP_MAX: {
+                    int64_t k = lb;
+                    if (nn) {
+                        int64_t best = 0, cnt = 0;
+                        for (; k < ub; k++) if (nn[k]) { best = ss[k]; cnt = 1; k++; break; }
+                        for (; k < ub; k++) if (nn[k]) { int64_t v = ss[k]; if (v > best) best = v; cnt++; }
+                        A->extreme_i = best; A->cnt = cnt;
+                    } else if (k < ub) {
+                        int64_t best = ss[k++];
+                        for (; k < ub; k++) { int64_t v = ss[k]; if (v > best) best = v; }
+                        A->extreme_i = best; A->cnt = ub - lb;
+                    }
+                    break;
+                }
+                case OP_FIRST: {
+                    if (nn) {
+                        int64_t cnt = 0;
+                        for (int64_t k = lb; k < ub; k++) if (nn[k]) {
+                            if (cnt == 0) A->extreme_i = ss[k];
+                            cnt++;
+                        }
+                        A->cnt = cnt;
+                    } else if (lb < ub) {
+                        A->extreme_i = ss[lb]; A->cnt = ub - lb;
+                    }
+                    break;
+                }
+                case OP_LAST: {
+                    if (nn) {
+                        int64_t cnt = 0, last_k = -1;
+                        for (int64_t k = lb; k < ub; k++) if (nn[k]) { last_k = k; cnt++; }
+                        if (last_k >= 0) A->extreme_i = ss[last_k];
+                        A->cnt = cnt;
+                    } else if (lb < ub) {
+                        A->extreme_i = ss[ub - 1]; A->cnt = ub - lb;
+                    }
+                    break;
+                }
+                default: break;
+                }
+            }
+        }
+
+        /* Finalize → indexed write at slot lr */
+        for (int64_t a = 0; a < n_agg; a++) {
+            wj_acc_t* A = &acc[a];
+            int8_t rty = c->agg_result_types[a];
+            bool null_out = false;
+            int64_t out_i = 0;
+            double  out_f = 0.0;
+
+            if (c->agg_raw[a]) {
+                null_out = true;
+            } else {
+                switch (c->agg_ops[a]) {
+                case OP_COUNT: out_i = A->cnt; break;
+                case OP_SUM:
+                    if (c->agg_is_float[a]) out_f = A->sum_f; else out_i = A->sum_i;
+                    break;
+                case OP_PROD:
+                    if (A->cnt == 0) null_out = true;
+                    else if (c->agg_is_float[a]) out_f = A->prod_f; else out_i = A->prod_i;
+                    break;
+                case OP_MIN: case OP_MAX: case OP_FIRST: case OP_LAST:
+                    if (A->cnt == 0) null_out = true;
+                    else if (c->agg_is_float[a]) out_f = A->extreme_f; else out_i = A->extreme_i;
+                    break;
+                case OP_AVG:
+                    if (A->cnt == 0) null_out = true;
+                    else out_f = c->agg_is_float[a]
+                        ? A->sum_f / (double)A->cnt
+                        : (double)A->sum_i / (double)A->cnt;
+                    break;
+                case OP_VAR: case OP_VAR_POP:
+                case OP_STDDEV: case OP_STDDEV_POP: {
+                    bool sample = (c->agg_ops[a] == OP_VAR || c->agg_ops[a] == OP_STDDEV);
+                    bool insuf = sample ? (A->cnt <= 1) : (A->cnt <= 0);
+                    if (insuf) { null_out = true; break; }
+                    double mean, var_pop;
+                    if (c->agg_is_float[a]) {
+                        mean    = A->sum_f / (double)A->cnt;
+                        var_pop = A->sum_sq_f / (double)A->cnt - mean * mean;
+                    } else {
+                        mean    = (double)A->sum_i / (double)A->cnt;
+                        var_pop = (double)A->sum_sq_i / (double)A->cnt - mean * mean;
+                    }
+                    if (var_pop < 0) var_pop = 0;
+                    if      (c->agg_ops[a] == OP_VAR_POP)    out_f = var_pop;
+                    else if (c->agg_ops[a] == OP_VAR)        out_f = var_pop * A->cnt / (A->cnt - 1);
+                    else if (c->agg_ops[a] == OP_STDDEV_POP) out_f = sqrt(var_pop);
+                    else                                     out_f = sqrt(var_pop * A->cnt / (A->cnt - 1));
+                    break;
+                }
+                default: null_out = true; break;
+                }
+            }
+
+            c->result_null[a][lr] = null_out ? 1 : 0;
+            if (null_out) continue;
+
+            void* rd = c->result_data[a];
+            if (rty == RAY_F64)       ((double*)rd)[lr] = out_f;
+            else if (rty == RAY_F32)  ((float*)rd)[lr]  = (float)out_f;
+            else if (rty == RAY_I64 || rty == RAY_TIMESTAMP)
+                ((int64_t*)rd)[lr] = out_i;
+            else if (rty == RAY_I32 || rty == RAY_DATE || rty == RAY_TIME)
+                ((int32_t*)rd)[lr] = (int32_t)out_i;
+            else if (rty == RAY_I16)  ((int16_t*)rd)[lr] = (int16_t)out_i;
+            else                       ((uint8_t*)rd)[lr] = (uint8_t)out_i;
+        }
+    }
+}
+
 /* (window-join t1 t2 [eq-keys] time-col)
  * ASOF join: for each left row, find closest right row with time <= left.time
  * within the same equality partition. */
@@ -3651,7 +4004,8 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
      * (window-join left right [eq-keys] time-sym) */
     if (n >= 5 && ray_is_vec(eargs[0]) && eargs[0]->type == RAY_SYM &&
         eargs[2]->type == RAY_TABLE && eargs[3]->type == RAY_TABLE) {
-        /* Rayforce convention: implement at eval level */
+        /* Rayforce convention: implement at eval level.
+         * See file-scope wj_scan_fn / wj_scan_ctx_t for the parallel worker. */
         ray_t* keys_vec = eargs[0];      /* [Sym Time] — equality + time keys */
         ray_t* intervals = eargs[1];     /* list of [lo hi] time windows */
         ray_t* left_tbl = eargs[2];      /* trades */
@@ -3682,144 +4036,403 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
             if (!left_eq[e] || !right_eq[e]) return ray_error("domain", NULL);
         }
 
-        /* Get aggregation info from dict */
-        int64_t agg_result_name = -1;
-        uint16_t agg_op = OP_MIN;
-        int64_t agg_src_col = -1;
+        /* Parse every (name, (op src)) pair from the agg dict.
+         * Dicts are flat [k0 v0 k1 v1 ...] lists (see parse_dict).
+         * WJ_MAX_AGG is defined at file scope (for wj_scan_ctx_t). */
+        int64_t  agg_names[WJ_MAX_AGG];
+        uint16_t agg_ops[WJ_MAX_AGG];
+        int64_t  agg_src_ids[WJ_MAX_AGG];
+        ray_t*   agg_src_vecs[WJ_MAX_AGG] = {0};
+        int8_t   agg_types[WJ_MAX_AGG];
+        int      agg_is_float[WJ_MAX_AGG];
+        ray_t*   agg_result_vecs[WJ_MAX_AGG] = {0};
+        int      agg_raw[WJ_MAX_AGG] = {0};  /* {name: Col} bare-column form — legacy placeholder */
+        int64_t  n_agg = 0;
+
         if (agg_dict && agg_dict->type == RAY_LIST && (agg_dict->attrs & RAY_ATTR_DICT)) {
             ray_t** ad = (ray_t**)ray_data(agg_dict);
             int64_t adn = ray_len(agg_dict);
-            if (adn >= 2) {
-                agg_result_name = ad[0]->i64; /* minBid */
-                ray_t* agg_expr = ad[1]; /* (min Bid) */
-                if (agg_expr->type == RAY_LIST && agg_expr->len >= 2) {
-                    ray_t** ae = (ray_t**)ray_data(agg_expr);
-                    if (ae[0]->type == -RAY_SYM && (ae[0]->attrs & RAY_ATTR_NAME))
-                        agg_op = resolve_agg_opcode(ae[0]->i64);
-                    if (ae[1]->type == -RAY_SYM && (ae[1]->attrs & RAY_ATTR_NAME))
-                        agg_src_col = ae[1]->i64;
+            for (int64_t di = 0; di + 1 < adn && n_agg < WJ_MAX_AGG; di += 2) {
+                ray_t* kname = ad[di];
+                ray_t* expr  = ad[di + 1];
+                if (kname->type != -RAY_SYM) continue;
+                /* (op col) aggregation form */
+                if (expr->type == RAY_LIST && expr->len >= 2) {
+                    ray_t** ae = (ray_t**)ray_data(expr);
+                    if (!(ae[0]->type == -RAY_SYM && (ae[0]->attrs & RAY_ATTR_NAME))) continue;
+                    if (!(ae[1]->type == -RAY_SYM && (ae[1]->attrs & RAY_ATTR_NAME))) continue;
+                    agg_names[n_agg]   = kname->i64;
+                    agg_ops[n_agg]     = resolve_agg_opcode(ae[0]->i64);
+                    agg_src_ids[n_agg] = ae[1]->i64;
+                    agg_raw[n_agg]     = 0;
+                    n_agg++;
+                    continue;
+                }
+                /* Bare column reference — legacy map-group form, emitted as null column */
+                if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
+                    agg_names[n_agg]   = kname->i64;
+                    agg_ops[n_agg]     = OP_MIN;
+                    agg_src_ids[n_agg] = expr->i64;
+                    agg_raw[n_agg]     = 1;
+                    n_agg++;
+                    continue;
                 }
             }
         }
 
-        ray_t* right_agg_col = (agg_src_col >= 0) ? ray_table_get_col(right_tbl, agg_src_col) : NULL;
-        if (agg_src_col >= 0 && !right_agg_col) return ray_error("domain", NULL);
-
-        /* Validate aggregation column is a numeric type */
-        int8_t agg_type = right_agg_col ? right_agg_col->type : RAY_I64;
-        if (right_agg_col) {
-            switch (agg_type) {
-            case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
-            case RAY_F64: case RAY_F32: case RAY_BOOL:
-            case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
-                break;
-            default:
+        /* Resolve sources, pick result types, allocate result vectors.
+         * Raw bare-column form ({name: Col}) is a legacy placeholder — it
+         * accepts any column type (numeric or not) and always produces a
+         * nullable i64 column filled with nulls. All true aggregation ops
+         * require a numeric source column. */
+        int8_t agg_result_types[WJ_MAX_AGG];
+        for (int64_t a = 0; a < n_agg; a++) {
+            if (agg_raw[a]) {
+                agg_src_vecs[a]    = NULL;
+                agg_types[a]       = RAY_I64;
+                agg_is_float[a]    = 0;
+                agg_result_types[a] = RAY_I64;
+                agg_result_vecs[a] = ray_vec_new(RAY_I64, left_nrows);
+                if (RAY_IS_ERR(agg_result_vecs[a])) {
+                    ray_t* err = agg_result_vecs[a];
+                    for (int64_t b = 0; b < a; b++) ray_release(agg_result_vecs[b]);
+                    for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+                    return err;
+                }
+                continue;
+            }
+            if (agg_ops[a] == 0) {
+                for (int64_t b = 0; b < a; b++) ray_release(agg_result_vecs[b]);
                 for (int i = 0; i < 4; i++) ray_release(eargs[i]);
-                return ray_error("type", NULL);
+                return ray_error("domain", NULL);
+            }
+            ray_t* src = ray_table_get_col(right_tbl, agg_src_ids[a]);
+            if (!src) {
+                for (int64_t b = 0; b < a; b++) ray_release(agg_result_vecs[b]);
+                for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+                return ray_error("domain", NULL);
+            }
+            int8_t t = src->type;
+            /* COUNT never reads source values — accept any column type. Every
+             * other aggregation reads v_i/v_f and requires a numeric source. */
+            if (agg_ops[a] != OP_COUNT) {
+                switch (t) {
+                case RAY_I64: case RAY_I32: case RAY_I16: case RAY_U8:
+                case RAY_F64: case RAY_F32: case RAY_BOOL:
+                case RAY_DATE: case RAY_TIME: case RAY_TIMESTAMP:
+                    break;
+                default:
+                    for (int64_t b = 0; b < a; b++) ray_release(agg_result_vecs[b]);
+                    for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+                    return ray_error("type", NULL);
+                }
+            }
+            agg_src_vecs[a]  = src;
+            agg_types[a]     = t;
+            agg_is_float[a]  = (t == RAY_F64 || t == RAY_F32);
+
+            int8_t rt;
+            switch (agg_ops[a]) {
+            case OP_COUNT: rt = RAY_I64; break;
+            case OP_AVG:
+            case OP_VAR: case OP_VAR_POP:
+            case OP_STDDEV: case OP_STDDEV_POP: rt = RAY_F64; break;
+            case OP_SUM: case OP_PROD:
+                rt = agg_is_float[a] ? RAY_F64 : RAY_I64; break;
+            default: /* MIN/MAX/FIRST/LAST */ rt = t; break;
+            }
+            agg_result_types[a] = rt;
+            agg_result_vecs[a] = ray_vec_new(rt, left_nrows);
+            if (RAY_IS_ERR(agg_result_vecs[a])) {
+                ray_t* err = agg_result_vecs[a];
+                for (int64_t b = 0; b < a; b++) ray_release(agg_result_vecs[b]);
+                for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+                return err;
             }
         }
 
-        /* For each left row, find matching right rows within the time window */
-        /* intervals is a list of [lo, hi] pairs, one per left row */
-        int is_float = (right_agg_col && (agg_type == RAY_F64 || agg_type == RAY_F32));
-        ray_t* result_agg = ray_vec_new(agg_type, left_nrows);
-        if (RAY_IS_ERR(result_agg)) return result_agg;
+        /* wj_acc_t is defined at file scope now (used by wj_scan_fn). */
 
+        /* Sort right table by (eq_keys..., time) once so each left row only
+         * scans the quote rows whose (eq,time) fall inside its window.
+         * Per-row cost drops from O(right_nrows) to O(log right_nrows + window). */
+        ray_t*   rs_hdr = NULL, *rt_hdr = NULL, *tmp_hdr = NULL;
+        int64_t* right_sort = NULL;
+        int64_t* rt_time_i  = NULL;
+        int64_t* tmp_sort   = NULL;
+        const void* eq_data[16];
+        int8_t      eq_type[16];
+        uint8_t     eq_attrs[16];
+        for (int64_t e = 0; e < n_eq; e++) {
+            eq_data[e]  = ray_data(right_eq[e]);
+            eq_type[e]  = right_eq[e]->type;
+            eq_attrs[e] = right_eq[e]->attrs;
+        }
+        if (right_nrows > 0) {
+            right_sort = (int64_t*)scratch_alloc(&rs_hdr,  (size_t)right_nrows * sizeof(int64_t));
+            rt_time_i  = (int64_t*)scratch_alloc(&rt_hdr,  (size_t)right_nrows * sizeof(int64_t));
+            tmp_sort   = (int64_t*)scratch_alloc(&tmp_hdr, (size_t)right_nrows * sizeof(int64_t));
+            if (!right_sort || !rt_time_i || !tmp_sort) {
+                if (rs_hdr)  scratch_free(rs_hdr);
+                if (rt_hdr)  scratch_free(rt_hdr);
+                if (tmp_hdr) scratch_free(tmp_hdr);
+                for (int64_t a = 0; a < n_agg; a++) ray_release(agg_result_vecs[a]);
+                for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+                return ray_error("oom", NULL);
+            }
+            /* Cache time column access so the sort compare avoids reloading them */
+            int8_t  rt_type  = right_time->type;
+            uint8_t rt_attrs = right_time->attrs;
+            const void* rt_data = ray_data(right_time);
+            for (int64_t rr = 0; rr < right_nrows; rr++) {
+                right_sort[rr] = rr;
+                rt_time_i[rr]  = read_col_i64(rt_data, rr, rt_type, rt_attrs);
+            }
+            /* Bottom-up merge sort on index array */
+            for (int64_t width = 1; width < right_nrows; width *= 2) {
+                for (int64_t lo = 0; lo < right_nrows; lo += 2 * width) {
+                    int64_t mid = lo + width;
+                    int64_t hi  = lo + 2 * width;
+                    if (mid > right_nrows) mid = right_nrows;
+                    if (hi  > right_nrows) hi  = right_nrows;
+                    int64_t a = lo, b = mid, t = lo;
+                    while (a < mid && b < hi) {
+                        int64_t ai = right_sort[a], bi = right_sort[b];
+                        int cmp = 0;
+                        for (int64_t e = 0; e < n_eq && cmp == 0; e++) {
+                            int64_t va = read_col_i64(eq_data[e], ai, eq_type[e], eq_attrs[e]);
+                            int64_t vb = read_col_i64(eq_data[e], bi, eq_type[e], eq_attrs[e]);
+                            if (va < vb) cmp = -1;
+                            else if (va > vb) cmp = 1;
+                        }
+                        if (cmp == 0) {
+                            if      (rt_time_i[ai] < rt_time_i[bi]) cmp = -1;
+                            else if (rt_time_i[ai] > rt_time_i[bi]) cmp = 1;
+                        }
+                        tmp_sort[t++] = (cmp <= 0) ? right_sort[a++] : right_sort[b++];
+                    }
+                    while (a < mid) tmp_sort[t++] = right_sort[a++];
+                    while (b < hi)  tmp_sort[t++] = right_sort[b++];
+                    for (int64_t c = lo; c < hi; c++) right_sort[c] = tmp_sort[c];
+                }
+            }
+            scratch_free(tmp_hdr);
+            tmp_hdr  = NULL;
+            tmp_sort = NULL;
+        }
+
+        /* Preload one sorted source column per aggregation.
+         * After sorting right_sort, the hot loop wants *sequential* access
+         * (SIMD + prefetch friendly) — not an indirect gather through
+         * right_sort[k]. We materialize sorted_src_i[a][k] = value at
+         * right_sort[k] once, then every left row's window scans are a
+         * plain array walk.
+         *
+         * COUNT / raw form carry no source; nothing to preload. PROD and
+         * ops on null-containing columns still go through the slow scan
+         * (see below), so the preload is gated on the easy numeric cases. */
+        int64_t* sorted_i[WJ_MAX_AGG]  = {0};
+        double*  sorted_f[WJ_MAX_AGG]  = {0};
+        uint8_t* sorted_nn[WJ_MAX_AGG] = {0};  /* 0 = null, 1 = value present */
+        ray_t*   sorted_i_hdr[WJ_MAX_AGG] = {0};
+        ray_t*   sorted_f_hdr[WJ_MAX_AGG] = {0};
+        ray_t*   sorted_nn_hdr[WJ_MAX_AGG] = {0};
+        for (int64_t a = 0; a < n_agg; a++) {
+            if (agg_raw[a] || agg_ops[a] == OP_COUNT) continue;
+            ray_t* src = agg_src_vecs[a];
+            if (!src || right_nrows == 0) continue;
+            bool has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0;
+            if (has_nulls) {
+                sorted_nn[a] = (uint8_t*)scratch_alloc(&sorted_nn_hdr[a],
+                                                        (size_t)right_nrows);
+                if (!sorted_nn[a]) { goto wj_preload_oom; }
+            }
+            if (agg_is_float[a]) {
+                sorted_f[a] = (double*)scratch_alloc(&sorted_f_hdr[a],
+                                                      (size_t)right_nrows * sizeof(double));
+                if (!sorted_f[a]) { goto wj_preload_oom; }
+                int8_t t = agg_types[a];
+                const void* sd = ray_data(src);
+                for (int64_t k = 0; k < right_nrows; k++) {
+                    int64_t rr = right_sort[k];
+                    double v = (t == RAY_F32)
+                        ? (double)((const float*)sd)[rr]
+                        : ((const double*)sd)[rr];
+                    sorted_f[a][k] = v;
+                    if (has_nulls) sorted_nn[a][k] = ray_vec_is_null(src, rr) ? 0 : 1;
+                }
+            } else {
+                sorted_i[a] = (int64_t*)scratch_alloc(&sorted_i_hdr[a],
+                                                       (size_t)right_nrows * sizeof(int64_t));
+                if (!sorted_i[a]) { goto wj_preload_oom; }
+                const void* sd = ray_data(src);
+                int8_t t = agg_types[a];
+                uint8_t at = src->attrs;
+                for (int64_t k = 0; k < right_nrows; k++) {
+                    int64_t rr = right_sort[k];
+                    sorted_i[a][k] = read_col_i64(sd, rr, t, at);
+                    if (has_nulls) sorted_nn[a][k] = ray_vec_is_null(src, rr) ? 0 : 1;
+                }
+            }
+        }
+
+        #define WJ_CLEANUP_TEMP() do {                              \
+            if (rs_hdr) scratch_free(rs_hdr);                       \
+            if (rt_hdr) scratch_free(rt_hdr);                       \
+            if (tmp_hdr) scratch_free(tmp_hdr);                     \
+            for (int64_t _a = 0; _a < n_agg; _a++) {                \
+                if (sorted_i_hdr[_a])  scratch_free(sorted_i_hdr[_a]);  \
+                if (sorted_f_hdr[_a])  scratch_free(sorted_f_hdr[_a]);  \
+                if (sorted_nn_hdr[_a]) scratch_free(sorted_nn_hdr[_a]); \
+            }                                                       \
+        } while (0)
+
+        if (0) {
+        wj_preload_oom:
+            WJ_CLEANUP_TEMP();
+            for (int64_t a = 0; a < n_agg; a++) ray_release(agg_result_vecs[a]);
+            for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+            return ray_error("oom", NULL);
+        }
+
+        /* Pre-extract left-row metadata (interval endpoints + eq-key tuples)
+         * into flat int64 arrays. This hoists all ray_t allocation and the
+         * width-aware reads out of the hot loop so the parallel worker can
+         * process rows without touching any ref-counted objects. */
+        ray_t* lo_hdr = NULL, *hi_hdr = NULL;
+        int64_t* lo_arr = (int64_t*)scratch_alloc(&lo_hdr, (size_t)left_nrows * sizeof(int64_t));
+        int64_t* hi_arr = (int64_t*)scratch_alloc(&hi_hdr, (size_t)left_nrows * sizeof(int64_t));
+        if ((!lo_arr || !hi_arr) && left_nrows > 0) {
+            if (lo_hdr) scratch_free(lo_hdr);
+            if (hi_hdr) scratch_free(hi_hdr);
+            WJ_CLEANUP_TEMP();
+            for (int64_t a = 0; a < n_agg; a++) ray_release(agg_result_vecs[a]);
+            for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+            return ray_error("oom", NULL);
+        }
         for (int64_t lr = 0; lr < left_nrows; lr++) {
-            /* Get interval for this left row */
             int alloc_iv = 0;
             ray_t* iv = collection_elem(intervals, lr, &alloc_iv);
             if (!iv || RAY_IS_ERR(iv) || ray_len(iv) < 2) {
                 if (alloc_iv && iv) ray_release(iv);
-                ray_release(result_agg);
+                if (lo_hdr) scratch_free(lo_hdr);
+                if (hi_hdr) scratch_free(hi_hdr);
+                WJ_CLEANUP_TEMP();
+                for (int64_t a = 0; a < n_agg; a++) ray_release(agg_result_vecs[a]);
+                for (int i = 0; i < 4; i++) ray_release(eargs[i]);
                 return ray_error("domain", NULL);
             }
             int alloc_lo = 0, alloc_hi = 0;
             ray_t* lo_atom = collection_elem(iv, 0, &alloc_lo);
             ray_t* hi_atom = collection_elem(iv, 1, &alloc_hi);
-            int64_t lo = as_i64(lo_atom);
-            int64_t hi = as_i64(hi_atom);
+            lo_arr[lr] = as_i64(lo_atom);
+            hi_arr[lr] = as_i64(hi_atom);
             if (alloc_lo) ray_release(lo_atom);
             if (alloc_hi) ray_release(hi_atom);
             if (alloc_iv) ray_release(iv);
-
-            /* Find right rows matching equality keys AND time in [lo, hi] */
-            int64_t best_val_i = INT64_MAX;
-            double best_val_f = 1e300;
-            int found = 0;
-
-            for (int64_t rr = 0; rr < right_nrows; rr++) {
-                /* Check equality keys */
-                int eq_match = 1;
-                for (int64_t e = 0; e < n_eq && eq_match; e++) {
-                    int64_t lv = (left_eq[e]->type == RAY_SYM) ?
-                        ((int64_t*)ray_data(left_eq[e]))[lr] :
-                        ((int64_t*)ray_data(left_eq[e]))[lr];
-                    int64_t rv = (right_eq[e]->type == RAY_SYM) ?
-                        ((int64_t*)ray_data(right_eq[e]))[rr] :
-                        ((int64_t*)ray_data(right_eq[e]))[rr];
-                    if (lv != rv) eq_match = 0;
-                }
-                if (!eq_match) continue;
-
-                /* Check time window — TIME is i32, TIMESTAMP is i64 */
-                int64_t rt;
-                if (right_time->type == RAY_TIME || right_time->type == RAY_I32 || right_time->type == RAY_DATE)
-                    rt = (int64_t)((int32_t*)ray_data(right_time))[rr];
-                else
-                    rt = ((int64_t*)ray_data(right_time))[rr];
-                if (rt < lo || rt > hi) continue;
-
-                /* Apply aggregation — skip null elements */
-                if (right_agg_col) {
-                    if (ray_vec_is_null(right_agg_col, rr)) continue;
-                    if (is_float) {
-                        double v = (agg_type == RAY_F32)
-                            ? (double)((float*)ray_data(right_agg_col))[rr]
-                            : ((double*)ray_data(right_agg_col))[rr];
-                        if (!found || (agg_op == OP_MIN && v < best_val_f) ||
-                            (agg_op == OP_MAX && v > best_val_f))
-                            best_val_f = v;
-                    } else {
-                        int64_t v = read_col_i64(ray_data(right_agg_col), rr, agg_type, right_agg_col->attrs);
-                        if (!found || (agg_op == OP_MIN && v < best_val_i) ||
-                            (agg_op == OP_MAX && v > best_val_i))
-                            best_val_i = v;
-                    }
-                    found = 1;
-                }
-            }
-
-            /* Store result — write with correct element width */
-            if (found) {
-                if (is_float) {
-                    if (agg_type == RAY_F32) {
-                        float v = (float)best_val_f;
-                        result_agg = ray_vec_append(result_agg, &v);
-                    } else {
-                        double v = best_val_f;
-                        result_agg = ray_vec_append(result_agg, &v);
-                    }
-                } else {
-                    int64_t idx = result_agg->len;
-                    uint8_t zero[8] = {0};
-                    result_agg = ray_vec_append(result_agg, zero);
-                    if (!RAY_IS_ERR(result_agg))
-                        write_col_i64(ray_data(result_agg), idx, best_val_i, agg_type, result_agg->attrs);
-                }
-            } else {
-                int64_t idx = result_agg->len;
-                uint8_t zero[8] = {0};
-                result_agg = ray_vec_append(result_agg, zero);
-                if (!RAY_IS_ERR(result_agg))
-                    ray_vec_set_null(result_agg, idx, true);
-            }
-            if (RAY_IS_ERR(result_agg)) return result_agg;
         }
 
-        /* Build result table: left table + aggregation column */
+        ray_t*   left_eq_hdr[WJ_MAX_AGG] = {0};
+        int64_t* left_eq_arr[WJ_MAX_AGG] = {0};
+        for (int64_t e = 0; e < n_eq; e++) {
+            left_eq_arr[e] = (int64_t*)scratch_alloc(&left_eq_hdr[e],
+                                                     (size_t)left_nrows * sizeof(int64_t));
+            if (!left_eq_arr[e] && left_nrows > 0) {
+                if (lo_hdr) scratch_free(lo_hdr);
+                if (hi_hdr) scratch_free(hi_hdr);
+                for (int64_t f = 0; f < e; f++)
+                    if (left_eq_hdr[f]) scratch_free(left_eq_hdr[f]);
+                WJ_CLEANUP_TEMP();
+                for (int64_t a = 0; a < n_agg; a++) ray_release(agg_result_vecs[a]);
+                for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+                return ray_error("oom", NULL);
+            }
+            const void* sd = ray_data(left_eq[e]);
+            int8_t  t  = left_eq[e]->type;
+            uint8_t at = left_eq[e]->attrs;
+            for (int64_t lr = 0; lr < left_nrows; lr++)
+                left_eq_arr[e][lr] = read_col_i64(sd, lr, t, at);
+        }
+
+        /* Pre-size each result vector and allocate a 1-byte-per-row null
+         * staging array — writers index by lr without touching the nullmap. */
+        ray_t*   null_stage_hdr[WJ_MAX_AGG] = {0};
+        uint8_t* null_stage[WJ_MAX_AGG]     = {0};
+        for (int64_t a = 0; a < n_agg; a++) {
+            agg_result_vecs[a]->len = left_nrows;
+            null_stage[a] = (uint8_t*)scratch_alloc(&null_stage_hdr[a], (size_t)left_nrows);
+            if (!null_stage[a] && left_nrows > 0) {
+                if (lo_hdr) scratch_free(lo_hdr);
+                if (hi_hdr) scratch_free(hi_hdr);
+                for (int64_t f = 0; f < n_eq; f++) if (left_eq_hdr[f]) scratch_free(left_eq_hdr[f]);
+                for (int64_t b = 0; b < a; b++) if (null_stage_hdr[b]) scratch_free(null_stage_hdr[b]);
+                WJ_CLEANUP_TEMP();
+                for (int64_t b = 0; b < n_agg; b++) ray_release(agg_result_vecs[b]);
+                for (int i = 0; i < 4; i++) ray_release(eargs[i]);
+                return ray_error("oom", NULL);
+            }
+            memset(null_stage[a], 0, (size_t)left_nrows);
+        }
+
+        /* Build the scan context and dispatch. */
+        wj_scan_ctx_t wctx;
+        memset(&wctx, 0, sizeof(wctx));
+        wctx.left_nrows  = left_nrows;
+        wctx.right_nrows = right_nrows;
+        wctx.n_eq        = n_eq;
+        wctx.n_agg       = n_agg;
+        wctx.lo_arr      = lo_arr;
+        wctx.hi_arr      = hi_arr;
+        wctx.right_sort  = right_sort;
+        wctx.rt_time_i   = rt_time_i;
+        for (int64_t e = 0; e < n_eq; e++) {
+            wctx.left_eq_arr[e] = left_eq_arr[e];
+            wctx.eq_data[e]     = eq_data[e];
+            wctx.eq_type[e]     = eq_type[e];
+            wctx.eq_attrs[e]    = eq_attrs[e];
+        }
+        for (int64_t a = 0; a < n_agg; a++) {
+            wctx.agg_raw[a]          = (uint8_t)agg_raw[a];
+            wctx.agg_ops[a]          = agg_ops[a];
+            wctx.agg_result_types[a] = agg_result_types[a];
+            wctx.agg_is_float[a]     = agg_is_float[a];
+            wctx.sorted_i[a]         = sorted_i[a];
+            wctx.sorted_f[a]         = sorted_f[a];
+            wctx.sorted_nn[a]        = sorted_nn[a];
+            wctx.result_data[a]      = ray_data(agg_result_vecs[a]);
+            wctx.result_null[a]      = null_stage[a];
+        }
+
+        ray_pool_t* pool = ray_pool_get();
+        if (pool && left_nrows >= 2048) {
+            ray_pool_dispatch(pool, wj_scan_fn, &wctx, left_nrows);
+        } else {
+            wj_scan_fn(&wctx, 0, 0, left_nrows);
+        }
+
+        /* Apply staged null flags to each result vec's null bitmap sequentially. */
+        for (int64_t a = 0; a < n_agg; a++) {
+            ray_t* rv = agg_result_vecs[a];
+            const uint8_t* stage = null_stage[a];
+            for (int64_t lr = 0; lr < left_nrows; lr++)
+                if (stage[lr]) ray_vec_set_null(rv, lr, true);
+        }
+
+        /* Free pre-extract scratch */
+        if (lo_hdr) scratch_free(lo_hdr);
+        if (hi_hdr) scratch_free(hi_hdr);
+        for (int64_t e = 0; e < n_eq; e++)
+            if (left_eq_hdr[e]) scratch_free(left_eq_hdr[e]);
+        for (int64_t a = 0; a < n_agg; a++)
+            if (null_stage_hdr[a]) scratch_free(null_stage_hdr[a]);
+
+
+        WJ_CLEANUP_TEMP();
+        #undef WJ_CLEANUP_TEMP
+
+        /* Build result table: left columns + every aggregation column */
         int64_t ncols = ray_table_ncols(left_tbl);
-        ray_t* result = ray_table_new(ncols + 1);
+        ray_t* result = ray_table_new(ncols + n_agg);
         for (int64_t c = 0; c < ncols; c++) {
             int64_t cn = ray_table_col_name(left_tbl, c);
             ray_t* cv = ray_table_get_col_idx(left_tbl, c);
@@ -3827,12 +4440,13 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
             result = ray_table_add_col(result, cn, cv);
             ray_release(cv);
         }
-        if (agg_result_name >= 0) {
-            result = ray_table_add_col(result, agg_result_name, result_agg);
+        for (int64_t a = 0; a < n_agg; a++) {
+            result = ray_table_add_col(result, agg_names[a], agg_result_vecs[a]);
+            ray_release(agg_result_vecs[a]);
         }
-        ray_release(result_agg);
         for (int i = 0; i < 4; i++) ray_release(eargs[i]);
         return result;
+        #undef WJ_MAX_AGG
     }
 
     ray_t* left_tbl  = eargs[0];

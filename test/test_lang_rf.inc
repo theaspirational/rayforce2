@@ -4573,6 +4573,176 @@ static MunitResult test_rf_joins(const void* params, void* fixture) {
         "(at (window-join1 [Sym Time] intervals trades quotes {minBid: (min Bid)}) 'minBid)",
         "[99 101]");
 
+    // window-join with multiple aggregations — both columns must be present
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))"
+        "(set quotes (table [Sym Time Bid Ask] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [99 100 101] [110 111 112])))"
+        "(set intervals (map-left + [-2000 2000] (at trades 'Time)))"
+        "(set r (window-join [Sym Time] intervals trades quotes {lo: (min Bid) hi: (max Ask)}))"
+        "(at r 'lo)",
+        "[99 101]");
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))"
+        "(set quotes (table [Sym Time Bid Ask] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [99 100 101] [110 111 112])))"
+        "(set intervals (map-left + [-2000 2000] (at trades 'Time)))"
+        "(set r (window-join [Sym Time] intervals trades quotes {lo: (min Bid) hi: (max Ask)}))"
+        "(at r 'hi)",
+        "[111 112]");
+
+    // window-join rayforce1 canonical example (docs/queries-joins.html)
+    //   trades at 12:00:01, 12:00:04, 12:00:06 ± 1s windows
+    //   quotes at 12:00:00..12:00:09 sizes [928 528 648 914 918 626 577 817 620 698]
+    //     trade @ 01 window [00,02] -> sizes [928 528 648], min=528, max=928
+    //     trade @ 04 window [03,05] -> sizes [914 918 626], min=626, max=918
+    //     trade @ 06 window [05,07] -> sizes [626 577 817], min=577, max=817
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [x x x] [12:00:01 12:00:04 12:00:06] [89.17 70.5 80.54])))"
+        "(set quotes (table [Sym Time Size] (list [x x x x x x x x x x] "
+        "  [12:00:00 12:00:01 12:00:02 12:00:03 12:00:04 12:00:05 12:00:06 12:00:07 12:00:08 12:00:09] "
+        "  [928 528 648 914 918 626 577 817 620 698])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {size_min: (min Size) size_max: (max Size)}) 'size_min)",
+        "[528 626 577]");
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [x x x] [12:00:01 12:00:04 12:00:06] [89.17 70.5 80.54])))"
+        "(set quotes (table [Sym Time Size] (list [x x x x x x x x x x] "
+        "  [12:00:00 12:00:01 12:00:02 12:00:03 12:00:04 12:00:05 12:00:06 12:00:07 12:00:08 12:00:09] "
+        "  [928 528 648 914 918 626 577 817 620 698])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {size_min: (min Size) size_max: (max Size)}) 'size_max)",
+        "[928 918 817]");
+
+    // window-join sum/count/avg over the same canonical example
+    //   trade @ 01 window [00,02]: sum=2104 count=3 avg≈701.3333
+    //   trade @ 04 window [03,05]: sum=2458 count=3 avg≈819.3333
+    //   trade @ 06 window [05,07]: sum=2020 count=3 avg≈673.3333
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [x x x] [12:00:01 12:00:04 12:00:06] [89.17 70.5 80.54])))"
+        "(set quotes (table [Sym Time Size] (list [x x x x x x x x x x] "
+        "  [12:00:00 12:00:01 12:00:02 12:00:03 12:00:04 12:00:05 12:00:06 12:00:07 12:00:08 12:00:09] "
+        "  [928 528 648 914 918 626 577 817 620 698])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {s: (sum Size)}) 's)",
+        "[2104 2458 2020]");
+
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [x x x] [12:00:01 12:00:04 12:00:06] [89.17 70.5 80.54])))"
+        "(set quotes (table [Sym Time Size] (list [x x x x x x x x x x] "
+        "  [12:00:00 12:00:01 12:00:02 12:00:03 12:00:04 12:00:05 12:00:06 12:00:07 12:00:08 12:00:09] "
+        "  [928 528 648 914 918 626 577 817 620 698])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {c: (count Size)}) 'c)",
+        "[3 3 3]");
+
+    // window-join first/last over the canonical example
+    //   trade @ 01 window [00,02]: first=928 last=648
+    //   trade @ 04 window [03,05]: first=914 last=626
+    //   trade @ 06 window [05,07]: first=626 last=817
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [x x x] [12:00:01 12:00:04 12:00:06] [89.17 70.5 80.54])))"
+        "(set quotes (table [Sym Time Size] (list [x x x x x x x x x x] "
+        "  [12:00:00 12:00:01 12:00:02 12:00:03 12:00:04 12:00:05 12:00:06 12:00:07 12:00:08 12:00:09] "
+        "  [928 528 648 914 918 626 577 817 620 698])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {f: (first Size)}) 'f)",
+        "[928 914 626]");
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [x x x] [12:00:01 12:00:04 12:00:06] [89.17 70.5 80.54])))"
+        "(set quotes (table [Sym Time Size] (list [x x x x x x x x x x] "
+        "  [12:00:00 12:00:01 12:00:02 12:00:03 12:00:04 12:00:05 12:00:06 12:00:07 12:00:08 12:00:09] "
+        "  [928 528 648 914 918 626 577 817 620 698])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {l: (last Size)}) 'l)",
+        "[648 626 817]");
+
+    // window-join raw bare-column form must accept non-numeric columns (regression)
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))"
+        "(set quotes (table [Sym Time Tag] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [foo bar baz])))"
+        "(set intervals (map-left + [-2000 2000] (at trades 'Time)))"
+        "(count (at (window-join [Sym Time] intervals trades quotes {tags: Tag}) 'tags))",
+        "2");
+
+    // window-join (count Col) must accept non-numeric source columns.
+    // trades at 10:00:01 and 10:00:05 with ±1s windows; Tag rows at 10:00:00/02/04:
+    //   trade @ 01 window [00, 02] -> matches at 00 and 02 (2)
+    //   trade @ 05 window [04, 06] -> matches at 04 (1)
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))"
+        "(set quotes (table [Sym Time Tag] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [foo bar baz])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {n: (count Tag)}) 'n)",
+        "[2 1]");
+
+    // window-join COUNT must include window matches whose source value is null
+    // (kdb+/group.c semantics: (count Col) == COUNT(*), not COUNT(non-null Col)).
+    //   trade @ 01 window [00, 02]: Bid rows at 00(99) and 02(NULL) -> count=2, min=99
+    //   trade @ 05 window [04, 06]: Bid row at 04(101)              -> count=1, min=101
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))"
+        "(set quotes (table [Sym Time Bid] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [99 0Nl 101])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {c: (count Bid)}) 'c)",
+        "[2 1]");
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))"
+        "(set quotes (table [Sym Time Bid] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [99 0Nl 101])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {m: (min Bid)}) 'm)",
+        "[99 101]");
+
+    // stddev/stddev_pop/var/var_pop must work as standalone aggregation
+    // builtins so resolve_agg_opcode support in window-join is fully backed
+    // by an eval-level implementation.
+    ASSERT_EQ("(stddev [10 20 30])",     "10.0");
+    ASSERT_EQ("(stddev_pop [10 20 30])", "8.16");
+    ASSERT_EQ("(var [10 20 30])",        "100.0");
+    ASSERT_EQ("(var_pop [10 20 30])",    "66.67");
+    ASSERT_EQ("(dev_pop [10 20 30])",    "8.16");
+
+    // stddev_pop/var_pop must resolve through compile_expr_dag's agg switch.
+    // That switch is reached only when the aggregation appears *inside*
+    // another expression: at the top level of a select projection the
+    // is_agg_expr path routes directly to ray_group via resolve_agg_opcode
+    // and never hits compile_expr_dag. Nesting inside a binary op forces
+    // the outer projection through compile_expr_dag, which then recursively
+    // compiles (stddev_pop v) / (var_pop v). Without the switch entries
+    // compile_expr_dag returns NULL and the whole select errors with "domain".
+    ASSERT_EQ(
+        "(set t (table [v] (list [10 20 30])))"
+        "(at (select {from: t x: (+ 0.0 (stddev_pop v))}) 'x)",
+        "[8.16]");
+    ASSERT_EQ(
+        "(set t (table [v] (list [10 20 30])))"
+        "(at (select {from: t x: (+ 0.0 (var_pop v))}) 'x)",
+        "[66.67]");
+
+    // window-join across two partitions — exercises narrow-width sym reads
+    // in the sort-merge compare (RAY_SYM_W8 for 2-sym tables would misread
+    // if the compare assumed 8-byte stride).
+    //   AAPL trade @ 01 window [00, 02]: AAPL quotes at 00, 02  -> min=100 max=201
+    //   MSFT trade @ 01 window [00, 02]: MSFT quotes at 00, 02  -> min=300 max=401
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [AAPL MSFT] [10:00:01.000 10:00:01.000] [10 20])))"
+        "(set quotes (table [Sym Time Bid Ask] (list "
+        "  [AAPL AAPL AAPL MSFT MSFT MSFT] "
+        "  [10:00:00.000 10:00:02.000 10:00:04.000 10:00:00.000 10:00:02.000 10:00:04.000] "
+        "  [100 101 102 300 301 302] "
+        "  [200 201 202 400 401 402])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {lo: (min Bid)}) 'lo)",
+        "[100 300]");
+    ASSERT_EQ(
+        "(set trades (table [Sym Time Price] (list [AAPL MSFT] [10:00:01.000 10:00:01.000] [10 20])))"
+        "(set quotes (table [Sym Time Bid Ask] (list "
+        "  [AAPL AAPL AAPL MSFT MSFT MSFT] "
+        "  [10:00:00.000 10:00:02.000 10:00:04.000 10:00:00.000 10:00:02.000 10:00:04.000] "
+        "  [100 101 102 300 301 302] "
+        "  [200 201 202 400 401 402])))"
+        "(set intervals (map-left + [-1000 1000] (at trades 'Time)))"
+        "(at (window-join [Sym Time] intervals trades quotes {hi: (max Ask)}) 'hi)",
+        "[201 401]");
+
     // window-join with raw column (TYPE_MAPGROUP)
     ASSERT_EQ(
         "(set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))"

@@ -445,3 +445,62 @@ ray_t* ray_dev_fn(ray_t* x) {
     }
     return make_f64(sqrt(var / (double)cnt));
 }
+
+/* Shared core for variance / stddev in sample or population mode.
+ * sample=1 -> divide sum-of-squares by (n-1); sample=0 -> divide by n.
+ * take_sqrt=1 -> stddev; take_sqrt=0 -> variance. */
+static ray_t* var_stddev_core(ray_t* x, int sample, int take_sqrt) {
+    if (ray_is_lazy(x)) x = ray_lazy_materialize(x);
+    if (RAY_IS_ERR(x)) return x;
+    if (ray_is_atom(x)) {
+        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
+        if (is_numeric(x)) return sample ? ray_typed_null(-RAY_F64) : make_f64(0.0);
+        return ray_error("type", NULL);
+    }
+
+    double* vals = NULL;
+    ray_t*  scratch = NULL;
+    int64_t cnt = 0;
+
+    if (ray_is_vec(x)) {
+        if (ray_len(x) == 0) return ray_typed_null(-RAY_F64);
+        scratch = vec_to_f64_scratch(x, &vals);
+        if (RAY_IS_ERR(scratch)) return scratch;
+        cnt = scratch->len;
+    } else if (is_list(x)) {
+        int64_t len = ray_len(x);
+        if (len == 0) return ray_typed_null(-RAY_F64);
+        ray_t** elems = (ray_t**)ray_data(x);
+        /* Use a fresh f64 vec as a scratch buffer so we reuse the vec path's cleanup. */
+        scratch = ray_vec_new(RAY_F64, len);
+        if (RAY_IS_ERR(scratch)) return scratch;
+        vals = (double*)ray_data(scratch);
+        for (int64_t i = 0; i < len; i++) {
+            if (!is_numeric(elems[i])) { ray_release(scratch); return ray_error("type", NULL); }
+            if (!RAY_ATOM_IS_NULL(elems[i])) vals[cnt++] = as_f64(elems[i]);
+        }
+        scratch->len = cnt;
+    } else {
+        return ray_error("type", NULL);
+    }
+
+    if (cnt == 0 || (sample && cnt <= 1)) {
+        ray_release(scratch);
+        return ray_typed_null(-RAY_F64);
+    }
+
+    double sum = 0.0;
+    for (int64_t i = 0; i < cnt; i++) sum += vals[i];
+    double mean = sum / (double)cnt;
+    double sqdiff = 0.0;
+    for (int64_t i = 0; i < cnt; i++) { double d = vals[i] - mean; sqdiff += d * d; }
+    ray_release(scratch);
+    double divisor = sample ? (double)(cnt - 1) : (double)cnt;
+    double v = sqdiff / divisor;
+    return make_f64(take_sqrt ? sqrt(v) : v);
+}
+
+ray_t* ray_stddev_fn(ray_t* x)     { return var_stddev_core(x, 1, 1); }
+ray_t* ray_stddev_pop_fn(ray_t* x) { return var_stddev_core(x, 0, 1); }
+ray_t* ray_var_fn(ray_t* x)        { return var_stddev_core(x, 1, 0); }
+ray_t* ray_var_pop_fn(ray_t* x)    { return var_stddev_core(x, 0, 0); }

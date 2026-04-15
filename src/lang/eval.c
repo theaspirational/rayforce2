@@ -1950,7 +1950,12 @@ static void ray_register_builtins(void) {
     register_unary("first", RAY_FN_NONE, ray_first_fn);
     register_unary("last",  RAY_FN_NONE, ray_last_fn);
     register_unary("med",   RAY_FN_AGGR, ray_med_fn);
-    register_unary("dev",   RAY_FN_AGGR, ray_dev_fn);
+    register_unary("dev",        RAY_FN_AGGR, ray_dev_fn);
+    register_unary("stddev",     RAY_FN_AGGR, ray_stddev_fn);
+    register_unary("stddev_pop", RAY_FN_AGGR, ray_stddev_pop_fn);
+    register_unary("dev_pop",    RAY_FN_AGGR, ray_stddev_pop_fn);
+    register_unary("var",        RAY_FN_AGGR, ray_var_fn);
+    register_unary("var_pop",    RAY_FN_AGGR, ray_var_pop_fn);
 
     /* Error handling */
     register_unary("raise", RAY_FN_NONE, ray_raise_fn);

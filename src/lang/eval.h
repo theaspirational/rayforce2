@@ -217,6 +217,10 @@ ray_t* ray_first_fn(ray_t* x);
 ray_t* ray_last_fn(ray_t* x);
 ray_t* ray_med_fn(ray_t* x);
 ray_t* ray_dev_fn(ray_t* x);
+ray_t* ray_stddev_fn(ray_t* x);
+ray_t* ray_stddev_pop_fn(ray_t* x);
+ray_t* ray_var_fn(ray_t* x);
+ray_t* ray_var_pop_fn(ray_t* x);
 
 /* Higher-order */
 ray_t* ray_map_fn(ray_t** args, int64_t n);
