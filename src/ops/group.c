@@ -720,14 +720,15 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
      * Max size: 8 + 9*8 + 8*8 = 144 bytes. */
     char ebuf[8 + 9 * 8 + 8 * 8];
 
-    /* Always consult ray_vec_is_null per row when a key_vecs slot exists —
-     * it has its own HAS_NULLS fast path so this costs only a function
-     * call per key per row, and keeps null semantics independent of
-     * which execution path (DA-bail, single-HT, radix) got selected. */
+    /* Check which key columns can produce nulls (parent vec's HAS_NULLS
+     * attr for slices) — skips per-row null checks on the fast path. */
     uint8_t nullable_mask = 0;
-    if (key_vecs) {
-        for (uint8_t k = 0; k < nk; k++)
-            if (key_vecs[k]) nullable_mask |= (uint8_t)(1u << k);
+    for (uint8_t k = 0; k < nk; k++) {
+        if (!key_vecs || !key_vecs[k]) continue;
+        ray_t* kv = key_vecs[k];
+        ray_t* src = (kv->attrs & RAY_ATTR_SLICE) ? kv->slice_parent : kv;
+        if (src && (src->attrs & RAY_ATTR_HAS_NULLS))
+            nullable_mask |= (uint8_t)(1u << k);
     }
 
     /* Wire the HT's key_data pointer table so probe/rehash can
@@ -3145,13 +3146,16 @@ ht_path:;
             radix_bufs[i].cap = buf_init;
         }
 
-        /* Enable per-row null checks for every present key column.
-         * ray_vec_is_null has its own HAS_NULLS fast path, so this costs
-         * only a function call per key per row — cheaper than letting
-         * null semantics drift between execution paths. */
+        /* Compute per-key nullability — lets phase1 skip null checks on
+         * key columns with no nulls (the common case). */
         uint8_t p1_nullable = 0;
-        for (uint8_t k = 0; k < n_keys; k++)
-            if (key_vecs[k]) p1_nullable |= (uint8_t)(1u << k);
+        for (uint8_t k = 0; k < n_keys; k++) {
+            if (!key_vecs[k]) continue;
+            ray_t* src = (key_vecs[k]->attrs & RAY_ATTR_SLICE)
+                         ? key_vecs[k]->slice_parent : key_vecs[k];
+            if (src && (src->attrs & RAY_ATTR_HAS_NULLS))
+                p1_nullable |= (uint8_t)(1u << k);
+        }
 
         /* Phase 1: parallel hash + copy keys/agg values into fat entries */
         radix_phase1_ctx_t p1ctx = {
