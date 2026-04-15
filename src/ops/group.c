@@ -4260,6 +4260,9 @@ bool pivot_ingest_run(pivot_ingest_t* out,
         if (!group_ht_init(seq, seq_cap, ly)) return false;
         pivot_ingest_sequential(out, ly, key_data, key_types, key_attrs,
                                 key_vecs, agg_vecs, n_scan, seq);
+        /* Surface grow-path OOM from group_probe_entry so callers don't
+         * silently see a truncated result. */
+        if (seq->oom) return false;
         return true;
     }
 
@@ -4330,10 +4333,29 @@ bool pivot_ingest_run(pivot_ingest_t* out,
         .key_data  = key_data,
     };
     ray_pool_dispatch_n(pool, radix_phase2_fn, &p2ctx, RADIX_P);
-    if (ray_interrupted()) { out->part_hts = part_hts; out->n_parts = RADIX_P; return true; }
-
     out->part_hts = part_hts;
     out->n_parts = RADIX_P;
+    if (ray_interrupted()) return true;
+
+    /* OOM detection for the parallel path. Two distinct failure modes
+     * must be caught here so callers never see a silently-truncated
+     * result:
+     *   (a) phase2 init failed — radix_phase2_fn `continue`s when
+     *       group_ht_init_sized returns false, leaving the partition
+     *       HT with NULL rows despite a non-zero buffer count. Every
+     *       entry routed into that partition would be dropped.
+     *   (b) grow-path OOM — group_probe_entry sets part_hts[p].oom
+     *       on scratch_realloc failure and returns without inserting
+     *       the key, silently truncating later groups. */
+    for (uint32_t p = 0; p < RADIX_P; p++) {
+        if (part_hts[p].oom) return false;
+        if (part_hts[p].rows) continue;
+        uint32_t pcount = 0;
+        for (uint32_t w = 0; w < n_total; w++)
+            pcount += radix_bufs[(size_t)w * RADIX_P + p].count;
+        if (pcount) return false;
+    }
+
     out->part_offsets[0] = 0;
     for (uint32_t p = 0; p < RADIX_P; p++)
         out->part_offsets[p + 1] = out->part_offsets[p] + part_hts[p].grp_count;

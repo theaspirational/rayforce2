@@ -303,8 +303,10 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
      * sequential single-HT for smaller inputs. */
     pivot_ingest_t pg;
     if (!pivot_ingest_run(&pg, &ly, key_data, key_types, key_attrs,
-                          key_vecs, agg_vecs, nrows))
+                          key_vecs, agg_vecs, nrows)) {
+        pivot_ingest_free(&pg);
         return ray_error("oom", NULL);
+    }
     if (ray_interrupted()) { pivot_ingest_free(&pg); return ray_error("cancel", "interrupted"); }
     uint32_t grp_count = pg.total_grps;
     if (grp_count == 0) { pivot_ingest_free(&pg); return ray_table_new(0); }
