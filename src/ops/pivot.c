@@ -267,14 +267,17 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     void*   key_data[8];
     int8_t  key_types[8];
     uint8_t key_attrs[8];
+    ray_t*  key_vecs[8];
     for (uint8_t k = 0; k < n_idx; k++) {
         key_data[k]  = ray_data(idx_vecs[k]);
         key_types[k] = idx_vecs[k]->type;
         key_attrs[k] = idx_vecs[k]->attrs;
+        key_vecs[k]  = idx_vecs[k];
     }
     key_data[n_idx]  = ray_data(pcol);
     key_types[n_idx] = pcol->type;
     key_attrs[n_idx] = pcol->attrs;
+    key_vecs[n_idx]  = pcol;
 
     /* Single agg input: value column */
     ray_t* agg_vecs[1] = { vcol };
@@ -293,7 +296,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     group_ht_t ht;
     if (!group_ht_init(&ht, ht_cap, &ly)) return ray_error("oom", NULL);
-    group_rows_range(&ht, key_data, key_types, key_attrs, agg_vecs,
+    group_rows_range(&ht, key_data, key_types, key_attrs, key_vecs, agg_vecs,
                      0, nrows, NULL);
 
     uint32_t grp_count = ht.grp_count;

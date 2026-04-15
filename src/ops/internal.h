@@ -768,7 +768,7 @@ void group_ht_free(group_ht_t* ht);
  * When match_idx is NULL, `row = i` — iterating directly over source
  * column rows (no selection). */
 void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
-                      uint8_t* key_attrs, ray_t** agg_vecs,
+                      uint8_t* key_attrs, ray_t** key_vecs, ray_t** agg_vecs,
                       int64_t start, int64_t end,
                       const int64_t* match_idx);
 

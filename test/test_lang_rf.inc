@@ -2881,6 +2881,19 @@ static MunitResult test_rf_query(const void* params, void* fixture) {
         "(select {from: trades by: (xbar Ts 10000)})",
         "(table [Ts Sym Price] (list [09:00:01.000 09:00:11.000] [a a] [10 30]))");
 
+    // --- Null group keys (gh#6): a null key must form its own group
+    //     distinct from real 0, and the output key column must carry
+    //     the null bit (displayed as 0Nl). ---
+    ASSERT_EQ(
+        "(set tn (table [g v] (list [1 0Nl 2] [10 20 30])))"
+        "(select {s: (sum v) from: tn by: g})",
+        "(table [g s] (list [1 0Nl 2] [10 20 30]))");
+    // Null and real 0 must NOT merge, and two nulls must group together.
+    ASSERT_EQ(
+        "(set tn2 (table [g v] (list [1 0Nl 0 0Nl 2] [10 20 100 200 30])))"
+        "(select {s: (sum v) from: tn2 by: g})",
+        "(table [g s] (list [1 0Nl 0 2] [10 220 100 30]))");
+
     // Test and with select - this exposes the parallel processing bug
     ASSERT_EQ(
         "(set t (table ['a 'b 'c] (list (take [false true] 25001) (take [true false] 25001) (take 1 25001)))) (count "
