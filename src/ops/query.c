@@ -880,10 +880,26 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1)
             by_key_sym = ((int64_t*)ray_data(by_expr))[0];
 
-        /* Check if group key is a LIST/STR column — the DAG executor
-         * still falls back to eval-level grouping for those.  RAY_GUID
-         * now uses the wide-key row-indirection path in group.c and
-         * goes through the parallel HT path. */
+        /* Detect non-aggregate expressions before routing so we can
+         * decide whether GUID keys go to the DAG HT path or fall back
+         * to eval-level. */
+        int any_nonagg = 0;
+        if (n_out > 0) {
+            for (int64_t i = 0; i + 1 < dict_n; i += 2) {
+                int64_t kid = dict_elems[i]->i64;
+                if (kid == from_id || kid == where_id || kid == by_id ||
+                    kid == take_id || kid == asc_id || kid == desc_id) continue;
+                if (!is_agg_expr(dict_elems[i + 1])) { any_nonagg = 1; break; }
+            }
+        }
+
+        /* Decide routing.  LIST/STR always fall to the eval-level
+         * grouping because the DAG HT path can't pack them into
+         * 8-byte key slots.  GUID is packed via row-indirection in
+         * the HT layout (wide_key_mask), so it uses the parallel DAG
+         * path *except* for queries with non-aggregate expressions
+         * (the non-agg scatter still requires 8-byte-packable key
+         * reads through its KEY_READ macro). */
         int use_eval_group = 0;
         if (by_key_sym >= 0) {
             ray_t* key_col = ray_table_get_col(tbl, by_key_sym);
@@ -891,6 +907,8 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 int8_t kct = key_col->type;
                 if (RAY_IS_PARTED(kct)) kct = (int8_t)RAY_PARTED_BASETYPE(kct);
                 if (kct == RAY_LIST || kct == RAY_STR)
+                    use_eval_group = 1;
+                else if (kct == RAY_GUID && any_nonagg)
                     use_eval_group = 1;
             }
         }
@@ -901,28 +919,19 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
          * only handles single scalar-key by-clauses — for multi-key
          * or computed-key groupings, fall back to eval-level so the
          * non-agg scatter has a well-defined row→group mapping. */
-        if (!use_eval_group && n_out > 0) {
-            int any_nonagg = 0;
-            for (int64_t i = 0; i + 1 < dict_n; i += 2) {
-                int64_t kid = dict_elems[i]->i64;
-                if (kid == from_id || kid == where_id || kid == by_id ||
-                    kid == take_id || kid == asc_id || kid == desc_id) continue;
-                if (!is_agg_expr(dict_elems[i + 1])) { any_nonagg = 1; break; }
+        if (!use_eval_group && any_nonagg) {
+            /* Fast path requires a single scalar-named key column.
+             * Multi-key and computed-key by-clauses with non-agg
+             * expressions are not yet supported. */
+            int single_scalar_key = 0;
+            if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME)) {
+                single_scalar_key = 1;
+            } else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1) {
+                single_scalar_key = 1;
             }
-            if (any_nonagg) {
-                /* Fast path requires a single scalar-named key column.
-                 * Multi-key and computed-key by-clauses with non-agg
-                 * expressions are not yet supported. */
-                int single_scalar_key = 0;
-                if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME)) {
-                    single_scalar_key = 1;
-                } else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1) {
-                    single_scalar_key = 1;
-                }
-                if (!single_scalar_key) {
-                    ray_graph_free(g); ray_release(tbl);
-                    return ray_error("nyi", "non-agg expression with multi-key or computed group key");
-                }
+            if (!single_scalar_key) {
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("nyi", "non-agg expression with multi-key or computed group key");
             }
         }
         if (use_eval_group) {

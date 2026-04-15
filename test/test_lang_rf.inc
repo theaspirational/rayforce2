@@ -5355,6 +5355,21 @@ static MunitResult test_rf_group(const void* params, void* fixture) {
         "(set tg4 (table [G V] (list (guid 1000) (as 'F64 (til 1000)))))"
         "(count (select {from: tg4 by: G s: (sum V)}))", "1000");
 
+    /* Non-agg expression by GUID: the post-DAG non-agg scatter can't
+     * pack 16 bytes into its 8-byte KEY_READ slot, so query.c must
+     * route GUID+non_agg back to the eval-level grouper.  Pure-agg
+     * queries still get the parallel DAG path. */
+    ASSERT_EQ(
+        "(set tg5 (table [G V] (list (take (guid 2) 6) (as 'F64 (til 6)))))"
+        "(count (select {from: tg5 by: G x: (+ V 100)}))", "2");
+    ASSERT_EQ(
+        "(set tg6 (table [G V] (list (take (guid 2) 6) (as 'F64 (til 6)))))"
+        "(count (select {from: tg6 by: G}))", "2");
+    /* Mixed agg + non-agg still resolves via eval path. */
+    ASSERT_EQ(
+        "(set tg7 (table [G V] (list (take (guid 2) 6) (as 'F64 (til 6)))))"
+        "(count (select {from: tg7 by: G s: (sum V) x: (+ V 100)}))", "2");
+
     // ========== GROUP BY STRING COLUMN ==========
     // Tests for grouping by list of strings (TYPE_LIST of TYPE_C8)
     // This tests the fix for parallel radix partitioning bug where identical strings
