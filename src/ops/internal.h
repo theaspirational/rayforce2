@@ -759,6 +759,8 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
                                 const uint16_t* agg_ops,
                                 const int8_t* key_types);
 bool group_ht_init(group_ht_t* ht, uint32_t cap, const ght_layout_t* ly);
+bool group_ht_init_sized(group_ht_t* ht, uint32_t cap,
+                         const ght_layout_t* ly, uint32_t init_grp_cap);
 void group_ht_free(group_ht_t* ht);
 /* Hash-aggregate rows [start, end) into ht.
  *

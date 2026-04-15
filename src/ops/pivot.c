@@ -298,15 +298,22 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     ght_layout_t ly = ght_compute_layout(n_keys, 1, agg_vecs, need_flags, agg_ops, key_types);
 
-    /* Hash-aggregate all rows */
+    /* Hash-aggregate all rows. Size HT to 2× nrows so the load factor
+     * stays below 0.5 even when every input row is its own group (common
+     * when index columns have high cardinality) — avoids repeated rehash
+     * grows during ingest on large pivots. */
     uint32_t ht_cap = 1024;
-    while (ht_cap < (uint32_t)nrows / 4 && ht_cap < (1u << 24)) ht_cap <<= 1;
+    uint64_t target = (uint64_t)nrows * 2;
+    while ((uint64_t)ht_cap < target && ht_cap < (1u << 24)) ht_cap <<= 1;
 
+    /* Pre-size the group row store too so we don't pay repeated
+     * grow-realloc copies during ingest on large, high-cardinality
+     * inputs (avoids ~log2(nrows) realloc passes). */
+    uint32_t init_grp_cap = nrows > 256 ? (uint32_t)(nrows < (1 << 24) ? nrows : (1 << 24)) : 256;
     group_ht_t ht;
-    if (!group_ht_init(&ht, ht_cap, &ly)) return ray_error("oom", NULL);
+    if (!group_ht_init_sized(&ht, ht_cap, &ly, init_grp_cap)) return ray_error("oom", NULL);
     group_rows_range(&ht, key_data, key_types, key_attrs, key_vecs, agg_vecs,
                      0, nrows, NULL);
-
     uint32_t grp_count = ht.grp_count;
     if (grp_count == 0) { group_ht_free(&ht); return ray_table_new(0); }
 
