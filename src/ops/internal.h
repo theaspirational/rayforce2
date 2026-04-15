@@ -353,6 +353,7 @@ static inline ray_t* typed_vec_new(int8_t type, uint8_t attrs, int64_t cap) {
  * ══════════════════════════════════════════ */
 
 static inline bool pool_cancelled(ray_pool_t* pool) {
+    if (RAY_UNLIKELY(ray_interrupted())) return true;
     return pool && RAY_UNLIKELY(atomic_load_explicit(&pool->cancelled,
                                                      memory_order_relaxed));
 }

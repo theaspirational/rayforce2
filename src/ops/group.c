@@ -3421,6 +3421,8 @@ sequential_fallback:;
     }
     group_rows_range(&single_ht, key_data, key_types, key_attrs, key_vecs, agg_vecs,
                      0, n_scan, match_idx);
+    if (ray_interrupted()) { result = ray_error("cancel", "interrupted"); goto cleanup; }
+    if (single_ht.oom) { result = ray_error("oom", NULL); goto cleanup; }
 
     final_ht = &single_ht;
 
