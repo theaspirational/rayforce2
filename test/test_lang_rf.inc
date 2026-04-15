@@ -2908,6 +2908,17 @@ static MunitResult test_rf_query(const void* params, void* fixture) {
         " ['a 'b 'a] [10 20 30])))"
         "(count (pivot gpt ['g] 'p 'v sum))",
         "2");
+    // Duplicate GUID *pivot-column* values must merge into one output
+    // column — exercised the grp_pv lookup that originally compared raw
+    // row-index slots instead of the 16-byte GUID bytes.
+    ASSERT_EQ(
+        "(set gpt2 (table [i p v] (list [1 2 1] "
+        " (as 'GUID (list \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\" "
+        "                 \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\" "
+        "                 \"7e42b82b-51c7-4468-a477-375bd5006e60\")) "
+        " [10 20 30])))"
+        "(count (cols (pivot gpt2 ['i] 'p 'v sum)))",
+        "3");
 
     // Test and with select - this exposes the parallel processing bug
     ASSERT_EQ(

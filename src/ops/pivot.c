@@ -445,11 +445,18 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             memcpy(dst + 8 + (size_t)n_idx * 8, &idx_nmask, 8);
         }
 
-        /* Find pivot column index */
+        /* Find pivot column index. For wide pivot keys both slot values
+         * are source row indices — resolve to actual bytes for compare,
+         * otherwise duplicate GUID pivot values map to the wrong column. */
         int64_t pval = keys[n_idx];
-        uint32_t pv_idx = 0;
+        uint32_t pv_idx = UINT32_MAX;
         for (uint32_t p = 0; p < pv_count; p++) {
-            if (pv_vals[p] == pval) { pv_idx = p; break; }
+            if (pvt_wide) {
+                if (memcmp(pvt_base + (size_t)pv_vals[p] * 16,
+                           pvt_base + (size_t)pval * 16, 16) == 0) { pv_idx = p; break; }
+            } else {
+                if (pv_vals[p] == pval) { pv_idx = p; break; }
+            }
         }
 
         grp_ix[gi] = ix_row;
