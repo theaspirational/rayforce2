@@ -2909,16 +2909,22 @@ static MunitResult test_rf_query(const void* params, void* fixture) {
         "(count (pivot gpt ['g] 'p 'v sum))",
         "2");
     // Duplicate GUID *pivot-column* values must merge into one output
-    // column — exercised the grp_pv lookup that originally compared raw
-    // row-index slots instead of the 16-byte GUID bytes.
+    // column AND each source row must land in the correct column. The
+    // grp_pv lookup originally compared raw row-index slots; rows sharing
+    // the same GUID at different source positions missed the match and
+    // fell back to column 0, silently routing values to the wrong cell.
+    // The data below puts GUID_B first (so GUID_A is pv column 1) and
+    // has an i=2 row under the duplicate GUID_A: its value must sum into
+    // the GUID_A column, not GUID_B.
     ASSERT_EQ(
-        "(set gpt2 (table [i p v] (list [1 2 1] "
-        " (as 'GUID (list \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\" "
+        "(set gpt2 (table [i p v] (list [1 1 2] "
+        " (as 'GUID (list \"7e42b82b-51c7-4468-a477-375bd5006e60\" "
         "                 \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\" "
-        "                 \"7e42b82b-51c7-4468-a477-375bd5006e60\")) "
-        " [10 20 30])))"
-        "(count (cols (pivot gpt2 ['i] 'p 'v sum)))",
-        "3");
+        "                 \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\")) "
+        " [30 10 20])))"
+        "(set rpt2 (pivot gpt2 ['i] 'p 'v sum))"
+        "(sum (first (at rpt2 [d49f18a4-1969-49e8-9b8a-6bb9a4832eea])))",
+        "30");
 
     // Test and with select - this exposes the parallel processing bug
     ASSERT_EQ(

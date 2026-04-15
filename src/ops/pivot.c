@@ -357,7 +357,10 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     }
 
     /* Collect distinct index keys.
-     * Build a small HT mapping index-key-combo -> row index in output.
+     * Flat append-only entry array + secondary open-addressed HT keyed by
+     * the hash of (idx_keys + idx_null_mask). The HT makes phase2 dedupe
+     * O(grp_count) instead of the previous O(grp_count * ix_count)
+     * linear scan which hung on large pivots.
      * Entry layout: [hash:8 | idx_keys:8*n_idx | idx_null_mask:8]. */
     uint32_t ix_cap = 256, ix_count = 0;
     ray_t* ix_hdr = NULL;
@@ -366,10 +369,22 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     char* ix_rows = (char*)scratch_alloc(&ix_hdr, ix_cap * ix_entry);
     if (!ix_rows) { scratch_free(pv_hdr); group_ht_free(&ht); return ray_error("oom", NULL); }
 
+    /* Secondary HT: hash slot -> ix_row index; empty = UINT32_MAX. */
+    uint32_t ix_ht_cap = 256;
+    while (ix_ht_cap < (uint32_t)grp_count * 2 && ix_ht_cap < (1u << 30)) ix_ht_cap <<= 1;
+    ray_t* ix_ht_hdr = NULL;
+    uint32_t* ix_ht = (uint32_t*)scratch_alloc(&ix_ht_hdr, ix_ht_cap * sizeof(uint32_t));
+    if (!ix_ht) {
+        scratch_free(ix_hdr); scratch_free(pv_hdr); group_ht_free(&ht);
+        return ray_error("oom", NULL);
+    }
+    memset(ix_ht, 0xFF, ix_ht_cap * sizeof(uint32_t));
+    uint32_t ix_ht_mask = ix_ht_cap - 1;
+
     /* Map: group_id -> (ix_row, pv_idx) for result cell placement */
     ray_t* map_hdr = NULL;
     uint32_t* grp_ix  = (uint32_t*)scratch_alloc(&map_hdr, grp_count * 2 * sizeof(uint32_t));
-    if (!grp_ix) { scratch_free(ix_hdr); scratch_free(pv_hdr); group_ht_free(&ht); return ray_error("oom", NULL); }
+    if (!grp_ix) { scratch_free(ix_ht_hdr); scratch_free(ix_hdr); scratch_free(pv_hdr); group_ht_free(&ht); return ray_error("oom", NULL); }
     uint32_t* grp_pv = grp_ix + grp_count;
 
     for (uint32_t gi = 0; gi < grp_count; gi++) {
@@ -401,30 +416,30 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
         if (idx_nmask) ih = ray_hash_combine(ih, ray_hash_i64(idx_nmask));
 
-        /* Find or insert index key. For wide keys, compare actual bytes
-         * from the source column; for narrow keys, the slot value is
-         * the key itself. */
+        /* Open-addressed HT probe. On match, reuse; else insert. */
         uint32_t ix_row = UINT32_MAX;
-        for (uint32_t j = 0; j < ix_count; j++) {
-            const char* ix_entry_p = ix_rows + j * ix_entry;
-            if (*(const uint64_t*)ix_entry_p != ih) continue;
-            const int64_t* ekeys = (const int64_t*)(ix_entry_p + 8);
-            bool eq = true;
-            for (uint8_t k = 0; k < n_idx && eq; k++) {
-                if (idx_wide[k]) {
-                    const char* base = (const char*)key_data[k];
-                    eq = (memcmp(base + (size_t)ekeys[k] * 16,
-                                  base + (size_t)keys[k] * 16, 16) == 0);
-                } else {
-                    eq = (ekeys[k] == keys[k]);
+        uint32_t slot = (uint32_t)(ih & ix_ht_mask);
+        for (;;) {
+            uint32_t ent = ix_ht[slot];
+            if (ent == UINT32_MAX) break; /* empty → insert below */
+            const char* ix_entry_p = ix_rows + (size_t)ent * ix_entry;
+            if (*(const uint64_t*)ix_entry_p == ih) {
+                const int64_t* ekeys = (const int64_t*)(ix_entry_p + 8);
+                bool eq = true;
+                for (uint8_t k = 0; k < n_idx && eq; k++) {
+                    if (idx_wide[k]) {
+                        const char* base = (const char*)key_data[k];
+                        eq = (memcmp(base + (size_t)ekeys[k] * 16,
+                                      base + (size_t)keys[k] * 16, 16) == 0);
+                    } else {
+                        eq = (ekeys[k] == keys[k]);
+                    }
                 }
+                int64_t ent_nmask;
+                memcpy(&ent_nmask, ix_entry_p + 8 + (size_t)n_idx * 8, 8);
+                if (eq && ent_nmask == idx_nmask) { ix_row = ent; break; }
             }
-            if (!eq) continue;
-            int64_t ent_nmask;
-            memcpy(&ent_nmask, ix_entry_p + 8 + (size_t)n_idx * 8, 8);
-            if (ent_nmask != idx_nmask) continue;
-            ix_row = j;
-            break;
+            slot = (slot + 1) & ix_ht_mask;
         }
         if (ix_row == UINT32_MAX) {
             if (ix_count >= ix_cap) {
@@ -432,17 +447,19 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                 char* new_rows = (char*)scratch_realloc(&ix_hdr,
                     ix_cap * ix_entry, new_cap * ix_entry);
                 if (!new_rows) {
-                    scratch_free(map_hdr); scratch_free(pv_hdr);
-                    group_ht_free(&ht); return ray_error("oom", NULL);
+                    scratch_free(map_hdr); scratch_free(ix_ht_hdr);
+                    scratch_free(pv_hdr); group_ht_free(&ht);
+                    return ray_error("oom", NULL);
                 }
                 ix_rows = new_rows;
                 ix_cap = new_cap;
             }
             ix_row = ix_count++;
-            char* dst = ix_rows + ix_row * ix_entry;
+            char* dst = ix_rows + (size_t)ix_row * ix_entry;
             *(uint64_t*)dst = ih;
             memcpy(dst + 8, keys, (size_t)n_idx * 8);
             memcpy(dst + 8 + (size_t)n_idx * 8, &idx_nmask, 8);
+            ix_ht[slot] = ix_row;
         }
 
         /* Find pivot column index. For wide pivot keys both slot values
@@ -622,6 +639,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
 pivot_cleanup:
     scratch_free(map_hdr);
+    scratch_free(ix_ht_hdr);
     scratch_free(ix_hdr);
     scratch_free(pv_hdr);
     group_ht_free(&ht);
