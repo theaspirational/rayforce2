@@ -5422,6 +5422,16 @@ static MunitResult test_rf_group(const void* params, void* fixture) {
      * (0+1+2+3+4+5 = 15). */
     ASSERT_EQ("(sum (at rD 's))", "15.0");
 
+    /* Trailing sort clause must be able to reference the dict-form
+     * alias (the rename has to happen BEFORE apply_sort_take, or
+     * the sort looks up a non-existent column and errors with nyi). */
+    ASSERT_EQ(
+        "(set gsE (take (guid 3) 9))"
+        "(set tE (table [G V] (list gsE (as 'F64 (til 9)))))"
+        "(set rE (select {from: tE by: {o: G} s: (sum V) asc: s}))"
+        "(at (at rE 's) 0)", "9.0");  /* smallest group sum first */
+    ASSERT_EQ("(at (at rE 's) 2)", "15.0");
+
     // ========== GROUP BY STRING COLUMN ==========
     // Tests for grouping by list of strings (TYPE_LIST of TYPE_C8)
     // This tests the fix for parallel radix partitioning bug where identical strings

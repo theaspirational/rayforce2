@@ -2228,16 +2228,15 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
     ray_release(tbl);
 
-    /* Post-process: apply sort/take for group-by queries.  Runs
-     * last so non-agg LIST columns are already in the result,
-     * allowing sort clauses to reference non-agg output columns. */
-    if (by_expr && (has_sort || take_expr))
-        result = apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
-
     /* Dict-form by: rename the first by_names_count columns of the
      * result table to the override names the caller specified.  The
-     * key columns are always the leading columns, matching the order
-     * of the sym vector we synthesised from the dict values. */
+     * key columns are always the leading columns, matching the
+     * order of the sym vector we synthesised from the dict values.
+     *
+     * This rename must run BEFORE apply_sort_take so a trailing
+     * sort clause can reference the alias (e.g.
+     *   {by: {o: OrderId} s: (sum Price) asc: o}
+     * ). */
     if (by_names_block && result && !RAY_IS_ERR(result) && result->type == RAY_TABLE) {
         int64_t nk = by_names_count;
         int64_t ncols = ray_table_ncols(result);
@@ -2246,6 +2245,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         for (int64_t i = 0; i < nk; i++)
             ray_table_set_col_name(result, i, nms[i]);
     }
+
+    /* Post-process: apply sort/take for group-by queries.  Runs
+     * last so non-agg LIST columns are already in the result,
+     * allowing sort clauses to reference non-agg output columns. */
+    if (by_expr && (has_sort || take_expr))
+        result = apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
+
     if (by_sym_vec_owned) ray_release(by_sym_vec_owned);
     if (by_names_block)   ray_release(by_names_block);
 
