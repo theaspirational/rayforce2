@@ -5398,6 +5398,30 @@ static MunitResult test_rf_group(const void* params, void* fixture) {
         "(set rg10 (select {from: tg10 by: G s: (sum V)}))"
         "(sum (as 'I64 (== (asc (at rg10 'G)) (asc gs10))))", "100");
 
+    /* Dict-form by-clause: {o: OrderId b: Symbol} should produce a
+     * multi-key group-by with result columns renamed to the dict
+     * keys.  Previously errored with "domain" because the parser
+     * emitted a RAY_LIST with DICT attrs and query.c had no branch
+     * for that shape.
+     *
+     * Cycle lengths: guids=2, syms=3, rows=6 → 6 distinct (G,S) combos
+     * (each pair appears exactly once), giving 6 groups.  Sum per
+     * group is just the Price value at that row. */
+    ASSERT_EQ(
+        "(set gsD (take (guid 2) 6))"
+        "(set tD (table [G S V] (list gsD (take [A B C] 6) (as 'F64 (til 6)))))"
+        "(set rD (select {from: tD by: {o: G b: S} s: (sum V)}))"
+        "(count rD)", "6");
+    /* Output columns must be named o, b, s — accessible via the
+     * dict keys, not the source col names.  Accessing the source
+     * col G must now fail because the column was renamed to o. */
+    ASSERT_EQ("(count (at rD 'o))", "6");
+    ASSERT_EQ("(count (at rD 'b))", "6");
+    ASSERT_EQ("(count (at rD 's))", "6");
+    /* Total of the per-combo sums equals total of the source values
+     * (0+1+2+3+4+5 = 15). */
+    ASSERT_EQ("(sum (at rD 's))", "15.0");
+
     // ========== GROUP BY STRING COLUMN ==========
     // Tests for grouping by list of strings (TYPE_LIST of TYPE_C8)
     // This tests the fix for parallel radix partitioning bug where identical strings
