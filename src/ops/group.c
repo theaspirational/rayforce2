@@ -4248,12 +4248,14 @@ bool pivot_ingest_run(pivot_ingest_t* out,
     bool parallel_ok = (pool && n_scan >= RAY_PARALLEL_THRESHOLD && n_total > 1);
 
     if (!parallel_ok) {
-        /* Sequential single-HT path — allocate the HT in its own scratch block
-         * so pivot_ingest_free can release it uniformly alongside the
-         * radix part_hts array in the parallel case. */
-        group_ht_t* seq = (group_ht_t*)scratch_alloc(&out->_part_hts_hdr,
+        /* Sequential single-HT path — allocate the HT in its own scratch
+         * block and wire part_hts/n_parts immediately so every failure
+         * below funnels through pivot_ingest_free for cleanup. */
+        group_ht_t* seq = (group_ht_t*)scratch_calloc(&out->_part_hts_hdr,
             sizeof(group_ht_t));
         if (!seq) return false;
+        out->part_hts = seq;
+        out->n_parts = 1;
         uint32_t seq_cap = 1024;
         uint64_t target = (uint64_t)n_scan * 2;
         while ((uint64_t)seq_cap < target && seq_cap < (1u << 24)) seq_cap <<= 1;
