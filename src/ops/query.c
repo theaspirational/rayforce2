@@ -890,27 +890,32 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 fail_err = ray_error("domain", "by-dict key must be a symbol name");
                 failed = true; break;
             }
+            /* Duplicate key guard: {g: A g: B} would otherwise append
+             * two cols both named g, then group on the first g twice
+             * (silently dropping B).  Reject explicitly. */
+            bool duplicate_key = false;
+            for (int64_t j = 0; j < i && !duplicate_key; j++)
+                if (d_elems[j * 2]->i64 == k->i64) duplicate_key = true;
+            if (duplicate_key) {
+                fail_err = ray_error("domain", "by-dict has duplicate key");
+                failed = true; break;
+            }
             /* Collision check: if the dict key already exists in the
              * input table, ray_table_add_col would append a second
              * column with the same name and ray_table_get_col finds
              * the ORIGINAL, so the group-by would silently scan the
              * user's existing column instead of our materialised
-             * one.  Allow two specific exceptions:
-             *   - {x: x} (trivial self-alias — existing col already
-             *      is what we want)
-             *   - a later dict key reusing a name we just added in
-             *     this loop (guarded separately via i_added[]). */
+             * one.  The one allowed exception is {x: x}, a trivial
+             * self-alias: the input column is already exactly what
+             * we want to group on. */
             bool already_in_tbl = (ray_table_get_col(tbl, k->i64) != NULL);
             bool trivial_self = (v->type == -RAY_SYM && v->i64 == k->i64);
-            bool we_added_it = false;
-            for (int64_t j = 0; j < i && !we_added_it; j++)
-                if (d_elems[j * 2]->i64 == k->i64) we_added_it = true;
-            if (already_in_tbl && !trivial_self && !we_added_it) {
+            if (already_in_tbl && !trivial_self) {
                 fail_err = ray_error("domain",
                     "by-dict alias shadows an existing input column");
                 failed = true; break;
             }
-            if (trivial_self && !we_added_it) {
+            if (trivial_self) {
                 /* No eval / no add: just group on the existing col. */
                 sv_data[i] = k->i64;
                 continue;

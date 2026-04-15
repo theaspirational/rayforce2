@@ -5466,6 +5466,13 @@ static MunitResult test_rf_group(const void* params, void* fixture) {
     ASSERT_EQ("(at (at rTS 's) 0)", "3");  /* a: 1+2 */
     ASSERT_EQ("(at (at rTS 's) 1)", "3");  /* b: 3 */
 
+    /* Duplicate dict keys: {g: A g: B} previously appended two cols
+     * both named g and silently grouped on A twice, dropping B.
+     * Reject with a domain error. */
+    ASSERT_ER(
+        "(set tDup (table [A B V] (list [a a b b] [x y x y] [1 2 3 4])))"
+        "(select {from: tDup by: {g: A g: B} s: (sum V)})", "domain");
+
     // ========== GROUP BY STRING COLUMN ==========
     // Tests for grouping by list of strings (TYPE_LIST of TYPE_C8)
     // This tests the fix for parallel radix partitioning bug where identical strings
