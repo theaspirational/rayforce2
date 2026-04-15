@@ -451,6 +451,7 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
 static bool group_ht_init_sized(group_ht_t* ht, uint32_t cap,
                                  const ght_layout_t* ly, uint32_t init_grp_cap) {
     ht->ht_cap = cap;
+    ht->oom = 0;
     ht->layout = *ly;
     /* key_data must be populated by the caller via group_ht_set_key_data
      * whenever wide_key_mask != 0. */
@@ -675,7 +676,7 @@ static inline uint32_t group_probe_entry(group_ht_t* ht,
         if (sv == HT_EMPTY) {
             /* New group */
             if (ht->grp_count >= ht->grp_cap) {
-                if (!group_ht_grow(ht)) return mask; /* OOM: stop adding groups */
+                if (!group_ht_grow(ht)) { ht->oom = 1; return mask; }
             }
             uint32_t gid = ht->grp_count++;
             char* row = ht->rows + (size_t)gid * ly->row_stride;

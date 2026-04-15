@@ -310,6 +310,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     if (!group_ht_init(&ht, ht_cap, &ly)) return ray_error("oom", NULL);
     group_rows_range(&ht, key_data, key_types, key_attrs, key_vecs, agg_vecs,
                      0, nrows, NULL);
+    if (ht.oom) { group_ht_free(&ht); return ray_error("oom", NULL); }
     uint32_t grp_count = ht.grp_count;
     if (grp_count == 0) { group_ht_free(&ht); return ray_table_new(0); }
 

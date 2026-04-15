@@ -740,6 +740,7 @@ typedef struct {
     void*        key_data[8];
     ray_t*        _h_slots;
     ray_t*        _h_rows;
+    uint8_t       oom;        /* set by group_probe_entry on grow failure */
 } group_ht_t;
 
 /* Row-level accessors for group HT rows */
