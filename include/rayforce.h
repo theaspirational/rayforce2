@@ -201,6 +201,44 @@ void     ray_request_interrupt(void);
 void     ray_clear_interrupt(void);
 bool     ray_interrupted(void);
 
+/* ===== Progress API =====
+ * Pull-based, main-thread only. Worker threads never touch progress
+ * state. The executor calls ray_progress_update() at natural sync
+ * points (between ops, after pool dispatches, at pivot phase
+ * boundaries); the update only fires the user callback once the
+ * query has been running for at least min_ms and at most once per
+ * tick_interval_ms. Embedders register a callback to visualize
+ * long-running queries; leaving it unset has zero runtime cost. */
+
+typedef struct {
+    const char* op_name;      /* coarse: scan, group, pivot, join, ... */
+    const char* phase;        /* optional finer label, e.g. "pivot: dedupe" */
+    uint64_t    rows_done;
+    uint64_t    rows_total;   /* 0 = indeterminate */
+    double      elapsed_sec;
+    bool        final;        /* true on the last tick of a query — renderers
+                                 use this to clear the line */
+} ray_progress_t;
+
+typedef void (*ray_progress_cb)(const ray_progress_t* snapshot, void* user);
+
+/* Register a progress callback. Set cb=NULL to disable. min_ms is the
+ * duckdb-style show-after threshold: queries finishing under it fire
+ * zero callbacks. tick_interval_ms throttles updates once active. */
+void ray_progress_set_callback(ray_progress_cb cb, void* user,
+                                uint64_t min_ms, uint64_t tick_interval_ms);
+
+/* Update progress state. Safe to call from the main thread only.
+ * phase/op_name may be NULL to keep the previous value. When rows_total
+ * is 0 the caller is signalling an indeterminate phase. Fires the
+ * registered callback if the gates allow. */
+void ray_progress_update(const char* op_name, const char* phase,
+                         uint64_t rows_done, uint64_t rows_total);
+
+/* Mark the end of the current query. Clears state and fires a final
+ * "100%" tick if the query ran long enough to have shown the bar. */
+void ray_progress_end(void);
+
 /* ===== COW / Ref Counting API ===== */
 
 void     ray_retain(ray_t* v);

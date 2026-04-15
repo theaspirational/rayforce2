@@ -63,27 +63,84 @@
 /* Forward declaration — defined in core/runtime.c */
 const char* ray_error_msg(void);
 
-/* ===== Progress bar renderer (DuckDB-style) ===== */
+/* ===== Progress bar renderer (Unicode, 1/8-step partial blocks) =====
+ *
+ * Used both by the push-based profiler progress (CSV loader) and the
+ * new pull-based query progress callback. All output goes to stderr
+ * and is in-place redraw via \r + \e[K. Call clear_progress() to wipe
+ * the bar when the query/phase finishes. */
 
-static void render_progress(int64_t done, int64_t total, const char* label) {
-    if (total <= 0) return;
-    double pct = (double)done / (double)total;
-    if (pct > 1.0) pct = 1.0;
-    int bar_width = 30;
-    int filled = (int)(pct * bar_width);
+/* Left half-block cap, right half-block cap, full block, and the
+ * seven partial-fill blocks 1/8 .. 7/8. UTF-8 bytes. */
+static const char* const PB_FULL  = "\xe2\x96\x88"; /* █ */
+static const char* const PB_PARTS[8] = {
+    "",                 /* 0/8 — empty, we print space instead */
+    "\xe2\x96\x8f",     /* 1/8 ▏ */
+    "\xe2\x96\x8e",     /* 2/8 ▎ */
+    "\xe2\x96\x8d",     /* 3/8 ▍ */
+    "\xe2\x96\x8c",     /* 4/8 ▌ */
+    "\xe2\x96\x8b",     /* 5/8 ▋ */
+    "\xe2\x96\x8a",     /* 6/8 ▊ */
+    "\xe2\x96\x89",     /* 7/8 ▉ */
+};
+static const char* const PB_CAP_L = "\xe2\x96\x95"; /* ▕ */
+static const char* const PB_CAP_R = "\xe2\x96\x8f"; /* ▏ */
 
-    fprintf(stderr, "\r\033[90m");
-    if (label) fprintf(stderr, "%s ", label);
-    fprintf(stderr, "[");
-    for (int i = 0; i < bar_width; i++)
-        fputc(i < filled ? '=' : ' ', stderr);
-    fprintf(stderr, "] %3.0f%%\033[0m", pct * 100.0);
+static void render_progress_full(int64_t done, int64_t total,
+                                   const char* op, const char* phase,
+                                   double elapsed_sec) {
+    int bar_width = 40;
+    int sub_total = bar_width * 8;
+    double pct = 0.0;
+    int full = 0;
+    int frac = 0;
+    if (total > 0) {
+        pct = (double)done / (double)total;
+        if (pct > 1.0) pct = 1.0;
+        int sub = (int)(pct * sub_total);
+        full = sub / 8;
+        frac = sub % 8;
+    }
+
+    fprintf(stderr, "\r\033[2m%s", PB_CAP_L);
+    for (int i = 0; i < bar_width; i++) {
+        if (i < full)               fputs(PB_FULL, stderr);
+        else if (i == full && frac) fputs(PB_PARTS[frac], stderr);
+        else                        fputc(' ', stderr);
+    }
+    fputs(PB_CAP_R, stderr);
+
+    if (total > 0)
+        fprintf(stderr, " %3.0f%%", pct * 100.0);
+    if (op && *op)
+        fprintf(stderr, " \xc2\xb7 %s", op);
+    if (phase && *phase)
+        fprintf(stderr, "%s%s", (op && *op) ? ": " : " \xc2\xb7 ", phase);
+    if (elapsed_sec > 0.0)
+        fprintf(stderr, " \xc2\xb7 %.1fs", elapsed_sec);
+
+    fprintf(stderr, "\033[0m\033[K");
     fflush(stderr);
+}
+
+/* Profiler push API — keeps the old signature for CSV loader. */
+static void render_progress(int64_t done, int64_t total, const char* label) {
+    render_progress_full(done, total, label, NULL, 0.0);
 }
 
 static void clear_progress(void) {
     fprintf(stderr, "\r\033[K");
     fflush(stderr);
+}
+
+/* Pull-based query progress adapter — called by the core runtime
+ * at sync points (between ops, radix phase boundaries, pivot phase
+ * transitions). Zero work when the query finishes under min_ms. */
+static void repl_query_progress_cb(const ray_progress_t* p, void* user) {
+    (void)user;
+    if (p->final) { clear_progress(); return; }
+    render_progress_full((int64_t)p->rows_done, (int64_t)p->rows_total,
+                         p->op_name, p->phase, p->elapsed_sec);
 }
 
 /* ===== Profiler span tree printer (reads from g_ray_profile) ===== */
@@ -378,6 +435,11 @@ ray_repl_t* ray_repl_create(ray_poll_t* poll) {
         repl->term = ray_term_create();
         if (repl->term)
             ray_term_install_signals(repl->term);
+        /* Wire the Unicode progress bar for long-running queries —
+         * only on a tty so piped / scripted runs stay clean. Defaults
+         * match duckdb: 2 s show-after, 100 ms tick. */
+        if (isatty(STDERR_FILENO))
+            ray_progress_set_callback(repl_query_progress_cb, NULL, 2000, 100);
     }
     return repl;
 }

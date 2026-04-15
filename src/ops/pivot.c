@@ -301,12 +301,14 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     /* Hash-aggregate all rows via the shared radix pipeline — parallel
      * across thread-pool workers for n_scan ≥ RAY_PARALLEL_THRESHOLD,
      * sequential single-HT for smaller inputs. */
+    ray_progress_update("pivot", "hash-aggregate", 0, (uint64_t)nrows);
     pivot_ingest_t pg;
     if (!pivot_ingest_run(&pg, &ly, key_data, key_types, key_attrs,
                           key_vecs, agg_vecs, nrows)) {
         pivot_ingest_free(&pg);
         return ray_error("oom", NULL);
     }
+    ray_progress_update("pivot", "dedupe", 0, (uint64_t)pg.total_grps);
     if (ray_interrupted()) { pivot_ingest_free(&pg); return ray_error("cancel", "interrupted"); }
     uint32_t grp_count = pg.total_grps;
     if (grp_count == 0) { pivot_ingest_free(&pg); return ray_table_new(0); }
@@ -393,6 +395,9 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         group_ht_t* ph = &pg.part_hts[_p];
         uint32_t pcount = ph->grp_count;
         uint32_t gi_base = pg.part_offsets[_p];
+        /* Progress tick at each partition boundary — time-gated so
+         * 256 small partitions do not spam the callback. */
+        ray_progress_update(NULL, NULL, gi_base, (uint64_t)grp_count);
         for (uint32_t gi_local = 0; gi_local < pcount; gi_local++) {
             uint32_t gi = gi_base + gi_local;
             const char* row = ph->rows + (size_t)gi_local * pg.row_stride;
@@ -488,6 +493,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     }
 
     /* Phase 3: Build output table */
+    ray_progress_update("pivot", "scatter", 0, (uint64_t)pv_count);
     bool val_is_f64 = vcol->type == RAY_F64;
     int8_t out_agg_type;
     switch (agg_op) {

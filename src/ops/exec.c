@@ -831,17 +831,23 @@ ray_t* exec_node(ray_graph_t* g, ray_op_t* op) {
      * without adding cost to the per-row hot path. */
     if (ray_interrupted()) return ray_error("cancel", "interrupted");
 
-    bool profiling = g_ray_profile.active && op_is_heavy(op->opcode);
+    bool heavy = op_is_heavy(op->opcode);
+    bool profiling = g_ray_profile.active && heavy;
     const char* oname = NULL;
-    if (profiling) {
+    if (heavy) {
         oname = ray_opcode_name(op->opcode);
-        ray_profile_span_start(oname);
+        /* Progress sync point — main thread only, cheap when the
+         * callback is unset. */
+        ray_progress_update(oname, NULL, 0, 0);
+        if (profiling) ray_profile_span_start(oname);
     }
 
     ray_t* _prof_result = exec_node_inner(g, op);
 
-    if (profiling)
-        ray_profile_span_end(oname);
+    if (heavy) {
+        if (profiling) ray_profile_span_end(oname);
+        ray_progress_update(oname, NULL, 0, 0);
+    }
 
     return _prof_result;
 }
@@ -2055,7 +2061,18 @@ static bool dag_can_stream(ray_graph_t* g, ray_op_t* root) {
     return ok && has_default_scan;
 }
 
+static ray_t* ray_execute_inner(ray_graph_t* g, ray_op_t* root);
+
 ray_t* ray_execute(ray_graph_t* g, ray_op_t* root) {
+    ray_t* r = ray_execute_inner(g, root);
+    /* End the current progress tracking session. A no-op when no
+     * callback is registered; otherwise emits the final "100% done"
+     * tick (only if the bar was actually shown). */
+    ray_progress_end();
+    return r;
+}
+
+static ray_t* ray_execute_inner(ray_graph_t* g, ray_op_t* root) {
     if (!g || !root) return ray_error("nyi", NULL);
 
     /* Lazy-init the global thread pool on first call */
