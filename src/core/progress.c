@@ -104,7 +104,11 @@ void ray_progress_label(const char* op_name, const char* phase) {
         g_showing = false;
     }
     if (op_name) g_op_name = op_name;
-    if (phase)   g_phase = phase;
+    /* phase is always overwritten — label() marks a new op boundary
+     * so any stale phase string from the previous op (e.g. "pivot:
+     * dedupe") must not leak into the next op's render. Callers pass
+     * NULL when the new op has no phase of its own. */
+    g_phase = phase;
     /* Reset counters so a freshly-entered op that doesn't know its
      * row total shows an indeterminate bar instead of the previous
      * op's percentages. The first ray_progress_update from inside
