@@ -26,6 +26,8 @@
 #include "lang/eval_internal.h"
 #include "lang/env.h"
 #include "ops/ops.h"
+#include "ops/internal.h"
+#include "ops/hash.h"
 #include "table/sym.h"
 #include "mem/heap.h"
 #include <stdio.h>
@@ -197,21 +199,81 @@ ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
     if (RAY_IS_ERR(dvals)) { ray_release(grouped); return dvals; }
     int64_t n_pv = ray_len(dvals);
 
-    /* Distinct index keys: use grouped table's index columns (already unique rows) */
-    /* Build index→row mapping via the original table:
-     * For each group row, find which original rows belong to it. */
+    /* Re-scan original table to assign a grouped-row index to each
+     * input row.  Previously this was an O(nrows * n_grps) nested loop
+     * that hung on any large pivot that took the generic fallback.
+     * Replaced with an open-addressed hash table keyed by a cheap row
+     * hash of (idx_cols..., pivot_col), giving O(nrows + n_grps) in the
+     * common case.  Hash collisions re-verify via atom_eq so unhashable
+     * cells (strings, guids) still match correctly.
+     *
+     * Hash helper: produces the same value when called on two rows with
+     * equal cell values for numeric/sym/temporal columns; for strings
+     * and guids we under-hash (returning a type-independent constant)
+     * and rely entirely on atom_eq for equality. */
+    #define FB_ROW_HASH(cols, ncols, pv, rid)                                \
+        ({                                                                    \
+            uint64_t _h = 0;                                                  \
+            for (int64_t _k = 0; _k < (ncols); _k++) {                        \
+                ray_t* _c = (cols)[_k];                                       \
+                uint64_t _kh;                                                 \
+                if (ray_vec_is_null(_c, (rid)))                               \
+                    _kh = 0x9E3779B97F4A7C15ULL ^ (uint64_t)(rid);            \
+                else if (_c->type == RAY_F64)                                 \
+                    _kh = ray_hash_f64(((double*)ray_data(_c))[(rid)]);       \
+                else if (_c->type == RAY_STR || _c->type == RAY_GUID)         \
+                    _kh = 0xDEADBEEFCAFEBABEULL;                              \
+                else                                                           \
+                    _kh = ray_hash_i64(read_col_i64(ray_data(_c), (rid),      \
+                                                    _c->type, _c->attrs));    \
+                _h = (_k == 0) ? _kh : ray_hash_combine(_h, _kh);             \
+            }                                                                  \
+            ray_t* _pc = (pv);                                                 \
+            uint64_t _ph;                                                      \
+            if (ray_vec_is_null(_pc, (rid)))                                  \
+                _ph = 0x165667B19E3779F9ULL ^ (uint64_t)(rid);                \
+            else if (_pc->type == RAY_F64)                                     \
+                _ph = ray_hash_f64(((double*)ray_data(_pc))[(rid)]);          \
+            else if (_pc->type == RAY_STR || _pc->type == RAY_GUID)            \
+                _ph = 0xFEEDFACE12345678ULL;                                   \
+            else                                                                \
+                _ph = ray_hash_i64(read_col_i64(ray_data(_pc), (rid),         \
+                                                 _pc->type, _pc->attrs));      \
+            ray_hash_combine(_h, _ph);                                         \
+        })
 
-    /* Re-scan original table to assign rows to groups.
-     * Build group_id[r] for each original row r. */
+    uint32_t gid_cap = 256;
+    while (gid_cap < (uint32_t)n_grps * 2 && gid_cap < (1u << 30)) gid_cap <<= 1;
+    ray_t* gid_ht_hdr = ray_alloc((size_t)gid_cap * sizeof(uint32_t));
+    if (!gid_ht_hdr) { ray_release(dvals); ray_release(grouped); return ray_error("oom", NULL); }
+    uint32_t* gid_ht = (uint32_t*)ray_data(gid_ht_hdr);
+    memset(gid_ht, 0xFF, gid_cap * sizeof(uint32_t));
+    uint32_t gid_mask = gid_cap - 1;
+
+    /* Insert each grouped row into the HT (grouped rows are already
+     * distinct by construction — no equality check needed on insert). */
+    for (int64_t gi = 0; gi < n_grps; gi++) {
+        uint64_t h = FB_ROW_HASH(g_icols, n_idx, g_pcol, gi);
+        uint32_t slot = (uint32_t)(h & gid_mask);
+        while (gid_ht[slot] != UINT32_MAX) slot = (slot + 1) & gid_mask;
+        gid_ht[slot] = (uint32_t)gi;
+    }
+
     ray_t* gid_vec = ray_vec_new(RAY_I64, nrows);
-    if (!gid_vec || RAY_IS_ERR(gid_vec)) { ray_release(dvals); ray_release(grouped); return ray_error("oom", NULL); }
+    if (!gid_vec || RAY_IS_ERR(gid_vec)) {
+        ray_free(gid_ht_hdr); ray_release(dvals); ray_release(grouped);
+        return ray_error("oom", NULL);
+    }
     gid_vec->len = nrows;
     int64_t* gids = (int64_t*)ray_data(gid_vec);
 
+    /* Probe HT for each input row; on collision fall through to atom_eq. */
     for (int64_t r = 0; r < nrows; r++) {
-        /* Find which group this row belongs to by matching keys */
-        gids[r] = -1;
-        for (int64_t gi = 0; gi < n_grps; gi++) {
+        uint64_t h = FB_ROW_HASH(icols, n_idx, pcol, r);
+        uint32_t slot = (uint32_t)(h & gid_mask);
+        int64_t found = -1;
+        while (gid_ht[slot] != UINT32_MAX) {
+            int64_t gi = gid_ht[slot];
             bool match = true;
             for (int64_t ci = 0; ci < n_idx && match; ci++) {
                 int a1 = 0, a2 = 0;
@@ -229,9 +291,12 @@ ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
                 if (a1) ray_release(v1);
                 if (a2) ray_release(v2);
             }
-            if (match) { gids[r] = gi; break; }
+            if (match) { found = gi; break; }
+            slot = (slot + 1) & gid_mask;
         }
+        gids[r] = found;
     }
+    ray_free(gid_ht_hdr);
 
     /* For each group, gather the value column subset and apply agg_fn */
     ray_t* agg_results = ray_alloc(n_grps * sizeof(ray_t*));
@@ -240,34 +305,64 @@ ray_t* ray_pivot_fn(ray_t** args, int64_t n) {
     agg_results->len = n_grps;
     ray_t** ar = (ray_t**)ray_data(agg_results);
 
+    /* Counting-sort rows by gid: O(nrows + n_grps) vs the previous
+     * O(nrows * n_grps) double-scan per group. */
+    ray_t* off_hdr = ray_alloc((size_t)(n_grps + 1) * sizeof(int64_t));
+    if (!off_hdr) {
+        ray_free(agg_results); ray_release(gid_vec); ray_release(dvals); ray_release(grouped);
+        return ray_error("oom", NULL);
+    }
+    int64_t* offs = (int64_t*)ray_data(off_hdr);
+    memset(offs, 0, (size_t)(n_grps + 1) * sizeof(int64_t));
+    for (int64_t r = 0; r < nrows; r++) {
+        int64_t g = gids[r];
+        if (g >= 0) offs[g + 1]++;
+    }
+    for (int64_t gi = 0; gi < n_grps; gi++) offs[gi + 1] += offs[gi];
+
+    ray_t* sorted_hdr = ray_alloc((size_t)nrows * sizeof(int64_t));
+    if (!sorted_hdr) {
+        ray_free(off_hdr);
+        ray_free(agg_results); ray_release(gid_vec); ray_release(dvals); ray_release(grouped);
+        return ray_error("oom", NULL);
+    }
+    int64_t* sorted = (int64_t*)ray_data(sorted_hdr);
+    /* Write-cursor array derived from offs. */
+    ray_t* wcur_hdr = ray_alloc((size_t)n_grps * sizeof(int64_t));
+    if (!wcur_hdr) {
+        ray_free(sorted_hdr); ray_free(off_hdr);
+        ray_free(agg_results); ray_release(gid_vec); ray_release(dvals); ray_release(grouped);
+        return ray_error("oom", NULL);
+    }
+    int64_t* wcur = (int64_t*)ray_data(wcur_hdr);
+    memcpy(wcur, offs, (size_t)n_grps * sizeof(int64_t));
+    for (int64_t r = 0; r < nrows; r++) {
+        int64_t g = gids[r];
+        if (g >= 0) sorted[wcur[g]++] = r;
+    }
+    ray_free(wcur_hdr);
+
     for (int64_t gi = 0; gi < n_grps; gi++) {
-        /* Count rows in this group */
-        int64_t cnt = 0;
-        for (int64_t r = 0; r < nrows; r++) if (gids[r] == gi) cnt++;
-
-        /* Gather indices */
-        ray_t* idx_block = ray_alloc(cnt * sizeof(int64_t));
-        int64_t* idx_data = (int64_t*)ray_data(idx_block);
-        int64_t pos = 0;
-        for (int64_t r = 0; r < nrows; r++) if (gids[r] == gi) idx_data[pos++] = r;
-
-        ray_t* subset = gather_by_idx(vcol, idx_data, cnt);
-        ray_free(idx_block);
+        int64_t cnt = offs[gi + 1] - offs[gi];
+        ray_t* subset = gather_by_idx(vcol, sorted + offs[gi], cnt);
         if (RAY_IS_ERR(subset)) {
             for (int64_t j = 0; j < gi; j++) ray_release(ar[j]);
+            ray_free(sorted_hdr); ray_free(off_hdr);
             ray_free(agg_results); ray_release(gid_vec); ray_release(dvals); ray_release(grouped);
             return subset;
         }
-
         ray_t* agg_val = call_fn1(agg_fn, subset);
         ray_release(subset);
         if (RAY_IS_ERR(agg_val)) {
             for (int64_t j = 0; j < gi; j++) ray_release(ar[j]);
+            ray_free(sorted_hdr); ray_free(off_hdr);
             ray_free(agg_results); ray_release(gid_vec); ray_release(dvals); ray_release(grouped);
             return agg_val;
         }
         ar[gi] = agg_val;
     }
+    ray_free(sorted_hdr);
+    ray_free(off_hdr);
     ray_release(gid_vec);
 
     /* Unstack: collect distinct index keys, build wide result.
