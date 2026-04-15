@@ -5447,6 +5447,25 @@ static MunitResult test_rf_group(const void* params, void* fixture) {
     ASSERT_EQ("(at (at rX 's) 3)", "5");   /* 5    */
     ASSERT_EQ("(at (at rX 's) 4)", "6");   /* 6    */
 
+    /* Shadow protection: a dict alias that already exists as an
+     * input column would cause ray_table_add_col to append a
+     * second column with the same name; ray_table_get_col finds
+     * the original and the group-by would silently scan the
+     * wrong data.  Reject with a clear domain error. */
+    ASSERT_ER(
+        "(set tSh (table [o G V] (list [1 2 3] [a a b] [10 20 30])))"
+        "(select {from: tSh by: {o: G} s: (sum V)})", "domain");
+
+    /* Trivial self-alias {X: X} is a no-op rename onto the column
+     * that's already there — allowed and produces the expected
+     * group-by on the existing column. */
+    ASSERT_EQ(
+        "(set tTS (table [G V] (list [a a b] [1 2 3])))"
+        "(set rTS (select {from: tTS by: {G: G} s: (sum V)}))"
+        "(count rTS)", "2");
+    ASSERT_EQ("(at (at rTS 's) 0)", "3");  /* a: 1+2 */
+    ASSERT_EQ("(at (at rTS 's) 1)", "3");  /* b: 3 */
+
     // ========== GROUP BY STRING COLUMN ==========
     // Tests for grouping by list of strings (TYPE_LIST of TYPE_C8)
     // This tests the fix for parallel radix partitioning bug where identical strings

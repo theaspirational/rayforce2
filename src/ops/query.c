@@ -890,6 +890,31 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 fail_err = ray_error("domain", "by-dict key must be a symbol name");
                 failed = true; break;
             }
+            /* Collision check: if the dict key already exists in the
+             * input table, ray_table_add_col would append a second
+             * column with the same name and ray_table_get_col finds
+             * the ORIGINAL, so the group-by would silently scan the
+             * user's existing column instead of our materialised
+             * one.  Allow two specific exceptions:
+             *   - {x: x} (trivial self-alias — existing col already
+             *      is what we want)
+             *   - a later dict key reusing a name we just added in
+             *     this loop (guarded separately via i_added[]). */
+            bool already_in_tbl = (ray_table_get_col(tbl, k->i64) != NULL);
+            bool trivial_self = (v->type == -RAY_SYM && v->i64 == k->i64);
+            bool we_added_it = false;
+            for (int64_t j = 0; j < i && !we_added_it; j++)
+                if (d_elems[j * 2]->i64 == k->i64) we_added_it = true;
+            if (already_in_tbl && !trivial_self && !we_added_it) {
+                fail_err = ray_error("domain",
+                    "by-dict alias shadows an existing input column");
+                failed = true; break;
+            }
+            if (trivial_self && !we_added_it) {
+                /* No eval / no add: just group on the existing col. */
+                sv_data[i] = k->i64;
+                continue;
+            }
             ray_t* col_vec = ray_eval(v);
             if (!col_vec || RAY_IS_ERR(col_vec)) {
                 fail_err = col_vec ? col_vec : ray_error("domain", "by-dict val eval");
