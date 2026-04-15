@@ -1028,16 +1028,18 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 if (RAY_IS_PARTED(kct)) kct = (int8_t)RAY_PARTED_BASETYPE(kct);
                 if (kct == RAY_LIST || kct == RAY_STR)
                     use_eval_group = 1;
-                else if (kct == RAY_GUID)
-                    /* RAY_GUID keys always route to the eval-level
-                     * ray_group_fn path: (a) the DAG first-occurrence
-                     * scanner below truncates wide keys to 8 bytes
-                     * via ray_read_sym and is buggy for GUIDs, and
-                     * (b) its O(N × n_groups) nested fallback was
-                     * hanging for minutes on 10M-row tables with
-                     * ~1M distinct groups. ray_group_fn has a proper
-                     * open-addressed 16-byte HT plus interrupt
-                     * checkpoints. */
+                else if (kct == RAY_GUID && (any_nonagg || n_out == 0))
+                    /* RAY_GUID routes to eval-level ray_group_fn only
+                     * for (a) non-agg expression queries (existing
+                     * behavior) and (b) the "no output columns" form
+                     * `(select {from: t by: guid})` which otherwise
+                     * lands in the DAG no-agg-no-nonagg branch whose
+                     * first-occurrence scanner is O(N × n_groups) and
+                     * truncates wide keys to 8 bytes via ray_read_sym.
+                     * Pure-agg group-bys with GUID keys still take the
+                     * DAG path (exec_group handles wide keys correctly
+                     * and stays parallel / segment-streamed on parted
+                     * tables). */
                     use_eval_group = 1;
             }
         }

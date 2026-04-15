@@ -53,6 +53,7 @@
 #define STDIN_FD 0
 #else
 #include <unistd.h>
+#include <sys/ioctl.h>
 #define STDIN_FD STDIN_FILENO
 #endif
 
@@ -87,10 +88,30 @@ static const char* const PB_PARTS[8] = {
 static const char* const PB_CAP_L = "\xe2\x96\x95"; /* ▕ */
 static const char* const PB_CAP_R = "\xe2\x96\x8f"; /* ▏ */
 
+/* Terminal width, probed lazily once. Bar rendering never exceeds
+ * (width-1) display columns so it cannot wrap onto a second line —
+ * wrapped bars are impossible to clear reliably with a single-line
+ * \e[2K, and were leaving artefacts on screen. */
+static int progress_term_cols(void) {
+    static int cached = 0;
+    if (cached) return cached;
+    struct winsize ws;
+    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 10)
+        cached = ws.ws_col;
+    else
+        cached = 80;
+    return cached;
+}
+
 static void render_progress_full(int64_t done, int64_t total,
                                    const char* op, const char* phase,
                                    double elapsed_sec) {
-    int bar_width = 40;
+    int cols = progress_term_cols();
+    /* Reserve a chunk for labels + percent + elapsed; give the rest
+     * to the bar. Minimum bar is 10 cells, maximum 40. */
+    int bar_width = cols - 40;
+    if (bar_width > 40) bar_width = 40;
+    if (bar_width < 10) bar_width = 10;
     int sub_total = bar_width * 8;
     double pct = 0.0;
     int full = 0;
@@ -103,7 +124,23 @@ static void render_progress_full(int64_t done, int64_t total,
         frac = sub % 8;
     }
 
-    fprintf(stderr, "\r\033[2m%s", PB_CAP_L);
+    /* Build the text tail (labels + times) into a bounded buffer so
+     * we can truncate it together with the bar to fit the terminal. */
+    char tail[256];
+    int tp = 0;
+    if (total > 0)
+        tp += snprintf(tail + tp, sizeof(tail) - tp, " %3.0f%%", pct * 100.0);
+    if (op && *op)
+        tp += snprintf(tail + tp, sizeof(tail) - tp, " \xc2\xb7 %s", op);
+    if (phase && *phase)
+        tp += snprintf(tail + tp, sizeof(tail) - tp, "%s%s",
+                       (op && *op) ? ": " : " \xc2\xb7 ", phase);
+    if (elapsed_sec > 0.0)
+        tp += snprintf(tail + tp, sizeof(tail) - tp, " \xc2\xb7 %.1fs", elapsed_sec);
+
+    /* Clear the line first, then draw. Using \e[2K avoids leaving
+     * stale tail text when a shorter render overwrites a longer one. */
+    fprintf(stderr, "\033[2K\033[0G\033[2m%s", PB_CAP_L);
     for (int i = 0; i < bar_width; i++) {
         if (i < full)               fputs(PB_FULL, stderr);
         else if (i == full && frac) fputs(PB_PARTS[frac], stderr);
@@ -111,16 +148,15 @@ static void render_progress_full(int64_t done, int64_t total,
     }
     fputs(PB_CAP_R, stderr);
 
-    if (total > 0)
-        fprintf(stderr, " %3.0f%%", pct * 100.0);
-    if (op && *op)
-        fprintf(stderr, " \xc2\xb7 %s", op);
-    if (phase && *phase)
-        fprintf(stderr, "%s%s", (op && *op) ? ": " : " \xc2\xb7 ", phase);
-    if (elapsed_sec > 0.0)
-        fprintf(stderr, " \xc2\xb7 %.1fs", elapsed_sec);
+    /* Budget for tail: terminal width minus the bar caps (2) minus
+     * bar cells, minus a safety margin of 1 to avoid landing exactly
+     * on the last column (which some terminals wrap anyway). */
+    int budget = cols - bar_width - 3;
+    if (budget < 0) budget = 0;
+    if (tp > budget) tp = budget;
+    fwrite(tail, 1, (size_t)tp, stderr);
 
-    fprintf(stderr, "\033[0m\033[K");
+    fputs("\033[0m", stderr);
     fflush(stderr);
 }
 
@@ -130,7 +166,11 @@ static void render_progress(int64_t done, int64_t total, const char* label) {
 }
 
 static void clear_progress(void) {
-    fprintf(stderr, "\r\033[K");
+    /* \e[2K clears the entire current line (not just from cursor to
+     * end, which is what \e[K would do). \e[0G moves the cursor to
+     * column 0. Combined, this reliably wipes whatever the last
+     * render left on the current terminal row. */
+    fprintf(stderr, "\033[2K\033[0G");
     fflush(stderr);
 }
 
