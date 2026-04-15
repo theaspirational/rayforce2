@@ -303,7 +303,12 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     if (grp_count == 0) { group_ht_free(&ht); return ray_table_new(0); }
 
     /* Phase 2: Collect distinct pivot values and distinct index keys.
-     * Each group row layout: [hash:8][key0:8]...[keyN-1:8][pivot_val:8][accum...] */
+     * Each group row layout: [hash:8][key0:8]...[keyN-1:8][null_mask:8][accum...]
+     * where the keys region holds n_idx index keys + 1 pivot key,
+     * followed by the key-null bitmap written by group_rows_range. */
+
+    /* SQL PIVOT treats a null pivot key as "no column" — drop those groups. */
+    const uint8_t pvt_null_bit = (uint8_t)(1u << n_idx);
 
     /* Collect distinct pivot values */
     uint32_t pv_cap = 64, pv_count = 0;
@@ -313,7 +318,10 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     for (uint32_t gi = 0; gi < grp_count; gi++) {
         const char* row = ht.rows + (size_t)gi * ly.row_stride;
-        int64_t pval = ((const int64_t*)(row + 8))[n_idx]; /* pivot key is last */
+        const int64_t* rkeys = (const int64_t*)(row + 8);
+        int64_t nmask = rkeys[n_keys];
+        if (nmask & pvt_null_bit) continue; /* skip rows with null pivot key */
+        int64_t pval = rkeys[n_idx];
         /* Linear scan for distinct (pivot values are typically few) */
         bool found = false;
         for (uint32_t p = 0; p < pv_count; p++) {
@@ -333,11 +341,12 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     }
 
     /* Collect distinct index keys.
-     * Build a small HT mapping index-key-combo -> row index in output. */
+     * Build a small HT mapping index-key-combo -> row index in output.
+     * Entry layout: [hash:8 | idx_keys:8*n_idx | idx_null_mask:8]. */
     uint32_t ix_cap = 256, ix_count = 0;
     ray_t* ix_hdr = NULL;
-    /* Each entry: [hash:8][idx_keys:8*n_idx] */
-    size_t ix_entry = 8 + (size_t)n_idx * 8;
+    size_t ix_entry = 8 + (size_t)n_idx * 8 + 8;
+    const uint8_t idx_null_bits = (uint8_t)((1u << n_idx) - 1u);
     char* ix_rows = (char*)scratch_alloc(&ix_hdr, ix_cap * ix_entry);
     if (!ix_rows) { scratch_free(pv_hdr); group_ht_free(&ht); return ray_error("oom", NULL); }
 
@@ -350,8 +359,16 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     for (uint32_t gi = 0; gi < grp_count; gi++) {
         const char* row = ht.rows + (size_t)gi * ly.row_stride;
         const int64_t* keys = (const int64_t*)(row + 8);
+        int64_t nmask = keys[n_keys];
+        if (nmask & pvt_null_bit) {
+            /* Null pivot key row — dropped from output entirely */
+            grp_ix[gi] = UINT32_MAX;
+            grp_pv[gi] = UINT32_MAX;
+            continue;
+        }
+        int64_t idx_nmask = nmask & idx_null_bits;
 
-        /* Hash index keys only (exclude pivot key) */
+        /* Hash index keys only (exclude pivot key) + null mask */
         uint64_t ih = 0;
         for (uint8_t k = 0; k < n_idx; k++) {
             uint64_t kh = (key_types[k] == RAY_F64)
@@ -359,16 +376,19 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                 : ray_hash_i64(keys[k]);
             ih = (k == 0) ? kh : ray_hash_combine(ih, kh);
         }
+        if (idx_nmask) ih = ray_hash_combine(ih, ray_hash_i64(idx_nmask));
 
         /* Find or insert index key */
         uint32_t ix_row = UINT32_MAX;
         for (uint32_t j = 0; j < ix_count; j++) {
             const char* ix_entry_p = ix_rows + j * ix_entry;
             if (*(const uint64_t*)ix_entry_p != ih) continue;
-            if (memcmp(ix_entry_p + 8, keys, (size_t)n_idx * 8) == 0) {
-                ix_row = j;
-                break;
-            }
+            if (memcmp(ix_entry_p + 8, keys, (size_t)n_idx * 8) != 0) continue;
+            int64_t ent_nmask;
+            memcpy(&ent_nmask, ix_entry_p + 8 + (size_t)n_idx * 8, 8);
+            if (ent_nmask != idx_nmask) continue;
+            ix_row = j;
+            break;
         }
         if (ix_row == UINT32_MAX) {
             if (ix_count >= ix_cap) {
@@ -386,6 +406,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             char* dst = ix_rows + ix_row * ix_entry;
             *(uint64_t*)dst = ih;
             memcpy(dst + 8, keys, (size_t)n_idx * 8);
+            memcpy(dst + 8 + (size_t)n_idx * 8, &idx_nmask, 8);
         }
 
         /* Find pivot column index */
@@ -423,6 +444,12 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         for (uint32_t r = 0; r < ix_count; r++) {
             const char* ix_entry_p = ix_rows + r * ix_entry;
             int64_t kv = ((const int64_t*)(ix_entry_p + 8))[k];
+            int64_t ent_nmask;
+            memcpy(&ent_nmask, ix_entry_p + 8 + (size_t)n_idx * 8, 8);
+            if (ent_nmask & (int64_t)(1u << k)) {
+                ray_vec_set_null(new_col, (int64_t)r, true);
+                continue;
+            }
             if (kt == RAY_F64) {
                 memcpy((char*)ray_data(new_col) + (size_t)r * esz, &kv, 8);
             } else {
