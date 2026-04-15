@@ -448,8 +448,8 @@ ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
 
 /* group_ht_t defined in exec_internal.h */
 
-bool group_ht_init_sized(group_ht_t* ht, uint32_t cap,
-                         const ght_layout_t* ly, uint32_t init_grp_cap) {
+static bool group_ht_init_sized(group_ht_t* ht, uint32_t cap,
+                                 const ght_layout_t* ly, uint32_t init_grp_cap) {
     ht->ht_cap = cap;
     ht->layout = *ly;
     /* key_data must be populated by the caller via group_ht_set_key_data

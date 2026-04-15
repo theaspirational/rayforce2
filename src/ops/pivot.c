@@ -306,18 +306,8 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     uint64_t target = (uint64_t)nrows * 2;
     while ((uint64_t)ht_cap < target && ht_cap < (1u << 24)) ht_cap <<= 1;
 
-    /* Pre-size the group row store to absorb most realloc-copies during
-     * ingest without committing memory proportional to nrows upfront
-     * (low-cardinality inputs would otherwise waste hundreds of MB).
-     * Cap at 1<<20 rows — starting from there, growing to nrows is at
-     * most a handful of doublings. */
-    uint32_t init_grp_cap = 256;
-    if (nrows > 256) {
-        uint64_t target = nrows < (1u << 22) ? (uint64_t)nrows : (1u << 22);
-        init_grp_cap = (uint32_t)target;
-    }
     group_ht_t ht;
-    if (!group_ht_init_sized(&ht, ht_cap, &ly, init_grp_cap)) return ray_error("oom", NULL);
+    if (!group_ht_init(&ht, ht_cap, &ly)) return ray_error("oom", NULL);
     group_rows_range(&ht, key_data, key_types, key_attrs, key_vecs, agg_vecs,
                      0, nrows, NULL);
     uint32_t grp_count = ht.grp_count;
