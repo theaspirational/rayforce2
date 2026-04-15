@@ -59,9 +59,14 @@ static _Thread_local ray_t* g_error_trace = NULL;
 /* Interrupt flag — set by REPL signal handler, checked by eval/VM loops */
 static volatile sig_atomic_t g_eval_interrupted = 0;
 
-void ray_eval_request_interrupt(void) { g_eval_interrupted = 1; }
-void ray_eval_clear_interrupt(void)   { g_eval_interrupted = 0; }
-int  ray_eval_is_interrupted(void)    { return g_eval_interrupted != 0; }
+void ray_request_interrupt(void)      { g_eval_interrupted = 1; }
+void ray_clear_interrupt(void)        { g_eval_interrupted = 0; }
+bool ray_interrupted(void)            { return g_eval_interrupted != 0; }
+
+/* Legacy internal names — thin wrappers kept for existing callers. */
+void ray_eval_request_interrupt(void) { ray_request_interrupt(); }
+void ray_eval_clear_interrupt(void)   { ray_clear_interrupt(); }
+int  ray_eval_is_interrupted(void)    { return ray_interrupted(); }
 
 ray_t* ray_eval_get_nfo(void) { return g_eval_nfo; }
 void   ray_eval_set_nfo(ray_t* nfo) { g_eval_nfo = nfo; }

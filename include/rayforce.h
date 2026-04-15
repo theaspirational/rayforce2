@@ -191,6 +191,16 @@ void     ray_free(ray_t* v);
 int64_t  ray_mem_budget(void);      /* returns memory budget in bytes */
 bool     ray_mem_pressure(void);    /* true if calling thread's usage exceeds budget */
 
+/* ===== Interrupt API =====
+ * Long-running queries poll ray_interrupted() at morsel granularity
+ * and bail out with a "cancel" error. The REPL's SIGINT handler wires
+ * Ctrl-C to ray_request_interrupt(); embedders can call it from their
+ * own signal handlers or cancellation threads. */
+
+void     ray_request_interrupt(void);
+void     ray_clear_interrupt(void);
+bool     ray_interrupted(void);
+
 /* ===== COW / Ref Counting API ===== */
 
 void     ray_retain(ray_t* v);

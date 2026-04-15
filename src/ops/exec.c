@@ -826,6 +826,11 @@ static inline bool op_is_heavy(uint16_t opc) {
 ray_t* exec_node(ray_graph_t* g, ray_op_t* op) {
     if (!op) return ray_error("nyi", NULL);
 
+    /* Per-op cancellation checkpoint. Long fused pipelines iterate
+     * exec_node many times; this catches Ctrl-C between operators
+     * without adding cost to the per-row hot path. */
+    if (ray_interrupted()) return ray_error("cancel", "interrupted");
+
     bool profiling = g_ray_profile.active && op_is_heavy(op->opcode);
     const char* oname = NULL;
     if (profiling) {

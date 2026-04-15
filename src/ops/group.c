@@ -737,6 +737,10 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
     if (wide) group_ht_set_key_data(ht, key_data);
 
     for (int64_t i = start; i < end; i++) {
+        /* Cancellation checkpoint every 65536 rows — ~150 polls on a
+         * 10M-row ingest, imperceptible in the inner loop and still
+         * sub-100ms response time on Ctrl-C. */
+        if (((i - start) & 65535) == 0 && ray_interrupted()) break;
         int64_t row = match_idx ? match_idx[i] : i;
         uint64_t h = 0;
         int64_t* ek = (int64_t*)(ebuf + 8);
@@ -868,6 +872,10 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
 
     uint8_t nullable = c->nullable_mask;
     for (int64_t i = start; i < end; i++) {
+        /* Cancellation checkpoint every 65536 rows — ~150 polls on a
+         * 10M-row ingest, imperceptible in the inner loop and still
+         * sub-100ms response time on Ctrl-C. */
+        if (((i - start) & 65535) == 0 && ray_interrupted()) break;
         int64_t row = match_idx ? match_idx[i] : i;
         uint64_t h = 0;
         int64_t null_mask = 0;
