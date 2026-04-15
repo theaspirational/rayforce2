@@ -840,9 +840,93 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     if (n_out == 0 && !where_expr && !by_expr && !take_expr && !has_sort)
         return tbl;
 
+    /* Dict-form by-clause pre-evaluation: MUST happen before we
+     * build the DAG, so the graph sees the augmented table with
+     * the materialised dict-val columns already present.
+     * (select {... by: {o: OrderId b: (xbar Ts 1000)} ...})
+     * Dict values can be any expression; we eval each against tbl
+     * with its columns bound as locals, add the result as a new
+     * column named after the dict key, then rewrite by_expr as a
+     * plain RAY_SYM vector of the dict keys so the rest of
+     * ray_select_fn sees a standard multi-key group-by. */
+    ray_t* by_sym_vec_owned = NULL;
+    if (by_expr && by_expr->type == RAY_LIST && (by_expr->attrs & RAY_ATTR_DICT)) {
+        int64_t dlen = ray_len(by_expr);
+        if (dlen & 1) {
+            ray_release(tbl);
+            return ray_error("domain", "by-dict must have even length");
+        }
+        int64_t nk = dlen / 2;
+        if (nk == 0 || nk > 16) {
+            ray_release(tbl);
+            return ray_error("domain", "by-dict must have 1..16 keys");
+        }
+        ray_t** d_elems = (ray_t**)ray_data(by_expr);
+
+        ray_env_push_scope();
+        int64_t in_ncols = ray_table_ncols(tbl);
+        for (int64_t c = 0; c < in_ncols; c++) {
+            int64_t cn = ray_table_col_name(tbl, c);
+            ray_t* cv = ray_table_get_col_idx(tbl, c);
+            if (cv) ray_env_set_local(cn, cv);
+        }
+
+        by_sym_vec_owned = ray_vec_new(RAY_SYM, nk);
+        if (!by_sym_vec_owned || RAY_IS_ERR(by_sym_vec_owned)) {
+            ray_env_pop_scope();
+            ray_release(tbl);
+            return ray_error("oom", NULL);
+        }
+        int64_t* sv_data = (int64_t*)ray_data(by_sym_vec_owned);
+        by_sym_vec_owned->len = nk;
+
+        bool failed = false;
+        ray_t* fail_err = NULL;
+        int64_t expected_len = ray_table_nrows(tbl);
+        for (int64_t i = 0; i < nk; i++) {
+            ray_t* k = d_elems[i * 2];
+            ray_t* v = d_elems[i * 2 + 1];
+            if (!k || k->type != -RAY_SYM) {
+                fail_err = ray_error("domain", "by-dict key must be a symbol name");
+                failed = true; break;
+            }
+            ray_t* col_vec = ray_eval(v);
+            if (!col_vec || RAY_IS_ERR(col_vec)) {
+                fail_err = col_vec ? col_vec : ray_error("domain", "by-dict val eval");
+                failed = true; break;
+            }
+            if (!ray_is_vec(col_vec) || ray_len(col_vec) != expected_len) {
+                ray_release(col_vec);
+                fail_err = ray_error("length", "by-dict val must be a column vector");
+                failed = true; break;
+            }
+            ray_t* new_tbl = ray_table_add_col(tbl, k->i64, col_vec);
+            ray_release(col_vec);
+            if (!new_tbl || RAY_IS_ERR(new_tbl)) {
+                fail_err = new_tbl ? new_tbl : ray_error("oom", NULL);
+                failed = true; break;
+            }
+            tbl = new_tbl;
+            /* Re-bind the newly added column under its dict key so
+             * later dict vals can reference earlier keys. */
+            ray_env_set_local(k->i64, col_vec);
+            sv_data[i] = k->i64;
+        }
+        ray_env_pop_scope();
+        if (failed) {
+            ray_release(by_sym_vec_owned);
+            ray_release(tbl);
+            return fail_err;
+        }
+        by_expr = by_sym_vec_owned;
+    }
+
     /* Build DAG */
     ray_graph_t* g = ray_graph_new(tbl);
-    if (!g) { ray_release(tbl); return ray_error("oom", NULL); }
+    if (!g) {
+        if (by_sym_vec_owned) ray_release(by_sym_vec_owned);
+        ray_release(tbl); return ray_error("oom", NULL);
+    }
 
     ray_op_t* root = ray_const_table(g, tbl);
 
@@ -868,63 +952,6 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     }
 
     /* GROUP BY */
-    /* Dict-form rewrite: (select {... by: {o: OrderId b: Symbol} ...})
-     * — the parser gives us a RAY_LIST with the DICT attribute, whose
-     * values are the source column references and whose keys are the
-     * output column names.  Normalise to a plain RAY_SYM vector of
-     * the source cols, then rename the first n_keys result columns
-     * at the end of ray_select_fn.  This handling happens before
-     * any other by_expr type check so downstream code only sees the
-     * RAY_SYM vector form. */
-    ray_t* by_names_block = NULL;     /* [n_keys] override output col names */
-    int64_t by_names_count = 0;
-    ray_t* by_sym_vec_owned = NULL;   /* temp RAY_SYM vec we allocated */
-    if (by_expr && by_expr->type == RAY_LIST && (by_expr->attrs & RAY_ATTR_DICT)) {
-        int64_t dlen = ray_len(by_expr);
-        if (dlen & 1) {
-            ray_graph_free(g); ray_release(tbl);
-            return ray_error("domain", "by-dict must have even length");
-        }
-        int64_t nk = dlen / 2;
-        if (nk == 0 || nk > 16) {
-            ray_graph_free(g); ray_release(tbl);
-            return ray_error("domain", "by-dict must have 1..16 keys");
-        }
-        ray_t** d_elems = (ray_t**)ray_data(by_expr);
-        /* Build the replacement sym vector (col names to group on)
-         * and the override-names vector (output col labels). */
-        by_sym_vec_owned = ray_vec_new(RAY_SYM, nk);
-        by_names_block   = ray_vec_new(RAY_SYM, nk);
-        if (!by_sym_vec_owned || !by_names_block ||
-            RAY_IS_ERR(by_sym_vec_owned) || RAY_IS_ERR(by_names_block)) {
-            if (by_sym_vec_owned && !RAY_IS_ERR(by_sym_vec_owned))
-                ray_release(by_sym_vec_owned);
-            if (by_names_block && !RAY_IS_ERR(by_names_block))
-                ray_release(by_names_block);
-            ray_graph_free(g); ray_release(tbl);
-            return ray_error("oom", NULL);
-        }
-        int64_t* sv_data = (int64_t*)ray_data(by_sym_vec_owned);
-        int64_t* nm_data = (int64_t*)ray_data(by_names_block);
-        by_sym_vec_owned->len = nk;
-        by_names_block->len = nk;
-        for (int64_t i = 0; i < nk; i++) {
-            ray_t* k = d_elems[i * 2];      /* output name (sym atom) */
-            ray_t* v = d_elems[i * 2 + 1];  /* source col name (sym atom) */
-            if (!k || !v || k->type != -RAY_SYM || v->type != -RAY_SYM) {
-                ray_release(by_sym_vec_owned);
-                ray_release(by_names_block);
-                ray_graph_free(g); ray_release(tbl);
-                return ray_error("domain",
-                    "by-dict: expected {name: col, ...} with symbol values");
-            }
-            sv_data[i] = v->i64;
-            nm_data[i] = k->i64;
-        }
-        by_names_count = nk;
-        by_expr = by_sym_vec_owned;
-    }
-
     if (by_expr) {
         /* Resolve a "single key" sym id when by_expr is either a
          * scalar -RAY_SYM name or a single-element RAY_SYM vector.
@@ -2228,24 +2255,6 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
     ray_release(tbl);
 
-    /* Dict-form by: rename the first by_names_count columns of the
-     * result table to the override names the caller specified.  The
-     * key columns are always the leading columns, matching the
-     * order of the sym vector we synthesised from the dict values.
-     *
-     * This rename must run BEFORE apply_sort_take so a trailing
-     * sort clause can reference the alias (e.g.
-     *   {by: {o: OrderId} s: (sum Price) asc: o}
-     * ). */
-    if (by_names_block && result && !RAY_IS_ERR(result) && result->type == RAY_TABLE) {
-        int64_t nk = by_names_count;
-        int64_t ncols = ray_table_ncols(result);
-        if (nk > ncols) nk = ncols;
-        int64_t* nms = (int64_t*)ray_data(by_names_block);
-        for (int64_t i = 0; i < nk; i++)
-            ray_table_set_col_name(result, i, nms[i]);
-    }
-
     /* Post-process: apply sort/take for group-by queries.  Runs
      * last so non-agg LIST columns are already in the result,
      * allowing sort clauses to reference non-agg output columns. */
@@ -2253,7 +2262,6 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         result = apply_sort_take(result, dict_elems, dict_n, asc_id, desc_id, take_id);
 
     if (by_sym_vec_owned) ray_release(by_sym_vec_owned);
-    if (by_names_block)   ray_release(by_names_block);
 
     return result;
 }

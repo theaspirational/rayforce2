@@ -5432,6 +5432,21 @@ static MunitResult test_rf_group(const void* params, void* fixture) {
         "(at (at rE 's) 0)", "9.0");  /* smallest group sum first */
     ASSERT_EQ("(at (at rE 's) 2)", "15.0");
 
+    /* Dict-form vals can be arbitrary expressions, not just bare
+     * symbol references.  The canonical example is xbar-bucket
+     * time grouping: (select {by: {bucket: (xbar Ts 100)} ...}). */
+    ASSERT_EQ(
+        "(set tX (table [Ts V] (list [100 110 205 310 400 500] [1 2 3 4 5 6])))"
+        "(set rX (select {from: tX by: {bucket: (xbar Ts 100)} s: (sum V)}))"
+        "(count rX)", "5");
+    ASSERT_EQ("(at (at rX 'bucket) 0)", "100");
+    ASSERT_EQ("(at (at rX 'bucket) 4)", "500");
+    ASSERT_EQ("(at (at rX 's) 0)", "3");   /* 1 + 2 */
+    ASSERT_EQ("(at (at rX 's) 1)", "3");   /* 3    (only one row in bucket 200) */
+    ASSERT_EQ("(at (at rX 's) 2)", "4");   /* 4    */
+    ASSERT_EQ("(at (at rX 's) 3)", "5");   /* 5    */
+    ASSERT_EQ("(at (at rX 's) 4)", "6");   /* 6    */
+
     // ========== GROUP BY STRING COLUMN ==========
     // Tests for grouping by list of strings (TYPE_LIST of TYPE_C8)
     // This tests the fix for parallel radix partitioning bug where identical strings
