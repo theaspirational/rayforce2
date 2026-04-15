@@ -10,3 +10,8 @@ build_*/
 *.swp
 gmon.out
 .claude/settings.local.json
+
+# Local tooling state — never commit
+.wolf/
+.claude/
+rf_test_*.csv
