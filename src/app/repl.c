@@ -42,6 +42,7 @@
 #include "table/sym.h"
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -436,10 +437,19 @@ ray_repl_t* ray_repl_create(ray_poll_t* poll) {
         if (repl->term)
             ray_term_install_signals(repl->term);
         /* Wire the Unicode progress bar for long-running queries —
-         * only on a tty so piped / scripted runs stay clean. Defaults
-         * match duckdb: 2 s show-after, 100 ms tick. */
-        if (isatty(STDERR_FILENO))
-            ray_progress_set_callback(repl_query_progress_cb, NULL, 2000, 100);
+         * only on a tty so piped / scripted runs stay clean. Default
+         * show-after is 500 ms (duckdb uses 2 s, but rayforce's
+         * interactive feel wants the bar on sub-second queries too).
+         * Override via RAY_PROGRESS_MIN_MS env var. */
+        if (isatty(STDERR_FILENO)) {
+            uint64_t min_ms = 500;
+            const char* s = getenv("RAY_PROGRESS_MIN_MS");
+            if (s && *s) {
+                long v = strtol(s, NULL, 10);
+                if (v >= 0) min_ms = (uint64_t)v;
+            }
+            ray_progress_set_callback(repl_query_progress_cb, NULL, min_ms, 100);
+        }
     }
     return repl;
 }

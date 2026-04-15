@@ -831,23 +831,17 @@ ray_t* exec_node(ray_graph_t* g, ray_op_t* op) {
      * without adding cost to the per-row hot path. */
     if (ray_interrupted()) return ray_error("cancel", "interrupted");
 
-    bool heavy = op_is_heavy(op->opcode);
-    bool profiling = g_ray_profile.active && heavy;
+    bool profiling = g_ray_profile.active && op_is_heavy(op->opcode);
     const char* oname = NULL;
-    if (heavy) {
+    if (profiling) {
         oname = ray_opcode_name(op->opcode);
-        /* Progress sync point — main thread only, cheap when the
-         * callback is unset. */
-        ray_progress_update(oname, NULL, 0, 0);
-        if (profiling) ray_profile_span_start(oname);
+        ray_profile_span_start(oname);
     }
 
     ray_t* _prof_result = exec_node_inner(g, op);
 
-    if (heavy) {
-        if (profiling) ray_profile_span_end(oname);
-        ray_progress_update(oname, NULL, 0, 0);
-    }
+    if (profiling)
+        ray_profile_span_end(oname);
 
     return _prof_result;
 }

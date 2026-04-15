@@ -76,10 +76,15 @@ void ray_progress_update(const char* op_name, const char* phase,
         g_showing = false;
     }
 
-    if (op_name)    g_op_name = op_name;
-    if (phase)      g_phase = phase;
-    if (rows_done)  g_rows_done = rows_done;
-    if (rows_total) g_rows_total = rows_total;
+    /* Name/phase follow "NULL = keep previous" so callers can tick
+     * without relabeling. Counters always overwrite — 0 is a valid
+     * "starting fresh" value and must reset stale totals from the
+     * prior op/phase (otherwise a new pivot phase would carry the
+     * previous phase's rows_total forward and render wrong percentages). */
+    if (op_name) g_op_name = op_name;
+    if (phase)   g_phase = phase;
+    g_rows_done  = rows_done;
+    g_rows_total = rows_total;
 
     uint64_t now = mono_ns();
     uint64_t elapsed_ms = (now - g_start_ns) / 1000000ull;

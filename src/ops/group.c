@@ -4317,6 +4317,8 @@ bool pivot_ingest_run(pivot_ingest_t* out,
     };
     ray_pool_dispatch(pool, radix_phase1_fn, &p1ctx, n_scan);
     if (ray_interrupted()) return true; /* caller checks ray_interrupted() */
+    /* Sync point — phase1 drained all rows, so rows_done == n_scan. */
+    ray_progress_update(NULL, "hash-partition", (uint64_t)n_scan, (uint64_t)n_scan);
 
     for (size_t i = 0; i < n_bufs; i++)
         if (radix_bufs[i].oom) return false;
@@ -4338,6 +4340,8 @@ bool pivot_ingest_run(pivot_ingest_t* out,
     out->part_hts = part_hts;
     out->n_parts = RADIX_P;
     if (ray_interrupted()) return true;
+    /* Sync point — partitions materialized; show RADIX_P/RADIX_P. */
+    ray_progress_update(NULL, "per-partition aggregate", RADIX_P, RADIX_P);
 
     /* OOM detection for the parallel path. Two distinct failure modes
      * must be caught here so callers never see a silently-truncated
