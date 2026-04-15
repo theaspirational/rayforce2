@@ -1087,6 +1087,132 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 return ray_error("nyi", "eval-level groupby requires scalar key");
             }
             ray_t* key_col = ray_table_get_col(eval_tbl, by_key_sym);
+
+            /* Fast path: (select {from: t by: k}) with no aggs and
+             * no non-agg expressions — we only need first-of-group
+             * for each non-key column, not full per-group index
+             * lists. Scan the key column once, record the first
+             * row index of each distinct key in a hash table, then
+             * gather that index list from every other column. This
+             * avoids ray_group_fn's per-group ray_vec_append churn
+             * which dominated the cost on 10M-row / 1M-group
+             * workloads. */
+            if (n_out == 0 && key_col && key_col->type == RAY_GUID) {
+                int64_t n = key_col->len;
+                const uint8_t* kb = (const uint8_t*)ray_data(key_col);
+                uint32_t cap = 64;
+                while ((uint64_t)cap < (uint64_t)n * 2 && cap < (1u << 28)) cap <<= 1;
+                uint32_t mask = cap - 1;
+                ray_t* ht_hdr = ray_alloc((size_t)cap * sizeof(uint32_t));
+                if (!ht_hdr) { if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return ray_error("oom", NULL); }
+                uint32_t* ht = (uint32_t*)ray_data(ht_hdr);
+                memset(ht, 0xFF, (size_t)cap * sizeof(uint32_t));
+
+                int64_t fi_cap = n < 1024 ? 1024 : (n < (1 << 20) ? n : (1 << 20));
+                if (fi_cap < 256) fi_cap = 256;
+                ray_t* fi_hdr = ray_alloc((size_t)fi_cap * sizeof(int64_t));
+                if (!fi_hdr) { ray_free(ht_hdr); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return ray_error("oom", NULL); }
+                int64_t* fi = (int64_t*)ray_data(fi_hdr);
+                int64_t ngroups = 0;
+
+                for (int64_t i = 0; i < n; i++) {
+                    if ((i & 65535) == 0) {
+                        if (ray_interrupted()) {
+                            ray_free(fi_hdr);
+                            ray_free(ht_hdr);
+                            if (eval_tbl != tbl) ray_release(eval_tbl);
+                            ray_release(tbl);
+                            return ray_error("cancel", "interrupted");
+                        }
+                        ray_progress_update("select", "by: first-of-group",
+                                            (uint64_t)i, (uint64_t)n);
+                    }
+                    const uint8_t* cur = kb + (size_t)i * 16;
+                    uint64_t h; memcpy(&h, cur, 8); h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+                    uint32_t slot = (uint32_t)(h & mask);
+                    uint32_t gi = UINT32_MAX;
+                    while (ht[slot] != UINT32_MAX) {
+                        uint32_t cand = ht[slot];
+                        if (memcmp(kb + (size_t)fi[cand] * 16, cur, 16) == 0) { gi = cand; break; }
+                        slot = (slot + 1) & mask;
+                    }
+                    if (gi == UINT32_MAX) {
+                        if (ngroups >= fi_cap) {
+                            int64_t new_cap = fi_cap * 2;
+                            ray_t* new_hdr = ray_alloc((size_t)new_cap * sizeof(int64_t));
+                            if (!new_hdr) { ray_free(fi_hdr); ray_free(ht_hdr); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return ray_error("oom", NULL); }
+                            memcpy(ray_data(new_hdr), fi, (size_t)ngroups * sizeof(int64_t));
+                            ray_free(fi_hdr);
+                            fi_hdr = new_hdr;
+                            fi = (int64_t*)ray_data(fi_hdr);
+                            fi_cap = new_cap;
+                        }
+                        fi[ngroups] = i;
+                        ht[slot] = (uint32_t)ngroups;
+                        ngroups++;
+                    }
+                }
+                ray_free(ht_hdr);
+
+                /* Build result table: key column first (gathered from
+                 * the original at fi[]), then every other column the
+                 * same way. */
+                int64_t nc_src = ray_table_ncols(eval_tbl);
+                ray_t* res = ray_table_new(nc_src);
+                if (!res || RAY_IS_ERR(res)) { ray_free(fi_hdr); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return res ? res : ray_error("oom", NULL); }
+
+                /* Helper macro captures common gather-first-by-fi pattern */
+                #define PV_GATHER(sym) do { \
+                    ray_t* sc = ray_table_get_col(eval_tbl, (sym)); \
+                    if (!sc) break; \
+                    ray_t* dst = NULL; \
+                    if (sc->type == RAY_STR) { \
+                        dst = ray_vec_new(RAY_STR, ngroups); \
+                        for (int64_t gi = 0; gi < ngroups && dst && !RAY_IS_ERR(dst); gi++) { \
+                            size_t slen = 0; \
+                            const char* sp = ray_str_vec_get(sc, fi[gi], &slen); \
+                            dst = ray_str_vec_append(dst, sp ? sp : "", sp ? slen : 0); \
+                        } \
+                    } else if (sc->type == RAY_LIST) { \
+                        dst = ray_list_new((int32_t)ngroups); \
+                        if (dst && !RAY_IS_ERR(dst)) { \
+                            ray_t** sitems = (ray_t**)ray_data(sc); \
+                            ray_t** dout = (ray_t**)ray_data(dst); \
+                            for (int64_t gi = 0; gi < ngroups; gi++) { dout[gi] = sitems[fi[gi]]; ray_retain(dout[gi]); } \
+                            dst->len = ngroups; \
+                        } \
+                    } else { \
+                        dst = ray_vec_new(sc->type, ngroups); \
+                        if (dst && !RAY_IS_ERR(dst)) { \
+                            dst->len = ngroups; \
+                            uint8_t esz = ray_sym_elem_size(sc->type, sc->attrs); \
+                            const char* src_base = (const char*)ray_data(sc); \
+                            char* dst_base = (char*)ray_data(dst); \
+                            for (int64_t gi = 0; gi < ngroups; gi++) \
+                                memcpy(dst_base + (size_t)gi * esz, \
+                                       src_base + (size_t)fi[gi] * esz, esz); \
+                        } \
+                    } \
+                    if (dst && !RAY_IS_ERR(dst)) { \
+                        res = ray_table_add_col(res, (sym), dst); \
+                        ray_release(dst); \
+                    } \
+                } while (0)
+
+                PV_GATHER(by_key_sym);
+                for (int64_t c = 0; c < nc_src && !RAY_IS_ERR(res); c++) {
+                    int64_t cn = ray_table_col_name(eval_tbl, c);
+                    if (cn == by_key_sym) continue;
+                    PV_GATHER(cn);
+                }
+                #undef PV_GATHER
+
+                ray_free(fi_hdr);
+                if (eval_tbl != tbl) ray_release(eval_tbl);
+                ray_release(tbl);
+                return apply_sort_take(res, dict_elems, dict_n, asc_id, desc_id, take_id);
+            }
+
             ray_t* groups = ray_group_fn(key_col);
             if (RAY_IS_ERR(groups)) { if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return groups; }
 
