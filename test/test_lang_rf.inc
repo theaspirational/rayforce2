@@ -5370,6 +5370,34 @@ static MunitResult test_rf_group(const void* params, void* fixture) {
         "(set tg7 (table [G V] (list (take (guid 2) 6) (as 'F64 (til 6)))))"
         "(count (select {from: tg7 by: G s: (sum V) x: (+ V 100)}))", "2");
 
+    /* Regression: the emitted GUID key column must contain the actual
+     * source guid bytes, not a byte-counter or whatever ray_alloc
+     * happened to leave in the output buffer.  Previously the
+     * sequential_fallback small-n path wrote GUID keys through
+     * write_col_i64, which has no RAY_GUID branch — small queries
+     * silently produced garbage guids that displayed as
+     * "00010203-0405-0607-0809-0a0b0c0d0e0f" etc. */
+    ASSERT_EQ(
+        "(set gs8 (guid 3))"
+        "(set tg8 (table [G V] (list gs8 (as 'F64 (til 3)))))"
+        "(set rg8 (select {from: tg8 by: G s: (sum V)}))"
+        "(count rg8)", "3");
+    /* Each result guid must equal one of the source guids.  Verify by
+     * sum-testing the equality bitmap: every row in the join should
+     * match exactly one source row. */
+    ASSERT_EQ(
+        "(set gs9 (guid 4))"
+        "(set tg9 (table [G V] (list gs9 (as 'F64 (til 4)))))"
+        "(set rg9 (select {from: tg9 by: G s: (sum V)}))"
+        "(sum (as 'I64 (== (asc (at rg9 'G)) (asc gs9))))", "4");
+    /* Also verify at a scale that forces the parallel DAG phase-3
+     * scatter path (not the small-n sequential_fallback). */
+    ASSERT_EQ(
+        "(set gs10 (guid 100))"
+        "(set tg10 (table [G V] (list gs10 (as 'F64 (til 100)))))"
+        "(set rg10 (select {from: tg10 by: G s: (sum V)}))"
+        "(sum (as 'I64 (== (asc (at rg10 'G)) (asc gs10))))", "100");
+
     // ========== GROUP BY STRING COLUMN ==========
     // Tests for grouping by list of strings (TYPE_LIST of TYPE_C8)
     // This tests the fix for parallel radix partitioning bug where identical strings

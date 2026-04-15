@@ -3340,7 +3340,9 @@ sequential_fallback:;
     result = ray_table_new(total_cols);
     if (!result || RAY_IS_ERR(result)) goto cleanup;
 
-    /* Key columns: read from inline group rows, narrow to original type */
+    /* Key columns: read from inline group rows, narrow to original type.
+     * Wide keys store a source row index in the HT slot; resolve it
+     * through the original key column (key_data[k]) and copy bytes. */
     for (uint8_t k = 0; k < n_keys; k++) {
         ray_t* src_col = key_vecs[k];
         if (!src_col) continue;
@@ -3351,14 +3353,21 @@ sequential_fallback:;
         if (!new_col || RAY_IS_ERR(new_col)) continue;
         new_col->len = (int64_t)grp_count;
 
+        bool is_wide = (ly->wide_key_mask & (1u << k)) != 0;
+        const char* src_base = is_wide ? (const char*)key_data[k] : NULL;
+
         for (uint32_t gi = 0; gi < grp_count; gi++) {
             const char* row = final_ht->rows + (size_t)gi * ly->row_stride;
             int64_t kv = ((const int64_t*)(row + 8))[k];
-            if (kt == RAY_F64) {
+            if (is_wide) {
+                char* dst = (char*)ray_data(new_col) + (size_t)gi * esz;
+                memcpy(dst, src_base + (size_t)kv * esz, esz);
+            } else if (kt == RAY_F64) {
                 char* dst = (char*)ray_data(new_col) + (size_t)gi * esz;
                 memcpy(dst, &kv, 8);
-            } else
+            } else {
                 write_col_i64(ray_data(new_col), gi, kv, kt, new_col->attrs);
+            }
         }
 
         ray_op_ext_t* key_ext = find_ext(g, ext->keys[k]->id);
