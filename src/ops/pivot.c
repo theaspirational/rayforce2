@@ -264,18 +264,13 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     uint8_t n_keys = n_idx + 1;
     if (n_keys > 8) return ray_error("limit", "pivot: too many index columns");
 
-    /* pivot's phase2 dedupe treats each 8-byte key slot as the value
-     * itself (plain memcmp, no key_data indirection), so wide keys like
-     * RAY_GUID — whose HT slot holds a source row index, not the actual
-     * 16 bytes — would dedupe by source row rather than value and emit
-     * row indices into the output column. Reject cleanly until pivot
-     * grows wide-key support. */
-    for (uint8_t k = 0; k < n_idx; k++) {
-        if (idx_vecs[k] && idx_vecs[k]->type == RAY_GUID)
-            return ray_error("nyi", "pivot: GUID index columns not supported");
-    }
-    if (pcol->type == RAY_GUID)
-        return ray_error("nyi", "pivot: GUID pivot column not supported");
+    /* Wide-key resolution: for RAY_GUID the HT slot holds a source row
+     * index rather than the 16 raw bytes, so phase2 dedupe and emit
+     * route wide keys through the source column (key_data[k]). */
+    bool idx_wide[8] = {0};
+    for (uint8_t k = 0; k < n_idx; k++)
+        idx_wide[k] = (idx_vecs[k]->type == RAY_GUID);
+    bool pvt_wide = (pcol->type == RAY_GUID);
 
     void*   key_data[8];
     int8_t  key_types[8];
@@ -329,16 +324,24 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     int64_t* pv_vals = (int64_t*)scratch_alloc(&pv_hdr, pv_cap * sizeof(int64_t));
     if (!pv_vals) { group_ht_free(&ht); return ray_error("oom", NULL); }
 
+    const char* pvt_base = pvt_wide ? (const char*)key_data[n_idx] : NULL;
     for (uint32_t gi = 0; gi < grp_count; gi++) {
         const char* row = ht.rows + (size_t)gi * ly.row_stride;
         const int64_t* rkeys = (const int64_t*)(row + 8);
         int64_t nmask = rkeys[n_keys];
         if (nmask & pvt_null_bit) continue; /* skip rows with null pivot key */
         int64_t pval = rkeys[n_idx];
-        /* Linear scan for distinct (pivot values are typically few) */
+        /* Linear scan for distinct (pivot values are typically few).
+         * For wide pivot keys, pval is a source row index — compare
+         * the actual bytes in pcol. */
         bool found = false;
         for (uint32_t p = 0; p < pv_count; p++) {
-            if (pv_vals[p] == pval) { found = true; break; }
+            if (pvt_wide) {
+                if (memcmp(pvt_base + (size_t)pv_vals[p] * 16,
+                           pvt_base + (size_t)pval * 16, 16) == 0) { found = true; break; }
+            } else {
+                if (pv_vals[p] == pval) { found = true; break; }
+            }
         }
         if (!found) {
             if (pv_count >= pv_cap) {
@@ -381,22 +384,42 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         }
         int64_t idx_nmask = nmask & idx_null_bits;
 
-        /* Hash index keys only (exclude pivot key) + null mask */
+        /* Hash index keys only (exclude pivot key) + null mask.
+         * Wide keys (GUID) resolve actual bytes via key_data[k]. */
         uint64_t ih = 0;
         for (uint8_t k = 0; k < n_idx; k++) {
-            uint64_t kh = (key_types[k] == RAY_F64)
-                ? ray_hash_f64(*(const double*)&keys[k])
-                : ray_hash_i64(keys[k]);
+            uint64_t kh;
+            if (idx_wide[k]) {
+                const char* base = (const char*)key_data[k];
+                kh = ray_hash_bytes(base + (size_t)keys[k] * 16, 16);
+            } else if (key_types[k] == RAY_F64) {
+                kh = ray_hash_f64(*(const double*)&keys[k]);
+            } else {
+                kh = ray_hash_i64(keys[k]);
+            }
             ih = (k == 0) ? kh : ray_hash_combine(ih, kh);
         }
         if (idx_nmask) ih = ray_hash_combine(ih, ray_hash_i64(idx_nmask));
 
-        /* Find or insert index key */
+        /* Find or insert index key. For wide keys, compare actual bytes
+         * from the source column; for narrow keys, the slot value is
+         * the key itself. */
         uint32_t ix_row = UINT32_MAX;
         for (uint32_t j = 0; j < ix_count; j++) {
             const char* ix_entry_p = ix_rows + j * ix_entry;
             if (*(const uint64_t*)ix_entry_p != ih) continue;
-            if (memcmp(ix_entry_p + 8, keys, (size_t)n_idx * 8) != 0) continue;
+            const int64_t* ekeys = (const int64_t*)(ix_entry_p + 8);
+            bool eq = true;
+            for (uint8_t k = 0; k < n_idx && eq; k++) {
+                if (idx_wide[k]) {
+                    const char* base = (const char*)key_data[k];
+                    eq = (memcmp(base + (size_t)ekeys[k] * 16,
+                                  base + (size_t)keys[k] * 16, 16) == 0);
+                } else {
+                    eq = (ekeys[k] == keys[k]);
+                }
+            }
+            if (!eq) continue;
             int64_t ent_nmask;
             memcpy(&ent_nmask, ix_entry_p + 8 + (size_t)n_idx * 8, 8);
             if (ent_nmask != idx_nmask) continue;
@@ -454,6 +477,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         new_col->len = (int64_t)ix_count;
         uint8_t esz = col_esz(idx_vecs[k]);
         int8_t kt = idx_vecs[k]->type;
+        const char* src_base = idx_wide[k] ? (const char*)key_data[k] : NULL;
         for (uint32_t r = 0; r < ix_count; r++) {
             const char* ix_entry_p = ix_rows + r * ix_entry;
             int64_t kv = ((const int64_t*)(ix_entry_p + 8))[k];
@@ -463,7 +487,11 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                 ray_vec_set_null(new_col, (int64_t)r, true);
                 continue;
             }
-            if (kt == RAY_F64) {
+            if (idx_wide[k]) {
+                /* kv is a source row index; copy the 16 raw bytes. */
+                memcpy((char*)ray_data(new_col) + (size_t)r * esz,
+                       src_base + (size_t)kv * 16, 16);
+            } else if (kt == RAY_F64) {
                 memcpy((char*)ray_data(new_col) + (size_t)r * esz, &kv, 8);
             } else {
                 write_col_i64(ray_data(new_col), (int64_t)r, kv, kt, new_col->attrs);
@@ -542,6 +570,23 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         int64_t col_sym;
         if (pcol->type == RAY_SYM) {
             col_sym = pval;
+        } else if (pvt_wide) {
+            /* GUID: format 16 bytes as xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.
+             * pval is a source row index into pvt_base. */
+            static const char hex[] = "0123456789abcdef";
+            static const int groups[] = {4, 2, 2, 2, 6};
+            char buf[37];
+            const uint8_t* bytes = (const uint8_t*)pvt_base + (size_t)pval * 16;
+            int pos = 0, bpos = 0;
+            for (int g = 0; g < 5; g++) {
+                if (g > 0) buf[bpos++] = '-';
+                for (int j = 0; j < groups[g]; j++) {
+                    buf[bpos++] = hex[bytes[pos] >> 4];
+                    buf[bpos++] = hex[bytes[pos] & 0x0F];
+                    pos++;
+                }
+            }
+            col_sym = ray_sym_intern(buf, (size_t)bpos);
         } else {
             char buf[128];
             int len = 0;

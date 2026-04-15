@@ -2894,6 +2894,21 @@ static MunitResult test_rf_query(const void* params, void* fixture) {
         "(select {s: (sum v) from: tn2 by: g})",
         "(table [g s] (list [1 0Nl 0 2] [10 220 100 30]))");
 
+    // --- Pivot with GUID index column. Pivot's phase2 dedupe must
+    //     resolve wide keys (GUID stores a source row index in its
+    //     slot) through key_data rather than memcmp-ing row indices,
+    //     otherwise two rows sharing the same GUID would emit as
+    //     distinct output rows and the column would carry row indices
+    //     instead of the actual GUID bytes. ---
+    ASSERT_EQ(
+        "(set gpt (table [g p v] (list "
+        " (as 'GUID (list \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\" "
+        "                 \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\" "
+        "                 \"7e42b82b-51c7-4468-a477-375bd5006e60\")) "
+        " ['a 'b 'a] [10 20 30])))"
+        "(count (pivot gpt ['g] 'p 'v sum))",
+        "2");
+
     // Test and with select - this exposes the parallel processing bug
     ASSERT_EQ(
         "(set t (table ['a 'b 'c] (list (take [false true] 25001) (take [true false] 25001) (take 1 25001)))) (count "
