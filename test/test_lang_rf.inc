@@ -5974,6 +5974,27 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     /* --- 6. Empty path is rejected instead of creating "" or crashing. */
     ASSERT_ER("(write-csv tE \"\")", "type");
 
+    /* --- 6b. Null-row round-trip (gh#6 example 1).
+     * Empty lines in the data section ARE null rows, including the line
+     * immediately after the header. Previously the header-end scanner
+     * consumed a run of newlines and silently dropped the first null row,
+     * reordering the data. */
+    ASSERT_EQ(
+        "(write-csv (table [v] (list [0Nl 2 0Nl])) \"rf_test_write_nulls.csv\")",
+        "0");
+    ASSERT_EQ(
+        "(set rtn (read-csv [I64] \"rf_test_write_nulls.csv\"))"
+        "(count rtn)", "3");
+    ASSERT_EQ("(at (at rtn 'v) 0)", "0Nl");
+    ASSERT_EQ("(at (at rtn 'v) 1)", "2");
+    ASSERT_EQ("(at (at rtn 'v) 2)", "0Nl");
+
+    /* --- 6c. Null atom display (gh#6 example 3).
+     * println of a null-valued scalar must render the typed null literal,
+     * not raw zero. */
+    ASSERT_EQ("(format \"%\" 0Nl)", "\"0Nl\"");
+    ASSERT_EQ("(format \"%\" 0Ni)", "\"0Ni\"");
+
     /* --- 7. Temporal round-trip via read-csv.
      * RAY_TIMESTAMP is stored as nanoseconds since 2000-01-01, and the
      * CSV emitter writes 9 fractional digits.  read-csv's fast_time_ns

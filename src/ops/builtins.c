@@ -44,6 +44,23 @@ void ray_lang_print(FILE* fp, ray_t* val) {
     if (ray_is_lazy(val))
         val = ray_lazy_materialize(val);
     if (!val || RAY_IS_ERR(val)) { fprintf(fp, "error"); return; }
+    if (RAY_ATOM_IS_NULL(val)) {
+        const char* s;
+        switch (-val->type) {
+            case RAY_I16:       s = "0Nh"; break;
+            case RAY_I32:       s = "0Ni"; break;
+            case RAY_I64:       s = "0Nl"; break;
+            case RAY_F32:       s = "0Ne"; break;
+            case RAY_F64:       s = "0Nf"; break;
+            case RAY_DATE:      s = "0Nd"; break;
+            case RAY_TIME:      s = "0Nt"; break;
+            case RAY_TIMESTAMP: s = "0Np"; break;
+            case RAY_SYM:       s = "0Ns"; break;
+            default:            s = "null"; break;
+        }
+        fprintf(fp, "%s", s);
+        return;
+    }
     switch (val->type) {
     case -RAY_I64:  fprintf(fp, "%ld", (long)val->i64); break;
     case -RAY_F64: {
@@ -116,6 +133,21 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
             int tlen = 0;
             if (!a || RAY_IS_ERR(a)) {
                 tlen = snprintf(tmp, sizeof(tmp), "error");
+            } else if (RAY_ATOM_IS_NULL(a)) {
+                const char* s;
+                switch (-a->type) {
+                    case RAY_I16:       s = "0Nh"; break;
+                    case RAY_I32:       s = "0Ni"; break;
+                    case RAY_I64:       s = "0Nl"; break;
+                    case RAY_F32:       s = "0Ne"; break;
+                    case RAY_F64:       s = "0Nf"; break;
+                    case RAY_DATE:      s = "0Nd"; break;
+                    case RAY_TIME:      s = "0Nt"; break;
+                    case RAY_TIMESTAMP: s = "0Np"; break;
+                    case RAY_SYM:       s = "0Ns"; break;
+                    default:            s = "null"; break;
+                }
+                tlen = snprintf(tmp, sizeof(tmp), "%s", s);
             } else if (a->type == -RAY_I64) {
                 tlen = snprintf(tmp, sizeof(tmp), "%ld", (long)a->i64);
             } else if (a->type == -RAY_F64) {

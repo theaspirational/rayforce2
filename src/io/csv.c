@@ -646,8 +646,10 @@ static int64_t build_row_offsets(const char* buf, size_t buf_size,
     const char* p = buf + data_offset;
     const char* end = buf + buf_size;
 
-    /* Skip leading blank lines */
-    while (p < end && (*p == '\r' || *p == '\n')) p++;
+    /* Do NOT skip leading blank lines: empty lines in the data section
+     * are null rows (they were written out by write-csv for null-valued
+     * single-column tables). Header-level whitespace is consumed by the
+     * header parser before we reach data_offset. */
     if (p >= end) { *offsets_out = NULL; *hdr_out = NULL; return 0; }
 
     /* Estimate capacity: ~40 bytes per row + headroom.
@@ -1170,7 +1172,11 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
             col_name_ids[c] = ray_sym_intern(fld, flen);
             if (dyn_esc) ray_sys_free(dyn_esc);
         }
-        while (p < buf_end && (*p == '\r' || *p == '\n')) p++;
+        /* Consume exactly one line terminator (\r, \n, or \r\n) after the
+         * header row — NOT a run of newlines, because subsequent empty
+         * lines are null data rows. */
+        if (p < buf_end && *p == '\r') p++;
+        if (p < buf_end && *p == '\n') p++;
     } else {
         for (int c = 0; c < ncols; c++) {
             char name[32];
