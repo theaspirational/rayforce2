@@ -1028,7 +1028,16 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 if (RAY_IS_PARTED(kct)) kct = (int8_t)RAY_PARTED_BASETYPE(kct);
                 if (kct == RAY_LIST || kct == RAY_STR)
                     use_eval_group = 1;
-                else if (kct == RAY_GUID && any_nonagg)
+                else if (kct == RAY_GUID)
+                    /* RAY_GUID keys always route to the eval-level
+                     * ray_group_fn path: (a) the DAG first-occurrence
+                     * scanner below truncates wide keys to 8 bytes
+                     * via ray_read_sym and is buggy for GUIDs, and
+                     * (b) its O(N × n_groups) nested fallback was
+                     * hanging for minutes on 10M-row tables with
+                     * ~1M distinct groups. ray_group_fn has a proper
+                     * open-addressed 16-byte HT plus interrupt
+                     * checkpoints. */
                     use_eval_group = 1;
             }
         }
