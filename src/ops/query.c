@@ -880,16 +880,17 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1)
             by_key_sym = ((int64_t*)ray_data(by_expr))[0];
 
-        /* Check if group key is a LIST/STR/GUID column — the DAG
-         * executor doesn't support those as group keys, so fall back
-         * to eval-level grouping. */
+        /* Check if group key is a LIST/STR column — the DAG executor
+         * still falls back to eval-level grouping for those.  RAY_GUID
+         * now uses the wide-key row-indirection path in group.c and
+         * goes through the parallel HT path. */
         int use_eval_group = 0;
         if (by_key_sym >= 0) {
             ray_t* key_col = ray_table_get_col(tbl, by_key_sym);
             if (key_col) {
                 int8_t kct = key_col->type;
                 if (RAY_IS_PARTED(kct)) kct = (int8_t)RAY_PARTED_BASETYPE(kct);
-                if (kct == RAY_LIST || kct == RAY_STR || kct == RAY_GUID)
+                if (kct == RAY_LIST || kct == RAY_STR)
                     use_eval_group = 1;
             }
         }

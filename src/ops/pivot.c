@@ -285,7 +285,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     if (agg_op == OP_MIN) need_flags |= GHT_NEED_MIN;
     if (agg_op == OP_MAX) need_flags |= GHT_NEED_MAX;
 
-    ght_layout_t ly = ght_compute_layout(n_keys, 1, agg_vecs, need_flags, agg_ops);
+    ght_layout_t ly = ght_compute_layout(n_keys, 1, agg_vecs, need_flags, agg_ops, key_types);
 
     /* Hash-aggregate all rows */
     uint32_t ht_cap = 1024;

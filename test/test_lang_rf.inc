@@ -5326,6 +5326,35 @@ static MunitResult test_rf_group(const void* params, void* fixture) {
         "(select {from: t Sum: (sum Value) by: Flag})",
         "(table [Flag Sum] (list [true false] [40 60]))");
 
+    // ========== GROUP BY GUID — DAG wide-key path ==========
+    // Before the row-indirection fix in the HT layout, RAY_GUID keys
+    // were unsupported in the DAG group path (nyi) and fell back to
+    // the O(N²) eval-level scanner.  Now 16-byte keys pack a source
+    // row index into the 8-byte slot and probe/rehash/scatter read
+    // the real bytes via the source column.  Verify:
+    //   1. correctness: count of groups, sum per group
+    //   2. round-trip: the output guid column equals the distinct
+    //      guids from the source
+    //   3. many-distinct case: 1000 distinct guids, each row unique
+    ASSERT_EQ(
+        "(set gs2 (take (guid 2) 10))"
+        "(set tg (table [G V] (list gs2 (as 'F64 (til 10)))))"
+        "(count (select {from: tg by: G s: (sum V)}))", "2");
+    ASSERT_EQ(
+        "(sum (at (select {from: tg by: G s: (sum V)}) 's))", "45.0");
+
+    ASSERT_EQ(
+        "(set tg3 (table [G V] (list (take (guid 3) 30) (as 'F64 (til 30)))))"
+        "(set rg3 (select {from: tg3 by: G s: (sum V)}))"
+        "(count rg3)", "3");
+    ASSERT_EQ("(sum (at rg3 's))", "435.0");  /* 0+1+...+29 */
+
+    /* 1000-distinct case: hash table grows multiple times, exercises
+     * rehash of wide keys. */
+    ASSERT_EQ(
+        "(set tg4 (table [G V] (list (guid 1000) (as 'F64 (til 1000)))))"
+        "(count (select {from: tg4 by: G s: (sum V)}))", "1000");
+
     // ========== GROUP BY STRING COLUMN ==========
     // Tests for grouping by list of strings (TYPE_LIST of TYPE_C8)
     // This tests the fix for parallel radix partitioning bug where identical strings

@@ -384,12 +384,26 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
 
 ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
                                         ray_t** agg_vecs, uint8_t need_flags,
-                                        const uint16_t* agg_ops) {
+                                        const uint16_t* agg_ops,
+                                        const int8_t* key_types) {
     ght_layout_t ly;
     memset(&ly, 0, sizeof(ly));
     ly.n_keys = n_keys;
     ly.n_aggs = n_aggs;
     ly.need_flags = need_flags;
+
+    /* Mark wide keys (those that don't fit in 8 bytes).  For each
+     * wide key, the fat-entry and HT-row key slot stores a source
+     * row index; probe/rehash/scatter resolve the actual bytes via
+     * group_ht_t.key_data[k].  Currently only RAY_GUID is supported. */
+    if (key_types) {
+        for (uint8_t k = 0; k < n_keys && k < 8; k++) {
+            if (key_types[k] == RAY_GUID) {
+                ly.wide_key_mask |= (uint8_t)(1u << k);
+                ly.wide_key_esz[k] = 16;
+            }
+        }
+    }
 
     uint8_t nv = 0;
     for (uint8_t a = 0; a < n_aggs && a < 8; a++) {
@@ -433,6 +447,9 @@ static bool group_ht_init_sized(group_ht_t* ht, uint32_t cap,
                                  const ght_layout_t* ly, uint32_t init_grp_cap) {
     ht->ht_cap = cap;
     ht->layout = *ly;
+    /* key_data must be populated by the caller via group_ht_set_key_data
+     * whenever wide_key_mask != 0. */
+    memset(ht->key_data, 0, sizeof(ht->key_data));
     ht->slots = (uint32_t*)scratch_alloc(&ht->_h_slots, (size_t)cap * sizeof(uint32_t));
     if (!ht->slots) return false;
     memset(ht->slots, 0xFF, (size_t)cap * sizeof(uint32_t)); /* HT_EMPTY = all-1s */
@@ -446,6 +463,16 @@ static bool group_ht_init_sized(group_ht_t* ht, uint32_t cap,
 
 bool group_ht_init(group_ht_t* ht, uint32_t cap, const ght_layout_t* ly) {
     return group_ht_init_sized(ht, cap, ly, 256);
+}
+
+/* Populate key_data[k] for wide-key resolution. Called by the HT path
+ * right after group_ht_init / group_ht_init_sized when any key is wide. */
+static inline void group_ht_set_key_data(group_ht_t* ht, void** kd) {
+    uint8_t mask = ht->layout.wide_key_mask;
+    if (!mask || !kd) return;
+    for (uint8_t k = 0; k < ht->layout.n_keys && k < 8; k++) {
+        if (mask & (1u << k)) ht->key_data[k] = kd[k];
+    }
 }
 
 void group_ht_free(group_ht_t* ht) {
@@ -465,13 +492,22 @@ static bool group_ht_grow(group_ht_t* ht) {
     return true;
 }
 
-/* Hash inline int64_t keys (for rehash — no original column access) */
+/* Hash inline int64_t keys (for rehash — resolves wide keys via
+ * the HT's key_data pointers). */
 static inline uint64_t hash_keys_inline(const int64_t* keys, const int8_t* key_types,
-                                         uint8_t n_keys) {
+                                         uint8_t n_keys, uint8_t wide_mask,
+                                         const uint8_t* wide_esz, void* const* key_data) {
     uint64_t h = 0;
     for (uint8_t k = 0; k < n_keys; k++) {
         uint64_t kh;
-        if (key_types[k] == RAY_F64) {
+        if (wide_mask & (1u << k)) {
+            /* Wide key: keys[k] is the source row index. Hash the
+             * actual bytes from key_data[k]. */
+            int64_t row_idx = keys[k];
+            uint8_t esz = wide_esz[k];
+            const void* src = (const char*)key_data[k] + (size_t)row_idx * esz;
+            kh = ray_hash_bytes(src, esz);
+        } else if (key_types[k] == RAY_F64) {
             double dv;
             memcpy(&dv, &keys[k], 8);
             kh = ray_hash_f64(dv);
@@ -496,9 +532,11 @@ static void group_ht_rehash(group_ht_t* ht, const int8_t* key_types) {
     uint32_t mask = new_cap - 1;
     uint16_t rs = ht->layout.row_stride;
     uint8_t nk = ht->layout.n_keys;
+    uint8_t wide = ht->layout.wide_key_mask;
     for (uint32_t gi = 0; gi < ht->grp_count; gi++) {
         const int64_t* row_keys = (const int64_t*)(ht->rows + (size_t)gi * rs + 8);
-        uint64_t h = hash_keys_inline(row_keys, key_types, nk);
+        uint64_t h = hash_keys_inline(row_keys, key_types, nk, wide,
+                                       ht->layout.wide_key_esz, ht->key_data);
         uint32_t slot = (uint32_t)(h & mask);
         while (ht->slots[slot] != HT_EMPTY)
             slot = (slot + 1) & mask;
@@ -583,6 +621,33 @@ static inline void accum_from_entry(char* row, const char* entry,
     }
 }
 
+/* Compare the n_keys key slots of two rows, handling wide keys via
+ * key_data[] resolution.  Returns true if all keys are bytewise equal.
+ * Hot path: when wide_mask == 0, reduces to a single memcmp over the
+ * packed 8-byte-per-key region. */
+static inline bool group_keys_equal(const int64_t* a_keys, const int64_t* b_keys,
+                                      const ght_layout_t* ly, void* const* key_data) {
+    uint8_t wide = ly->wide_key_mask;
+    uint8_t nk = ly->n_keys;
+    if (wide == 0) {
+        return memcmp(a_keys, b_keys, (size_t)nk * 8) == 0;
+    }
+    for (uint8_t k = 0; k < nk; k++) {
+        if (wide & (1u << k)) {
+            int64_t ra = a_keys[k];
+            int64_t rb = b_keys[k];
+            if (ra == rb) continue;  /* same source row - trivially equal */
+            uint8_t esz = ly->wide_key_esz[k];
+            const char* base = (const char*)key_data[k];
+            if (memcmp(base + (size_t)ra * esz,
+                       base + (size_t)rb * esz, esz) != 0) return false;
+        } else {
+            if (a_keys[k] != b_keys[k]) return false;
+        }
+    }
+    return true;
+}
+
 /* Probe + accumulate a single fat entry into the HT. Returns updated mask. */
 static inline uint32_t group_probe_entry(group_ht_t* ht,
     const char* entry, const int8_t* key_types, uint32_t mask) {
@@ -615,7 +680,8 @@ static inline uint32_t group_probe_entry(group_ht_t* ht,
         if (HT_SALT_V(sv) == salt) {
             uint32_t gid = HT_GID(sv);
             char* row = ht->rows + (size_t)gid * ly->row_stride;
-            if (memcmp(row + 8, ekeys, key_bytes) == 0) {
+            if (group_keys_equal((const int64_t*)(row + 8),
+                                  (const int64_t*)ekeys, ly, ht->key_data)) {
                 (*(int64_t*)row)++;   /* count++ */
                 accum_from_entry(row, entry, ly);
                 return mask;
@@ -636,9 +702,14 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
     const ght_layout_t* ly = &ht->layout;
     uint8_t nk = ly->n_keys;
     uint8_t na = ly->n_aggs;
+    uint8_t wide = ly->wide_key_mask;
     uint32_t mask = ht->ht_cap - 1;
     /* Stack buffer for one entry (max: 8 + 8*8 + 8*8 = 136 bytes) */
     char ebuf[8 + 8 * 8 + 8 * 8];
+
+    /* Wire the HT's key_data pointer table so probe/rehash can
+     * resolve wide keys via the source columns. */
+    if (wide) group_ht_set_key_data(ht, key_data);
 
     for (int64_t i = start; i < end; i++) {
         int64_t row = match_idx ? match_idx[i] : i;
@@ -646,14 +717,23 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
         int64_t* ek = (int64_t*)(ebuf + 8);
         for (uint8_t k = 0; k < nk; k++) {
             int8_t t = key_types[k];
-            int64_t kv;
-            if (t == RAY_F64)
+            uint64_t kh;
+            if (wide & (1u << k)) {
+                /* Wide key: store source row index, hash the actual bytes. */
+                uint8_t esz = ly->wide_key_esz[k];
+                const void* src = (const char*)key_data[k] + (size_t)row * esz;
+                ek[k] = row;
+                kh = ray_hash_bytes(src, esz);
+            } else if (t == RAY_F64) {
+                int64_t kv;
                 memcpy(&kv, &((double*)key_data[k])[row], 8);
-            else
-                kv = read_col_i64(key_data[k], row, t, key_attrs[k]);
-            ek[k] = kv;
-            uint64_t kh = (t == RAY_F64) ? ray_hash_f64(((double*)key_data[k])[row])
-                                        : ray_hash_i64(kv);
+                ek[k] = kv;
+                kh = ray_hash_f64(((double*)key_data[k])[row]);
+            } else {
+                int64_t kv = read_col_i64(key_data[k], row, t, key_attrs[k]);
+                ek[k] = kv;
+                kh = ray_hash_i64(kv);
+            }
             h = (k == 0) ? kh : ray_hash_combine(h, kh);
         }
         *(uint64_t*)ebuf = h;
@@ -740,6 +820,7 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
     uint8_t nk = ly->n_keys;
     uint8_t na = ly->n_aggs;
     uint8_t nv = ly->n_agg_vals;
+    uint8_t wide = ly->wide_key_mask;
     uint16_t estride = ly->entry_stride;
     const int64_t* match_idx = c->match_idx;
 
@@ -751,14 +832,22 @@ static void radix_phase1_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
         uint64_t h = 0;
         for (uint8_t k = 0; k < nk; k++) {
             int8_t t = c->key_types[k];
-            int64_t kv;
-            if (t == RAY_F64)
+            uint64_t kh;
+            if (wide & (1u << k)) {
+                uint8_t esz = ly->wide_key_esz[k];
+                const void* src = (const char*)c->key_data[k] + (size_t)row * esz;
+                keys[k] = row;
+                kh = ray_hash_bytes(src, esz);
+            } else if (t == RAY_F64) {
+                int64_t kv;
                 memcpy(&kv, &((double*)c->key_data[k])[row], 8);
-            else
-                kv = read_col_i64(c->key_data[k], row, t, c->key_attrs[k]);
-            keys[k] = kv;
-            uint64_t kh = (t == RAY_F64) ? ray_hash_f64(((double*)c->key_data[k])[row])
-                                        : ray_hash_i64(kv);
+                keys[k] = kv;
+                kh = ray_hash_f64(((double*)c->key_data[k])[row]);
+            } else {
+                int64_t kv = read_col_i64(c->key_data[k], row, t, c->key_attrs[k]);
+                keys[k] = kv;
+                kh = ray_hash_i64(kv);
+            }
             h = (k == 0) ? kh : ray_hash_combine(h, kh);
         }
 
@@ -831,6 +920,10 @@ typedef struct {
     uint8_t       n_keys;
     agg_out_t*    agg_outs;
     uint8_t       n_aggs;
+    /* For wide-key columns (RAY_GUID), the stored key slot is a
+     * source row index and we copy the actual bytes from the source
+     * column here during the result scatter. */
+    void**        key_src_data;   /* [n_keys]; NULL entry if not wide */
 } radix_phase3_ctx_t;
 
 static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
@@ -862,10 +955,16 @@ static void radix_phase3_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
                 char* dst = c->key_dsts[k];
                 uint8_t esz = c->key_esizes[k];
                 size_t doff = (size_t)di * esz;
-                if (kt == RAY_F64)
+                if (ly->wide_key_mask & (1u << k)) {
+                    /* Wide key: kv is the source row index; copy the
+                     * bytes from the source column into the output. */
+                    const char* src = (const char*)c->key_src_data[k];
+                    memcpy(dst + doff, src + (size_t)kv * esz, esz);
+                } else if (kt == RAY_F64) {
                     memcpy(dst + doff, &kv, 8);
-                else
+                } else {
                     write_col_i64(dst, di, kv, kt, c->key_attrs[k]);
+                }
             }
 
             /* Scatter agg results to result columns */
@@ -947,6 +1046,9 @@ typedef struct {
     radix_buf_t* bufs;
     group_ht_t*  part_hts;
     ght_layout_t layout;
+    /* Shared (read-only) source column bases for wide-key resolution.
+     * Each partition HT stashes the ones matching wide_key_mask. */
+    void**       key_data;
 } radix_phase2_ctx_t;
 
 static void radix_phase2_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
@@ -973,6 +1075,9 @@ static void radix_phase2_fn(void* ctx, uint32_t worker_id, int64_t start, int64_
         while (init_grp < total && init_grp < 65536) init_grp *= 2;
         if (!group_ht_init_sized(&c->part_hts[p], part_ht_cap, &c->layout, init_grp))
             continue;
+        /* Wide keys need source-column resolution during probe/rehash. */
+        if (c->layout.wide_key_mask && c->key_data)
+            group_ht_set_key_data(&c->part_hts[p], c->key_data);
 
         for (uint32_t w = 0; w < c->n_workers; w++) {
             radix_buf_t* buf = &c->bufs[(size_t)w * RADIX_P + p];
@@ -2915,10 +3020,11 @@ ht_path:;
         if (aop == OP_MAX) ght_need |= GHT_NEED_MAX;
     }
 
-    /* RAY_STR / RAY_GUID keys not yet supported in HT path
-     * (16-byte elements vs 8-byte slots) */
+    /* RAY_STR keys still need the eval-level path (variable-width
+     * with a pool).  RAY_GUID uses the wide-key row-indirection
+     * support in the layout; see ght_layout_t.wide_key_mask. */
     for (uint8_t k = 0; k < n_keys; k++) {
-        if (key_types[k] == RAY_STR || key_types[k] == RAY_GUID) {
+        if (key_types[k] == RAY_STR) {
             for (uint8_t kk = 0; kk < n_keys; kk++)
                 if (key_owned[kk] && key_vecs[kk]) ray_release(key_vecs[kk]);
             for (uint8_t a = 0; a < n_aggs; a++)
@@ -2929,7 +3035,7 @@ ht_path:;
     }
 
     /* Compute row-layout: keys + agg values inline */
-    ght_layout_t ght_layout = ght_compute_layout(n_keys, n_aggs, agg_vecs, ght_need, ext->agg_ops);
+    ght_layout_t ght_layout = ght_compute_layout(n_keys, n_aggs, agg_vecs, ght_need, ext->agg_ops, key_types);
 
     /* Right-sized hash table: start small, rehash on load > 0.5 */
     uint32_t ht_cap = 256;
@@ -3024,6 +3130,7 @@ ht_path:;
             .bufs        = radix_bufs,
             .part_hts    = part_hts,
             .layout      = ght_layout,
+            .key_data    = key_data,
         };
         ray_pool_dispatch_n(pool, radix_phase2_fn, &p2ctx, RADIX_P);
         CHECK_CANCEL_GOTO(pool, cleanup);
@@ -3121,6 +3228,7 @@ ht_path:;
                 .n_keys       = n_keys,
                 .agg_outs     = agg_outs,
                 .n_aggs       = n_aggs,
+                .key_src_data = key_data,
             };
             ray_pool_dispatch_n(pool, radix_phase3_fn, &p3ctx, RADIX_P);
         }

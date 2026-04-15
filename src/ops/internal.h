@@ -716,6 +716,14 @@ typedef struct {
     uint16_t off_min;
     uint16_t off_max;
     uint16_t off_sumsq;
+    /* Wide-key support: bit k set iff key k does not fit in 8 bytes
+     * (e.g. RAY_GUID = 16 B).  For wide keys the 8-byte key slot
+     * stores a source-row index and the actual key bytes live in the
+     * original column, so probe/rehash/scatter must redirect through
+     * key_data[k].  wide_key_esz[k] is the per-element byte size of
+     * the source column. */
+    uint8_t  wide_key_mask;
+    uint8_t  wide_key_esz[8];
 } ght_layout_t;
 
 typedef struct {
@@ -725,6 +733,11 @@ typedef struct {
     uint32_t     grp_count;
     uint32_t     grp_cap;
     ght_layout_t layout;
+    /* Non-NULL only when layout.wide_key_mask != 0.  Pointers into
+     * the original key columns (slice-unaware raw data), used by
+     * group_probe_entry / group_ht_rehash to resolve row-indexed
+     * wide keys. */
+    void*        key_data[8];
     ray_t*        _h_slots;
     ray_t*        _h_rows;
 } group_ht_t;
@@ -743,7 +756,8 @@ typedef struct {
 
 ght_layout_t ght_compute_layout(uint8_t n_keys, uint8_t n_aggs,
                                 ray_t** agg_vecs, uint8_t need_flags,
-                                const uint16_t* agg_ops);
+                                const uint16_t* agg_ops,
+                                const int8_t* key_types);
 bool group_ht_init(group_ht_t* ht, uint32_t cap, const ght_layout_t* ly);
 void group_ht_free(group_ht_t* ht);
 /* Hash-aggregate rows [start, end) into ht.
