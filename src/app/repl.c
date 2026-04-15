@@ -548,6 +548,14 @@ static void eval_and_print(ray_term_t* term, const char* input,
 
     if (term) ray_term_eval_end(term);
 
+    /* Clear any pull-based progress state left over from this
+     * top-level eval. Some paths (e.g. ray_group_fn invoked from
+     * the select builtin) emit progress updates without going
+     * through ray_execute, so the ray_execute wrapper's cleanup
+     * never runs and the bar would otherwise stay on screen. This
+     * is the one guaranteed per-eval boundary in the REPL. */
+    ray_progress_end();
+
     if (ray_is_lazy(result)) {
         result = ray_lazy_materialize(result);
         if (profiling) ray_profile_tick("materialize");
@@ -1093,6 +1101,8 @@ int ray_repl_run_file(const char* path) {
     }
     ray_release(nfo);
     ray_release(block);
+
+    ray_progress_end();
 
     if (ray_is_lazy(result)) {
         result = ray_lazy_materialize(result);
