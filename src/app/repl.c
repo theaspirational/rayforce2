@@ -95,11 +95,22 @@ static const char* const PB_CAP_R = "\xe2\x96\x8f"; /* ▏ */
 static int progress_term_cols(void) {
     static int cached = 0;
     if (cached) return cached;
+#if defined(_WIN32)
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
+    if (herr && GetConsoleScreenBufferInfo(herr, &csbi)) {
+        int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        cached = (w > 10) ? w : 80;
+    } else {
+        cached = 80;
+    }
+#else
     struct winsize ws;
     if (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 10)
         cached = ws.ws_col;
     else
         cached = 80;
+#endif
     return cached;
 }
 
