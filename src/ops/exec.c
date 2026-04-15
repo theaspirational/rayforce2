@@ -831,11 +831,17 @@ ray_t* exec_node(ray_graph_t* g, ray_op_t* op) {
      * without adding cost to the per-row hot path. */
     if (ray_interrupted()) return ray_error("cancel", "interrupted");
 
-    bool profiling = g_ray_profile.active && op_is_heavy(op->opcode);
+    bool heavy = op_is_heavy(op->opcode);
+    bool profiling = g_ray_profile.active && heavy;
     const char* oname = NULL;
-    if (profiling) {
+    if (heavy) {
         oname = ray_opcode_name(op->opcode);
-        ray_profile_span_start(oname);
+        /* Relabel progress without touching counters — leaf ops that
+         * drive their own rows_done/rows_total still work; ops that
+         * don't get a spinner-style indeterminate bar until they
+         * either finish or emit their own update. */
+        ray_progress_label(oname, NULL);
+        if (profiling) ray_profile_span_start(oname);
     }
 
     ray_t* _prof_result = exec_node_inner(g, op);

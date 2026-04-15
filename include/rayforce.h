@@ -229,11 +229,17 @@ void ray_progress_set_callback(ray_progress_cb cb, void* user,
                                 uint64_t min_ms, uint64_t tick_interval_ms);
 
 /* Update progress state. Safe to call from the main thread only.
- * phase/op_name may be NULL to keep the previous value. When rows_total
- * is 0 the caller is signalling an indeterminate phase. Fires the
- * registered callback if the gates allow. */
+ * phase/op_name may be NULL to keep the previous value. Counters
+ * always overwrite — 0 is a valid "starting fresh" value. Fires the
+ * registered callback if the show-after and tick-interval gates pass. */
 void ray_progress_update(const char* op_name, const char* phase,
                          uint64_t rows_done, uint64_t rows_total);
+
+/* Relabel without touching the counters — for wrappers like exec_node
+ * that only know which operator is about to run but not its rows. A
+ * subsequent ray_progress_update from inside the op will advance the
+ * counters; until then the renderer shows an indeterminate bar. */
+void ray_progress_label(const char* op_name, const char* phase);
 
 /* Mark the end of the current query. Clears state and fires a final
  * "100%" tick if the query ran long enough to have shown the bar. */

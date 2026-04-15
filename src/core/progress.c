@@ -96,6 +96,30 @@ void ray_progress_update(const char* op_name, const char* phase,
     fire(now, false);
 }
 
+void ray_progress_label(const char* op_name, const char* phase) {
+    if (!g_cb) return;
+    if (g_start_ns == 0) {
+        g_start_ns = mono_ns();
+        g_last_fire_ns = 0;
+        g_showing = false;
+    }
+    if (op_name) g_op_name = op_name;
+    if (phase)   g_phase = phase;
+    /* Reset counters so a freshly-entered op that doesn't know its
+     * row total shows an indeterminate bar instead of the previous
+     * op's percentages. The first ray_progress_update from inside
+     * the op will fill them in. */
+    g_rows_done = 0;
+    g_rows_total = 0;
+
+    uint64_t now = mono_ns();
+    uint64_t elapsed_ms = (now - g_start_ns) / 1000000ull;
+    if (elapsed_ms < g_min_ms) return;
+    uint64_t since_last = g_last_fire_ns ? (now - g_last_fire_ns) / 1000000ull : g_tick_ms;
+    if (since_last < g_tick_ms) return;
+    fire(now, false);
+}
+
 void ray_progress_end(void) {
     if (!g_cb) {
         g_start_ns = 0;

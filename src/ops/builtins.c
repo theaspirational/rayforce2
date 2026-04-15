@@ -1791,7 +1791,17 @@ ray_t* ray_group_fn(ray_t* x) {
             return ray_error("oom", NULL);
         }
         ght_guid_ctx_t gctx = { .base = base, .gvals = gvals };
+        ray_progress_update("group", "guid-scan", 0, (uint64_t)n);
         for (int64_t i = 0; i < n; i++) {
+            if (((i) & 65535) == 0) {
+                if (ray_interrupted()) {
+                    for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                    group_ht_free(&ht);
+                    ray_free(val_block); ray_free(ivblock);
+                    return ray_error("cancel", "interrupted");
+                }
+                ray_progress_update(NULL, NULL, (uint64_t)i, (uint64_t)n);
+            }
             const uint8_t* cur = base + i * 16;
             uint64_t h = hash_guid(cur);
             uint32_t slot = (uint32_t)(h & ht.mask);
