@@ -4200,3 +4200,161 @@ batch_fail:
     if (merge_tbl) ray_release(merge_tbl);
     return result;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+ * pivot_ingest_run — shared parallel hash-aggregate for pivot
+ *
+ * Mirrors the phase1+phase2 radix pipeline exec_group uses, leaving
+ * the result in per-partition HTs with prefix offsets so the caller
+ * can iterate grouped rows without knowing about the radix internals.
+ * Falls back to a single sequential HT for tiny inputs or when no
+ * pool is available — the caller iterates n_parts ∈ {1, RADIX_P}.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+static void pivot_ingest_sequential(pivot_ingest_t* out, const ght_layout_t* ly,
+                                     void** key_data, int8_t* key_types,
+                                     uint8_t* key_attrs, ray_t** key_vecs,
+                                     ray_t** agg_vecs, int64_t n_scan,
+                                     group_ht_t* scratch_ht) {
+    (void)key_data;
+    out->part_hts = scratch_ht;
+    out->n_parts = 1;
+    out->row_stride = ly->row_stride;
+    group_rows_range(scratch_ht, key_data, key_types, key_attrs, key_vecs,
+                     agg_vecs, 0, n_scan, NULL);
+    out->total_grps = scratch_ht->grp_count;
+    out->part_offsets[0] = 0;
+    out->part_offsets[1] = scratch_ht->grp_count;
+    out->part_hts = scratch_ht;
+}
+
+bool pivot_ingest_run(pivot_ingest_t* out,
+                      const ght_layout_t* ly,
+                      void** key_data, int8_t* key_types, uint8_t* key_attrs,
+                      ray_t** key_vecs, ray_t** agg_vecs,
+                      int64_t n_scan) {
+    memset(out, 0, sizeof(*out));
+    out->row_stride = ly->row_stride;
+
+    /* Allocate a small offsets buffer up front (RADIX_P+1 is the max). */
+    out->part_offsets = (uint32_t*)scratch_alloc(&out->_offsets_hdr,
+        (size_t)(RADIX_P + 1) * sizeof(uint32_t));
+    if (!out->part_offsets) return false;
+
+    uint8_t n_keys = ly->n_keys;
+
+    ray_pool_t* pool = ray_pool_get();
+    uint32_t n_total = pool ? ray_pool_total_workers(pool) : 1;
+    bool parallel_ok = (pool && n_scan >= RAY_PARALLEL_THRESHOLD && n_total > 1);
+
+    if (!parallel_ok) {
+        /* Sequential single-HT path — allocate the HT in its own scratch block
+         * so pivot_ingest_free can release it uniformly alongside the
+         * radix part_hts array in the parallel case. */
+        group_ht_t* seq = (group_ht_t*)scratch_alloc(&out->_part_hts_hdr,
+            sizeof(group_ht_t));
+        if (!seq) return false;
+        uint32_t seq_cap = 1024;
+        uint64_t target = (uint64_t)n_scan * 2;
+        while ((uint64_t)seq_cap < target && seq_cap < (1u << 24)) seq_cap <<= 1;
+        if (!group_ht_init(seq, seq_cap, ly)) return false;
+        pivot_ingest_sequential(out, ly, key_data, key_types, key_attrs,
+                                key_vecs, agg_vecs, n_scan, seq);
+        return true;
+    }
+
+    /* ═════ Parallel radix path ═════ */
+    size_t n_bufs = (size_t)n_total * RADIX_P;
+    out->_n_bufs = n_bufs;
+    radix_buf_t* radix_bufs = (radix_buf_t*)scratch_calloc(&out->_radix_bufs_hdr,
+        n_bufs * sizeof(radix_buf_t));
+    if (!radix_bufs) return false;
+    out->_radix_bufs = radix_bufs;
+
+    uint32_t buf_init = (uint32_t)((uint64_t)n_scan / (RADIX_P * n_total));
+    if (buf_init < 64) buf_init = 64;
+    buf_init = buf_init + buf_init / 2;
+    uint16_t estride = ly->entry_stride;
+    {
+        size_t total_pre = (size_t)n_bufs * buf_init * estride;
+        if (total_pre > (size_t)2 << 30) {
+            buf_init = (uint32_t)(((size_t)2 << 30) / ((size_t)n_bufs * estride));
+            if (buf_init < 64) buf_init = 64;
+        }
+    }
+    for (size_t i = 0; i < n_bufs; i++) {
+        radix_bufs[i].data = (char*)scratch_alloc(&radix_bufs[i]._hdr,
+            (size_t)buf_init * estride);
+        radix_bufs[i].count = 0;
+        radix_bufs[i].cap = buf_init;
+    }
+
+    uint8_t p1_nullable = 0;
+    for (uint8_t k = 0; k < n_keys; k++) {
+        if (!key_vecs[k]) continue;
+        ray_t* src = (key_vecs[k]->attrs & RAY_ATTR_SLICE)
+                     ? key_vecs[k]->slice_parent : key_vecs[k];
+        if (src && (src->attrs & RAY_ATTR_HAS_NULLS))
+            p1_nullable |= (uint8_t)(1u << k);
+    }
+
+    radix_phase1_ctx_t p1ctx = {
+        .key_data      = key_data,
+        .key_types     = key_types,
+        .key_attrs     = key_attrs,
+        .key_vecs      = key_vecs,
+        .nullable_mask = p1_nullable,
+        .agg_vecs      = agg_vecs,
+        .n_workers     = n_total,
+        .bufs          = radix_bufs,
+        .layout        = *ly,
+        .match_idx     = NULL,
+    };
+    ray_pool_dispatch(pool, radix_phase1_fn, &p1ctx, n_scan);
+    if (ray_interrupted()) return true; /* caller checks ray_interrupted() */
+
+    for (size_t i = 0; i < n_bufs; i++)
+        if (radix_bufs[i].oom) return false;
+
+    group_ht_t* part_hts = (group_ht_t*)scratch_calloc(&out->_part_hts_hdr,
+        RADIX_P * sizeof(group_ht_t));
+    if (!part_hts) return false;
+
+    radix_phase2_ctx_t p2ctx = {
+        .key_types = key_types,
+        .n_keys    = n_keys,
+        .n_workers = n_total,
+        .bufs      = radix_bufs,
+        .part_hts  = part_hts,
+        .layout    = *ly,
+        .key_data  = key_data,
+    };
+    ray_pool_dispatch_n(pool, radix_phase2_fn, &p2ctx, RADIX_P);
+    if (ray_interrupted()) { out->part_hts = part_hts; out->n_parts = RADIX_P; return true; }
+
+    out->part_hts = part_hts;
+    out->n_parts = RADIX_P;
+    out->part_offsets[0] = 0;
+    for (uint32_t p = 0; p < RADIX_P; p++)
+        out->part_offsets[p + 1] = out->part_offsets[p] + part_hts[p].grp_count;
+    out->total_grps = out->part_offsets[RADIX_P];
+    return true;
+}
+
+void pivot_ingest_free(pivot_ingest_t* out) {
+    if (!out) return;
+    if (out->part_hts) {
+        for (uint32_t p = 0; p < out->n_parts; p++) {
+            if (out->part_hts[p].rows || out->part_hts[p].slots)
+                group_ht_free(&out->part_hts[p]);
+        }
+        scratch_free(out->_part_hts_hdr);
+    }
+    if (out->_radix_bufs) {
+        radix_buf_t* bufs = (radix_buf_t*)out->_radix_bufs;
+        for (size_t i = 0; i < out->_n_bufs; i++) scratch_free(bufs[i]._hdr);
+        scratch_free(out->_radix_bufs_hdr);
+    }
+    scratch_free(out->_offsets_hdr);
+    memset(out, 0, sizeof(*out));
+}

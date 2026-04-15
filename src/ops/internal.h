@@ -774,6 +774,44 @@ void group_rows_range(group_ht_t* ht, void** key_data, int8_t* key_types,
                       int64_t start, int64_t end,
                       const int64_t* match_idx);
 
+/* ══════════════════════════════════════════
+ * Pivot ingest — shared parallel hash-aggregate path.
+ *
+ * Runs the same radix pipeline exec_group uses (phases 1+2), leaving
+ * the result in a set of per-partition HTs with prefix offsets. Phase
+ * 3 is left to the caller so pivot can restructure the output. For
+ * small inputs or when no thread pool is available, falls back to a
+ * single sequential HT transparently — the caller iterates
+ * part_hts[0..n_parts) the same way either way.
+ * ══════════════════════════════════════════ */
+
+typedef struct {
+    group_ht_t* part_hts;       /* n_parts entries */
+    uint32_t*   part_offsets;   /* n_parts+1 entries (prefix sums of grp_counts) */
+    uint32_t    n_parts;        /* 1 when sequential, RADIX_P when parallel */
+    uint32_t    total_grps;
+    uint16_t    row_stride;
+
+    /* Internal cleanup state — do not touch from callers. */
+    ray_t*      _part_hts_hdr;
+    ray_t*      _offsets_hdr;
+    void*       _radix_bufs;    /* radix_buf_t* — allocated only on parallel path */
+    ray_t*      _radix_bufs_hdr;
+    size_t      _n_bufs;
+} pivot_ingest_t;
+
+/* Run parallel (or sequential-fallback) hash aggregation for pivot.
+ * Returns true on success, false on unrecoverable OOM. On true the
+ * caller must eventually call pivot_ingest_free(). Cancellation is
+ * propagated via ray_interrupted() — callers should check that too. */
+bool pivot_ingest_run(pivot_ingest_t* out,
+                      const ght_layout_t* ly,
+                      void** key_data, int8_t* key_types, uint8_t* key_attrs,
+                      ray_t** key_vecs, ray_t** agg_vecs,
+                      int64_t n_scan);
+
+void pivot_ingest_free(pivot_ingest_t* out);
+
 /* ── window.c ── */
 ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl);
 

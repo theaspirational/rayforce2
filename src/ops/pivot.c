@@ -298,22 +298,16 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
 
     ght_layout_t ly = ght_compute_layout(n_keys, 1, agg_vecs, need_flags, agg_ops, key_types);
 
-    /* Hash-aggregate all rows. Size HT to 2× nrows so the load factor
-     * stays below 0.5 even when every input row is its own group (common
-     * when index columns have high cardinality) — avoids repeated rehash
-     * grows during ingest on large pivots. */
-    uint32_t ht_cap = 1024;
-    uint64_t target = (uint64_t)nrows * 2;
-    while ((uint64_t)ht_cap < target && ht_cap < (1u << 24)) ht_cap <<= 1;
-
-    group_ht_t ht;
-    if (!group_ht_init(&ht, ht_cap, &ly)) return ray_error("oom", NULL);
-    group_rows_range(&ht, key_data, key_types, key_attrs, key_vecs, agg_vecs,
-                     0, nrows, NULL);
-    if (ray_interrupted()) { group_ht_free(&ht); return ray_error("cancel", "interrupted"); }
-    if (ht.oom) { group_ht_free(&ht); return ray_error("oom", NULL); }
-    uint32_t grp_count = ht.grp_count;
-    if (grp_count == 0) { group_ht_free(&ht); return ray_table_new(0); }
+    /* Hash-aggregate all rows via the shared radix pipeline — parallel
+     * across thread-pool workers for n_scan ≥ RAY_PARALLEL_THRESHOLD,
+     * sequential single-HT for smaller inputs. */
+    pivot_ingest_t pg;
+    if (!pivot_ingest_run(&pg, &ly, key_data, key_types, key_attrs,
+                          key_vecs, agg_vecs, nrows))
+        return ray_error("oom", NULL);
+    if (ray_interrupted()) { pivot_ingest_free(&pg); return ray_error("cancel", "interrupted"); }
+    uint32_t grp_count = pg.total_grps;
+    if (grp_count == 0) { pivot_ingest_free(&pg); return ray_table_new(0); }
 
     /* Phase 2: Collect distinct pivot values and distinct index keys.
      * Each group row layout: [hash:8][key0:8]...[keyN-1:8][null_mask:8][accum...]
@@ -327,37 +321,38 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     uint32_t pv_cap = 64, pv_count = 0;
     ray_t* pv_hdr = NULL;
     int64_t* pv_vals = (int64_t*)scratch_alloc(&pv_hdr, pv_cap * sizeof(int64_t));
-    if (!pv_vals) { group_ht_free(&ht); return ray_error("oom", NULL); }
+    if (!pv_vals) { pivot_ingest_free(&pg); return ray_error("oom", NULL); }
 
     const char* pvt_base = pvt_wide ? (const char*)key_data[n_idx] : NULL;
-    for (uint32_t gi = 0; gi < grp_count; gi++) {
-        const char* row = ht.rows + (size_t)gi * ly.row_stride;
-        const int64_t* rkeys = (const int64_t*)(row + 8);
-        int64_t nmask = rkeys[n_keys];
-        if (nmask & pvt_null_bit) continue; /* skip rows with null pivot key */
-        int64_t pval = rkeys[n_idx];
-        /* Linear scan for distinct (pivot values are typically few).
-         * For wide pivot keys, pval is a source row index — compare
-         * the actual bytes in pcol. */
-        bool found = false;
-        for (uint32_t p = 0; p < pv_count; p++) {
-            if (pvt_wide) {
-                if (memcmp(pvt_base + (size_t)pv_vals[p] * 16,
-                           pvt_base + (size_t)pval * 16, 16) == 0) { found = true; break; }
-            } else {
-                if (pv_vals[p] == pval) { found = true; break; }
+    for (uint32_t _p = 0; _p < pg.n_parts; _p++) {
+        group_ht_t* ph = &pg.part_hts[_p];
+        uint32_t pcount = ph->grp_count;
+        for (uint32_t gi_local = 0; gi_local < pcount; gi_local++) {
+            const char* row = ph->rows + (size_t)gi_local * pg.row_stride;
+            const int64_t* rkeys = (const int64_t*)(row + 8);
+            int64_t nmask = rkeys[n_keys];
+            if (nmask & pvt_null_bit) continue;
+            int64_t pval = rkeys[n_idx];
+            bool found = false;
+            for (uint32_t p = 0; p < pv_count; p++) {
+                if (pvt_wide) {
+                    if (memcmp(pvt_base + (size_t)pv_vals[p] * 16,
+                               pvt_base + (size_t)pval * 16, 16) == 0) { found = true; break; }
+                } else {
+                    if (pv_vals[p] == pval) { found = true; break; }
+                }
             }
-        }
-        if (!found) {
-            if (pv_count >= pv_cap) {
-                uint32_t new_cap = pv_cap * 2;
-                int64_t* new_pv = (int64_t*)scratch_realloc(&pv_hdr,
-                    pv_cap * sizeof(int64_t), new_cap * sizeof(int64_t));
-                if (!new_pv) { group_ht_free(&ht); return ray_error("oom", NULL); }
-                pv_vals = new_pv;
-                pv_cap = new_cap;
+            if (!found) {
+                if (pv_count >= pv_cap) {
+                    uint32_t new_cap = pv_cap * 2;
+                    int64_t* new_pv = (int64_t*)scratch_realloc(&pv_hdr,
+                        pv_cap * sizeof(int64_t), new_cap * sizeof(int64_t));
+                    if (!new_pv) { pivot_ingest_free(&pg); return ray_error("oom", NULL); }
+                    pv_vals = new_pv;
+                    pv_cap = new_cap;
+                }
+                pv_vals[pv_count++] = pval;
             }
-            pv_vals[pv_count++] = pval;
         }
     }
 
@@ -372,7 +367,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     size_t ix_entry = 8 + (size_t)n_idx * 8 + 8;
     const uint8_t idx_null_bits = (uint8_t)((1u << n_idx) - 1u);
     char* ix_rows = (char*)scratch_alloc(&ix_hdr, ix_cap * ix_entry);
-    if (!ix_rows) { scratch_free(pv_hdr); group_ht_free(&ht); return ray_error("oom", NULL); }
+    if (!ix_rows) { scratch_free(pv_hdr); pivot_ingest_free(&pg); return ray_error("oom", NULL); }
 
     /* Secondary HT: hash slot -> ix_row index; empty = UINT32_MAX. */
     uint32_t ix_ht_cap = 256;
@@ -380,7 +375,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     ray_t* ix_ht_hdr = NULL;
     uint32_t* ix_ht = (uint32_t*)scratch_alloc(&ix_ht_hdr, ix_ht_cap * sizeof(uint32_t));
     if (!ix_ht) {
-        scratch_free(ix_hdr); scratch_free(pv_hdr); group_ht_free(&ht);
+        scratch_free(ix_hdr); scratch_free(pv_hdr); pivot_ingest_free(&pg);
         return ray_error("oom", NULL);
     }
     memset(ix_ht, 0xFF, ix_ht_cap * sizeof(uint32_t));
@@ -389,19 +384,23 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     /* Map: group_id -> (ix_row, pv_idx) for result cell placement */
     ray_t* map_hdr = NULL;
     uint32_t* grp_ix  = (uint32_t*)scratch_alloc(&map_hdr, grp_count * 2 * sizeof(uint32_t));
-    if (!grp_ix) { scratch_free(ix_ht_hdr); scratch_free(ix_hdr); scratch_free(pv_hdr); group_ht_free(&ht); return ray_error("oom", NULL); }
+    if (!grp_ix) { scratch_free(ix_ht_hdr); scratch_free(ix_hdr); scratch_free(pv_hdr); pivot_ingest_free(&pg); return ray_error("oom", NULL); }
     uint32_t* grp_pv = grp_ix + grp_count;
 
-    for (uint32_t gi = 0; gi < grp_count; gi++) {
-        const char* row = ht.rows + (size_t)gi * ly.row_stride;
-        const int64_t* keys = (const int64_t*)(row + 8);
-        int64_t nmask = keys[n_keys];
-        if (nmask & pvt_null_bit) {
-            /* Null pivot key row — dropped from output entirely */
-            grp_ix[gi] = UINT32_MAX;
-            grp_pv[gi] = UINT32_MAX;
-            continue;
-        }
+    for (uint32_t _p = 0; _p < pg.n_parts; _p++) {
+        group_ht_t* ph = &pg.part_hts[_p];
+        uint32_t pcount = ph->grp_count;
+        uint32_t gi_base = pg.part_offsets[_p];
+        for (uint32_t gi_local = 0; gi_local < pcount; gi_local++) {
+            uint32_t gi = gi_base + gi_local;
+            const char* row = ph->rows + (size_t)gi_local * pg.row_stride;
+            const int64_t* keys = (const int64_t*)(row + 8);
+            int64_t nmask = keys[n_keys];
+            if (nmask & pvt_null_bit) {
+                grp_ix[gi] = UINT32_MAX;
+                grp_pv[gi] = UINT32_MAX;
+                continue;
+            }
         int64_t idx_nmask = nmask & idx_null_bits;
 
         /* Hash index keys only (exclude pivot key) + null mask.
@@ -453,7 +452,7 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                     ix_cap * ix_entry, new_cap * ix_entry);
                 if (!new_rows) {
                     scratch_free(map_hdr); scratch_free(ix_ht_hdr);
-                    scratch_free(pv_hdr); group_ht_free(&ht);
+                    scratch_free(pv_hdr); pivot_ingest_free(&pg);
                     return ray_error("oom", NULL);
                 }
                 ix_rows = new_rows;
@@ -481,8 +480,9 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
             }
         }
 
-        grp_ix[gi] = ix_row;
-        grp_pv[gi] = pv_idx;
+            grp_ix[gi] = ix_row;
+            grp_pv[gi] = pv_idx;
+        }
     }
 
     /* Phase 3: Build output table */
@@ -548,11 +548,16 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
         /* Initialize with zero (missing cells get 0) */
         memset(ray_data(new_col), 0, (size_t)ix_count * (out_agg_type == RAY_F64 ? 8 : (size_t)col_esz(new_col)));
 
-        for (uint32_t gi = 0; gi < grp_count; gi++) {
-            if (grp_pv[gi] != p) continue;
-            uint32_t r = grp_ix[gi];
-            const char* row = ht.rows + (size_t)gi * ly.row_stride;
-            int64_t cnt = *(const int64_t*)(const void*)row;
+        for (uint32_t _pp = 0; _pp < pg.n_parts; _pp++) {
+            group_ht_t* ph = &pg.part_hts[_pp];
+            uint32_t pcount = ph->grp_count;
+            uint32_t gi_base = pg.part_offsets[_pp];
+            for (uint32_t gi_local = 0; gi_local < pcount; gi_local++) {
+                uint32_t gi = gi_base + gi_local;
+                if (grp_pv[gi] != p) continue;
+                uint32_t r = grp_ix[gi];
+                const char* row = ph->rows + (size_t)gi_local * pg.row_stride;
+                int64_t cnt = *(const int64_t*)(const void*)row;
 
             if (out_agg_type == RAY_F64) {
                 double v;
@@ -590,7 +595,8 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                     case OP_FIRST: case OP_LAST: v = ROW_RD_I64(row, ly.off_sum, s); break;
                     default:       v = 0; break;
                 }
-                write_col_i64(ray_data(new_col), (int64_t)r, v, out_agg_type, new_col->attrs);
+                    write_col_i64(ray_data(new_col), (int64_t)r, v, out_agg_type, new_col->attrs);
+                }
             }
         }
 
@@ -647,6 +653,6 @@ pivot_cleanup:
     scratch_free(ix_ht_hdr);
     scratch_free(ix_hdr);
     scratch_free(pv_hdr);
-    group_ht_free(&ht);
+    pivot_ingest_free(&pg);
     return result;
 }
