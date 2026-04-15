@@ -2368,6 +2368,13 @@ ray_t* ray_eval(ray_t* obj) {
 
 out:
     eval_depth--;
+    /* End-of-top-level-expression cleanup hook. Every path that
+     * entered ray_eval — REPL, IPC, ray_eval_str, file mode — exits
+     * through here; firing ray_progress_end exactly when the depth
+     * returns to 0 guarantees the progress bar is cleared no matter
+     * which builtin drove the update (including ray_group_fn etc.
+     * that bypass ray_execute). */
+    if (eval_depth == 0) ray_progress_end();
     return ret;
 }
 
