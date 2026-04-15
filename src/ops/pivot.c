@@ -264,6 +264,19 @@ ray_t* exec_pivot(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     uint8_t n_keys = n_idx + 1;
     if (n_keys > 8) return ray_error("limit", "pivot: too many index columns");
 
+    /* pivot's phase2 dedupe treats each 8-byte key slot as the value
+     * itself (plain memcmp, no key_data indirection), so wide keys like
+     * RAY_GUID — whose HT slot holds a source row index, not the actual
+     * 16 bytes — would dedupe by source row rather than value and emit
+     * row indices into the output column. Reject cleanly until pivot
+     * grows wide-key support. */
+    for (uint8_t k = 0; k < n_idx; k++) {
+        if (idx_vecs[k] && idx_vecs[k]->type == RAY_GUID)
+            return ray_error("nyi", "pivot: GUID index columns not supported");
+    }
+    if (pcol->type == RAY_GUID)
+        return ray_error("nyi", "pivot: GUID pivot column not supported");
+
     void*   key_data[8];
     int8_t  key_types[8];
     uint8_t key_attrs[8];
