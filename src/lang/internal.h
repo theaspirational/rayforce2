@@ -410,7 +410,7 @@ void   ray_dl_reset_rules(void);
 /* System builtins (formerly static in eval.c, now in system.c) */
 ray_t* ray_eval_builtin_fn(ray_t* x);
 ray_t* ray_parse_builtin_fn(ray_t* x);
-ray_t* ray_print_fn(ray_t* x);
+ray_t* ray_print_fn(ray_t** args, int64_t n);
 ray_t* ray_meta_fn(ray_t* x);
 ray_t* ray_gc_fn(ray_t* x);
 ray_t* ray_system_fn(ray_t* x);

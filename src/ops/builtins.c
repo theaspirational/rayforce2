@@ -242,6 +242,33 @@ ray_t* ray_println_fn(ray_t** args, int64_t n) {
     return RAY_NULL_OBJ;
 }
 
+/* (print val1 val2 ...) — like println but without trailing newline */
+ray_t* ray_print_fn(ray_t** args, int64_t n) {
+    for (int64_t i = 0; i < n; i++)
+        if (ray_is_lazy(args[i])) args[i] = ray_lazy_materialize(args[i]);
+
+    /* Format string mode: first arg is a string with % placeholders */
+    if (n >= 2 && args[0] && args[0]->type == -RAY_STR) {
+        const char* fmt = ray_str_ptr(args[0]);
+        size_t flen = ray_str_len(args[0]);
+        size_t out_len = 0;
+        char* result = fmt_interpolate(fmt, flen, args, n, 1, &out_len);
+        if (result) {
+            fwrite(result, 1, out_len, stdout);
+            fflush(stdout);
+            ray_sys_free(result);
+            return RAY_NULL_OBJ;
+        }
+    }
+
+    for (int64_t i = 0; i < n; i++) {
+        if (i > 0) fputc(' ', stdout);
+        ray_lang_print(stdout, args[i]);
+    }
+    fflush(stdout);
+    return RAY_NULL_OBJ;
+}
+
 /* (show val1 val2 ...) — print values to stdout using ray_fmt, newline at end */
 ray_t* ray_show_fn(ray_t** args, int64_t n) {
     for (int64_t i = 0; i < n; i++) {

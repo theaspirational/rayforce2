@@ -2038,7 +2038,7 @@ static void ray_register_builtins(void) {
     /* Eval, parse, print, meta */
     register_unary("eval",       RAY_FN_NONE, ray_eval_builtin_fn);
     register_unary("parse",      RAY_FN_NONE, ray_parse_builtin_fn);
-    register_unary("print",      RAY_FN_NONE, ray_print_fn);
+    register_vary("print",       RAY_FN_NONE, ray_print_fn);
     register_unary("meta",       RAY_FN_NONE, ray_meta_fn);
 
     /* System builtins */

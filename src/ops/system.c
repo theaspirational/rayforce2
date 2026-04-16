@@ -169,11 +169,7 @@ ray_t* ray_parse_builtin_fn(ray_t* x) {
 }
 
 /* (print val) -- print without newline, return the value */
-ray_t* ray_print_fn(ray_t* x) {
-    ray_fmt_print(stdout, x, 0);
-    fflush(stdout);
-    return x;
-}
+/* print moved to builtins.c alongside println/show */
 
 /* (meta x) -- return metadata about an object as a dict */
 ray_t* ray_meta_fn(ray_t* x) {
