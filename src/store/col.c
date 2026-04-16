@@ -679,7 +679,7 @@ ray_t* ray_col_load(const char* path) {
     /* Unmap the initial mapping; col_validate_mapped will re-map for validation */
     ray_vm_unmap_file(ptr, mapped_size);
 
-    col_mapped_t cm;
+    col_mapped_t cm = {0};
     ray_t* err = col_validate_mapped(path, &cm);
     if (err) return err;
 
@@ -737,7 +737,7 @@ ray_t* ray_col_load(const char* path) {
 ray_t* ray_col_mmap(const char* path) {
     if (!path) return ray_error("io", NULL);
 
-    col_mapped_t cm;
+    col_mapped_t cm = {0};
     ray_t* err = col_validate_mapped(path, &cm);
     if (err) return err;
 
