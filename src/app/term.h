@@ -26,7 +26,7 @@
 
 #include <rayforce.h>
 
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
 #include <windows.h>
 #define KEYCODE_RETURN '\r'
 #else
@@ -72,7 +72,7 @@ typedef struct ray_hist {
 
 typedef struct ray_term {
     ray_t*    _block;
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     HANDLE   h_stdin;
     HANDLE   h_stdout;
     DWORD    old_stdin_mode;

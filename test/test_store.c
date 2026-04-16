@@ -21,8 +21,13 @@
  *   SOFTWARE.
  */
 
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "munit.h"
 #include <rayforce.h>
+#include <time.h>
 #include "mem/heap.h"
 #include "ops/ops.h"
 #include "store/col.h"
@@ -36,7 +41,7 @@
 #include "mem/sys.h"
 #include "table/sym.h"
 
-#ifndef _WIN32
+#ifndef RAY_OS_WINDOWS
   #include <sys/socket.h>
   #include <netinet/in.h>
 #endif
@@ -1776,7 +1781,7 @@ static MunitResult test_ipc_async_send(const void* params, void* fixture) {
     munit_assert_int(rc, ==, RAY_OK);
 
     /* Small delay to let server process the async message */
-    usleep(50000);  /* 50ms */
+    { struct timespec ts = { .tv_sec = 0, .tv_nsec = 50000000 }; nanosleep(&ts, NULL); }
 
     ray_ipc_close(h);
     srv.running = false;

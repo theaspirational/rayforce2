@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "lang/env.h"
 #include "lang/parse.h"
 #include "mem/heap.h"
@@ -30,7 +30,7 @@
 #include "store/part.h"
 #include "core/ipc.h"
 #include <time.h>
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
 #include <unistd.h>
 #endif
 
@@ -179,7 +179,7 @@ ray_t* ray_print_fn(ray_t* x) {
 ray_t* ray_meta_fn(ray_t* x) {
     if (!x) return ray_error("type", NULL);
 
-    const char* tname = type_sym_name(x->type);
+    const char* tname = ray_type_name(x->type);
     int64_t type_sym = ray_sym_intern("type", 4);
     int64_t type_id  = ray_sym_intern(tname, strlen(tname));
 
@@ -242,7 +242,7 @@ ray_t* ray_getenv_fn(ray_t* x) {
 }
 
 /* (setenv name val) -- set environment variable */
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
 extern int setenv(const char*, const char*, int);
 #endif
 ray_t* ray_setenv_fn(ray_t* name, ray_t* val) {
@@ -251,7 +251,7 @@ ray_t* ray_setenv_fn(ray_t* name, ray_t* val) {
     const char* n = ray_str_ptr(name);
     const char* v = ray_str_ptr(val);
     if (!n || !v) return ray_error("domain", NULL);
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     _putenv_s(n, v);
 #else
     setenv(n, v, 1);
@@ -449,7 +449,7 @@ ray_t* ray_sysinfo_fn(ray_t* x) {
     if (RAY_IS_ERR(dict)) return dict;
     dict->attrs |= RAY_ATTR_DICT;
 
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
     int64_t s1 = ray_sym_intern("cores", 5);
     ray_t* k1 = ray_sym(s1); dict = ray_list_append(dict, k1); ray_release(k1);
     ray_t* v1 = make_i64(sysconf(_SC_NPROCESSORS_ONLN));

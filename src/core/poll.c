@@ -25,7 +25,7 @@
 #include "mem/sys.h"
 #include <string.h>
 
-#ifndef _WIN32
+#ifndef RAY_OS_WINDOWS
 #include <unistd.h>
 #endif
 
@@ -108,7 +108,7 @@ void ray_poll_send(ray_poll_t* poll, ray_selector_t* sel,
             sent = sel->tx.send_fn(sel->fd, buf->data + buf->offset,
                                    buf->size - buf->offset);
         } else {
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
             sent = -1;  /* must have send_fn on Windows */
 #else
             sent = (int64_t)write((int)sel->fd, buf->data + buf->offset,

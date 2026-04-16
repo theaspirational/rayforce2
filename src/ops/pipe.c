@@ -24,7 +24,7 @@
 #include "pipe.h"
 #include "mem/sys.h"
 #include <string.h>
-#ifndef _WIN32
+#ifndef RAY_OS_WINDOWS
 #include <unistd.h>
 #endif
 

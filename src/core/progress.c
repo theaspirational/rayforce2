@@ -1,8 +1,27 @@
 /*
  *   Copyright (c) 2025-2026 Anton Kundenko <singaraiona@gmail.com>
  *   All rights reserved.
- *
- *   Pull-based progress reporting. Zero cost when no callback is
+
+ *   Permission is hereby granted, free of charge, to any person obtaining a copy
+ *   of this software and associated documentation files (the "Software"), to deal
+ *   in the Software without restriction, including without limitation the rights
+ *   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *   copies of the Software, and to permit persons to whom the Software is
+ *   furnished to do so, subject to the following conditions:
+
+ *   The above copyright notice and this permission notice shall be included in all
+ *   copies or substantial portions of the Software.
+
+ *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *   SOFTWARE.
+ */
+
+/*   Pull-based progress reporting. Zero cost when no callback is
  *   registered; single main-thread pointer/int stores at sync points
  *   otherwise. Workers never touch this state.
  */
@@ -12,6 +31,7 @@
 #endif
 
 #include "rayforce.h"
+#include "mem/heap.h"
 #include <time.h>
 #include <string.h>
 
@@ -50,12 +70,16 @@ void ray_progress_set_callback(ray_progress_cb cb, void* user,
 }
 
 static void fire(uint64_t now_ns, bool final) {
+    ray_mem_stats_t ms;
+    ray_mem_stats(&ms);
     ray_progress_t snap = {
         .op_name     = g_op_name ? g_op_name : "",
         .phase       = g_phase ? g_phase : "",
         .rows_done   = g_rows_done,
         .rows_total  = g_rows_total,
         .elapsed_sec = (double)(now_ns - g_start_ns) / 1e9,
+        .mem_used    = (int64_t)(ms.bytes_allocated + ms.direct_bytes),
+        .mem_budget  = ray_mem_budget(),
         .final       = final,
     };
     g_cb(&snap, g_user);

@@ -23,7 +23,7 @@
 
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE
-#elif !defined(_WIN32)
+#elif !defined(RAY_OS_WINDOWS)
 #define _GNU_SOURCE
 #endif
 
@@ -37,7 +37,7 @@
 #include <signal.h>
 #include <errno.h>
 
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
 #include <io.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -67,7 +67,7 @@ typedef struct stat hist_stat_t;
 #define RAY_BLOCK_FROM_DATA(ptr) ((ray_t*)((char*)(ptr) - sizeof(ray_t)))
 
 /* Suppress -Wunused-result for terminal I/O writes to stdout. */
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
 static inline void term_write(const void* buf, size_t len) {
     ssize_t r = write(STDOUT_FILENO, buf, len);
     (void)r;
@@ -82,14 +82,14 @@ static ray_term_t* g_active_term = NULL;
 static void signal_handler(int sig) {
     g_interrupted = 1;
     ray_eval_request_interrupt();
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     if (sig == SIGTERM) {
 #else
     if (sig == SIGTERM || sig == SIGQUIT) {
 #endif
         /* Restore terminal and exit for fatal signals */
         if (g_active_term) {
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
             SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
             SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
 #else
@@ -104,7 +104,7 @@ static void signal_handler(int sig) {
 
 static void atexit_handler(void) {
     if (g_active_term) {
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
         SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
         SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
 #else
@@ -130,7 +130,7 @@ void ray_term_install_signals(ray_term_t* term) {
         atexit_registered = 1;
     }
 
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
 #else
@@ -147,7 +147,7 @@ void ray_term_install_signals(ray_term_t* term) {
 }
 
 void ray_term_eval_begin(ray_term_t* term) {
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
     /* Enable ISIG so Ctrl-C generates SIGINT during evaluation */
     struct termios tio;
     tcgetattr(STDIN_FILENO, &tio);
@@ -158,7 +158,7 @@ void ray_term_eval_begin(ray_term_t* term) {
 }
 
 void ray_term_eval_end(ray_term_t* term) {
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
     /* Restore raw mode (ISIG off) for input handling */
     tcsetattr(STDIN_FILENO, TCSANOW, &term->newattr);
 #endif
@@ -180,7 +180,7 @@ void ray_cursor_show(void)      { printf("\033[?25h"); }
 /* ===== Terminal size ===== */
 
 void ray_term_get_size(ray_term_t* term) {
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     if (GetConsoleScreenBufferInfo(term->h_stdout, &csbi)) {
         term->term_width  = csbi.srWindow.Right - csbi.srWindow.Left + 1;
@@ -258,7 +258,7 @@ void ray_term_goto_position(ray_term_t* term, int32_t from_pos, int32_t to_pos) 
 
 /* ===== Terminal create / destroy ===== */
 
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
 
 ray_term_t* ray_term_create(void) {
     ray_t* block = ray_alloc(sizeof(ray_term_t));
@@ -496,7 +496,7 @@ int32_t ray_hist_search(ray_hist_t* hist, const char* needle, int32_t needle_len
 
 static void hist_build_path(char* out, int32_t out_size) {
     const char* home = getenv("HOME");
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     if (!home) home = getenv("USERPROFILE");
 #endif
     if (!home) home = ".";

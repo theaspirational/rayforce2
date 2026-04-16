@@ -216,6 +216,8 @@ typedef struct {
     uint64_t    rows_done;
     uint64_t    rows_total;   /* 0 = indeterminate */
     double      elapsed_sec;
+    int64_t     mem_used;     /* bytes: buddy + direct mmap */
+    int64_t     mem_budget;   /* bytes: auto-detected memory budget */
     bool        final;        /* true on the last tick of a query — renderers
                                  use this to clear the line */
 } ray_progress_t;

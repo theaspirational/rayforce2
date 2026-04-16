@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "table/sym.h"
 
 /* ══════════════════════════════════════════

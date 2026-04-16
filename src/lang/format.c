@@ -139,25 +139,26 @@ void ray_fmt_set_width(int cols) {
         g_row_width = cols;
 }
 
+/* Single type-name function. Negative type (atom) → lowercase,
+ * positive type (vector/collection) → uppercase. */
 const char* ray_type_name(int8_t type) {
-    switch (type) {
-    case RAY_LIST:      return "list";
-    case RAY_BOOL:      return "b8";
-    case RAY_U8:        return "u8";
-
-    case RAY_I16:       return "i16";
-    case RAY_I32:       return "i32";
-    case RAY_I64:       return "i64";
-    case RAY_F64:       return "f64";
-    case RAY_F32:       return "f32";
-    case RAY_DATE:      return "date";
-    case RAY_TIME:      return "time";
-    case RAY_TIMESTAMP: return "timestamp";
-    case RAY_GUID:      return "guid";
-    case RAY_SYM:       return "sym";
-    case RAY_STR:       return "str";
-    case RAY_TABLE:     return "table";
-    case RAY_DICT:      return "dict";
+    switch (type < 0 ? -type : type) {
+    case RAY_BOOL:      return type < 0 ? "b8"        : "B8";
+    case RAY_U8:        return type < 0 ? "u8"        : "U8";
+    case RAY_I16:       return type < 0 ? "i16"       : "I16";
+    case RAY_I32:       return type < 0 ? "i32"       : "I32";
+    case RAY_I64:       return type < 0 ? "i64"       : "I64";
+    case RAY_F32:       return type < 0 ? "f32"       : "F32";
+    case RAY_F64:       return type < 0 ? "f64"       : "F64";
+    case RAY_DATE:      return type < 0 ? "date"      : "DATE";
+    case RAY_TIME:      return type < 0 ? "time"      : "TIME";
+    case RAY_TIMESTAMP: return type < 0 ? "timestamp" : "TIMESTAMP";
+    case RAY_SYM:       return type < 0 ? "sym"       : "SYM";
+    case RAY_STR:       return type < 0 ? "str"       : "STR";
+    case RAY_GUID:      return type < 0 ? "guid"      : "GUID";
+    case RAY_TABLE:     return "TABLE";
+    case RAY_DICT:      return "DICT";
+    case RAY_LIST:      return "LIST";
     default:            return "?";
     }
 }
@@ -257,49 +258,9 @@ static void fmt_sym(fmt_buf_t* b, int64_t sym_id) {
     }
 }
 
-/* ===== Date/time/timestamp helpers (ported from Rayforce) ===== */
+/* ===== Date/time/timestamp helpers ===== */
 
-/* Cumulative days-in-month lookup: [leap][month].
- * Index 0 = Jan start (0 days), index 12 = Dec end (365 or 366). */
-static const uint32_t MONTHDAYS_FWD[2][13] = {
-    {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365},
-    {0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366},
-};
-
-#define DATE_EPOCH 2000
-
-static int date_leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-}
-
-static int32_t date_years_by_days(int yy) {
-    return (int32_t)((int64_t)yy * 365 + yy / 4 - yy / 100 + yy / 400);
-}
-
-static void date_to_ymd(int32_t days, int* y, int* m, int* d) {
-    int32_t offset = days + date_years_by_days(DATE_EPOCH - 1);
-    double approx = (double)offset / 365.2425;
-    int32_t years = (int32_t)(approx >= 0.0 ? approx + 0.5 : approx - 0.5);
-
-    if (date_years_by_days(years) > offset)
-        years -= 1;
-
-    int32_t rem = offset - date_years_by_days(years);
-    int yy = years + 1;
-    int leap = date_leap_year(yy);
-    int mid = 0;
-
-    for (mid = 12; mid > 0; mid--)
-        if (MONTHDAYS_FWD[leap][mid] != 0 && rem / (int32_t)MONTHDAYS_FWD[leap][mid] != 0)
-            break;
-
-    if (mid == 12 || mid < 0)
-        mid = 0;
-
-    *y = yy;
-    *m = 1 + mid % 12;
-    *d = 1 + rem - (int32_t)MONTHDAYS_FWD[leap][mid];
-}
+#include "lang/cal.h"
 
 static void time_to_hms(int32_t ms, int* h, int* min, int* s, int* ms_out) {
     int32_t mask = ms >> 31;
@@ -368,23 +329,30 @@ static void fmt_str_atom(fmt_buf_t* b, ray_t* obj, int full) {
 
 static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode);
 
+/* ===== Null literal display (type → "0Nx" string) ===== */
+
+static const char* null_literal(int8_t type) {
+    switch (type) {
+    case RAY_I16:       return "0Nh";
+    case RAY_I32:       return "0Ni";
+    case RAY_I64:       return "0Nl";
+    case RAY_F64:       return "0Nf";
+    case RAY_F32:       return "0Ne";
+    case RAY_DATE:      return "0Nd";
+    case RAY_TIME:      return "0Nt";
+    case RAY_TIMESTAMP: return "0Np";
+    case RAY_SYM:       return "0Ns";
+    default:            return "null";
+    }
+}
+
 /* ===== Vector element formatter ===== */
 
 static void fmt_raw_elem(fmt_buf_t* b, ray_t* vec, int64_t idx) {
     /* Check for null */
     if (ray_vec_is_null(vec, idx)) {
-        switch (vec->type) {
-        case RAY_I16:       fmt_puts(b, "0Nh"); return;
-        case RAY_I32:       fmt_puts(b, "0Ni"); return;
-        case RAY_DATE:      fmt_puts(b, "0Nd"); return;
-        case RAY_TIME:      fmt_puts(b, "0Nt"); return;
-        case RAY_I64:       fmt_puts(b, "0Nl"); return;
-        case RAY_TIMESTAMP: fmt_puts(b, "0Np"); return;
-        case RAY_F64:       fmt_puts(b, "0Nf"); return;
-        case RAY_F32:       fmt_puts(b, "0Ne"); return;
-        case RAY_SYM:       fmt_puts(b, "0Ns"); return;
-        default:            fmt_puts(b, "null"); return;
-        }
+        fmt_puts(b, null_literal(vec->type));
+        return;
     }
 
     switch (vec->type) {
@@ -931,18 +899,8 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
     if (type < 0) {
         /* Typed null atom: null bit set → display as 0Nx */
         if (RAY_ATOM_IS_NULL(obj)) {
-            switch (-type) {
-            case RAY_I16:       fmt_puts(b, "0Nh"); return;
-            case RAY_I32:       fmt_puts(b, "0Ni"); return;
-            case RAY_I64:       fmt_puts(b, "0Nl"); return;
-            case RAY_F64:       fmt_puts(b, "0Nf"); return;
-            case RAY_F32:       fmt_puts(b, "0Ne"); return;
-            case RAY_DATE:      fmt_puts(b, "0Nd"); return;
-            case RAY_TIME:      fmt_puts(b, "0Nt"); return;
-            case RAY_TIMESTAMP: fmt_puts(b, "0Np"); return;
-            case RAY_SYM:       fmt_puts(b, "0Ns"); return;
-            default:            fmt_puts(b, "null"); return;
-            }
+            fmt_puts(b, null_literal(-type));
+            return;
         }
         /* Atom: type is negated */
         switch (-type) {

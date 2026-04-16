@@ -542,6 +542,110 @@ fsync_and_rename:;
 }
 
 /* --------------------------------------------------------------------------
+ * col_validate_mapped -- shared validation for ray_col_load / ray_col_mmap
+ *
+ * Maps the file, validates header/type/bounds, and returns parsed metadata.
+ * On success, the mapping remains open (caller must unmap on error paths).
+ * Returns NULL on success, or an error ray_t* on failure (mapping already
+ * cleaned up in that case).
+ * -------------------------------------------------------------------------- */
+
+typedef struct {
+    void*   mapped;
+    size_t  mapped_size;
+    ray_t*  header;       /* pointer into mapped region */
+    uint8_t esz;
+    size_t  data_size;
+    bool    has_ext_nullmap;
+    size_t  bitmap_len;
+} col_mapped_t;
+
+static ray_t* col_validate_mapped(const char* path, col_mapped_t* out) {
+    size_t mapped_size = 0;
+    void* ptr = ray_vm_map_file(path, &mapped_size);
+    if (!ptr) return ray_error("io", NULL);
+
+    if (mapped_size < 32) {
+        ray_vm_unmap_file(ptr, mapped_size);
+        return ray_error("corrupt", NULL);
+    }
+
+    ray_t* hdr = (ray_t*)ptr;
+
+    /* Validate type from untrusted file data -- allowlist only */
+    if (!is_serializable_type(hdr->type)) {
+        ray_vm_unmap_file(ptr, mapped_size);
+        return ray_error("nyi", NULL);
+    }
+    if (hdr->len < 0) {
+        ray_vm_unmap_file(ptr, mapped_size);
+        return ray_error("corrupt", NULL);
+    }
+
+    uint8_t esz = ray_sym_elem_size(hdr->type, hdr->attrs);
+    if (esz == 0 && hdr->len > 0) {
+        ray_vm_unmap_file(ptr, mapped_size);
+        return ray_error("type", NULL);
+    }
+    /* Overflow check: ensure len*esz fits in size_t with 32-byte header room */
+    if ((uint64_t)hdr->len > (SIZE_MAX - 32) / (esz ? esz : 1)) {
+        ray_vm_unmap_file(ptr, mapped_size);
+        return ray_error("io", NULL);
+    }
+    size_t data_size = (size_t)hdr->len * esz;
+    if (32 + data_size > mapped_size) {
+        ray_vm_unmap_file(ptr, mapped_size);
+        return ray_error("corrupt", NULL);
+    }
+
+    /* Check for appended ext_nullmap bitmap */
+    bool has_ext_nullmap = (hdr->attrs & RAY_ATTR_HAS_NULLS) &&
+                           (hdr->attrs & RAY_ATTR_NULLMAP_EXT);
+    size_t bitmap_len = has_ext_nullmap ? ((size_t)hdr->len + 7) / 8 : 0;
+    if (has_ext_nullmap && 32 + data_size + bitmap_len > mapped_size) {
+        ray_vm_unmap_file(ptr, mapped_size);
+        return ray_error("corrupt", NULL);
+    }
+
+    /* RAY_SYM: fast-reject via sym count in header rc field.
+     * Use memcpy (not atomic_load) since file data is not atomic storage. */
+    if (hdr->type == RAY_SYM) {
+        uint32_t saved_sc;
+        memcpy(&saved_sc, (const char*)ptr + offsetof(ray_t, rc), sizeof(saved_sc));
+        uint32_t cur_sc = ray_sym_count();
+        if (saved_sc > 0 && cur_sc > 0 && cur_sc < saved_sc) {
+            ray_vm_unmap_file(ptr, mapped_size);
+            return ray_error("corrupt", NULL);
+        }
+    }
+
+    out->mapped          = ptr;
+    out->mapped_size     = mapped_size;
+    out->header          = hdr;
+    out->esz             = esz;
+    out->data_size       = data_size;
+    out->has_ext_nullmap = has_ext_nullmap;
+    out->bitmap_len      = bitmap_len;
+    return NULL;  /* success */
+}
+
+/* --------------------------------------------------------------------------
+ * col_restore_ext_nullmap -- allocate buddy-backed copy of ext nullmap
+ *
+ * Shared by ray_col_load and ray_col_mmap. On success, sets vec->ext_nullmap.
+ * Returns NULL on success, or an error string on failure.
+ * -------------------------------------------------------------------------- */
+
+static ray_t* col_restore_ext_nullmap(ray_t* vec, const col_mapped_t* cm) {
+    ray_t* ext = ray_vec_new(RAY_U8, (int64_t)cm->bitmap_len);
+    if (!ext || RAY_IS_ERR(ext)) return ray_error("oom", NULL);
+    ext->len = (int64_t)cm->bitmap_len;
+    memcpy(ray_data(ext), (char*)cm->mapped + 32 + cm->data_size, cm->bitmap_len);
+    vec->ext_nullmap = ext;
+    return NULL;  /* success */
+}
+
+/* --------------------------------------------------------------------------
  * ray_col_load -- load a column file via mmap (zero deserialization)
  * -------------------------------------------------------------------------- */
 
@@ -572,90 +676,39 @@ ray_t* ray_col_load(const char* path) {
             return result;
         }
     }
+    /* Unmap the initial mapping; col_validate_mapped will re-map for validation */
+    ray_vm_unmap_file(ptr, mapped_size);
 
-    if (mapped_size < 32) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("corrupt", NULL);
-    }
-
-    ray_t* tmp = (ray_t*)ptr;
-
-    /* Validate type from untrusted file data -- allowlist only */
-    if (!is_serializable_type(tmp->type)) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("nyi", NULL);
-    }
-    if (tmp->len < 0) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("corrupt", NULL);
-    }
-
-    uint8_t esz = ray_sym_elem_size(tmp->type, tmp->attrs);
-    if (esz == 0 && tmp->len > 0) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("type", NULL);
-    }
-    if ((uint64_t)tmp->len * esz > SIZE_MAX - 32) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("io", NULL);
-    }
-    size_t data_size = (size_t)tmp->len * esz;
-    if (32 + data_size > mapped_size) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("corrupt", NULL);
-    }
-
-    /* Check for appended ext_nullmap bitmap */
-    bool has_ext_nullmap = (tmp->attrs & RAY_ATTR_HAS_NULLS) &&
-                           (tmp->attrs & RAY_ATTR_NULLMAP_EXT);
-    size_t bitmap_len = has_ext_nullmap ? ((size_t)tmp->len + 7) / 8 : 0;
-    if (has_ext_nullmap && 32 + data_size + bitmap_len > mapped_size) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("corrupt", NULL);
-    }
-
-    /* RAY_SYM: fast-reject via sym count in header rc field.
-     * Use memcpy (not atomic_load) since file data is not atomic storage. */
-    if (tmp->type == RAY_SYM) {
-        uint32_t saved_sc;
-        memcpy(&saved_sc, (const char*)ptr + offsetof(ray_t, rc), sizeof(saved_sc));
-        uint32_t cur_sc = ray_sym_count();
-        if (saved_sc > 0 && cur_sc > 0 && cur_sc < saved_sc) {
-            ray_vm_unmap_file(ptr, mapped_size);
-            return ray_error("corrupt", NULL);
-        }
-    }
+    col_mapped_t cm;
+    ray_t* err = col_validate_mapped(path, &cm);
+    if (err) return err;
 
     /* Allocate buddy block and copy file data */
-    ray_t* vec = ray_alloc(data_size);
+    ray_t* vec = ray_alloc(cm.data_size);
     if (!vec || RAY_IS_ERR(vec)) {
-        ray_vm_unmap_file(ptr, mapped_size);
+        ray_vm_unmap_file(cm.mapped, cm.mapped_size);
         return vec ? vec : ray_error("oom", NULL);
     }
     uint8_t saved_order = vec->order;  /* preserve buddy order */
-    memcpy(vec, ptr, 32 + data_size);
+    memcpy(vec, cm.mapped, 32 + cm.data_size);
 
     /* Restore external nullmap if present */
-    if (has_ext_nullmap) {
-        ray_t* ext = ray_vec_new(RAY_U8, (int64_t)bitmap_len);
-        if (!ext || RAY_IS_ERR(ext)) {
-            ray_vm_unmap_file(ptr, mapped_size);
+    if (cm.has_ext_nullmap) {
+        ray_t* ext_err = col_restore_ext_nullmap(vec, &cm);
+        if (ext_err) {
+            ray_vm_unmap_file(cm.mapped, cm.mapped_size);
             ray_free(vec);
-            return ray_error("oom", NULL);
+            return ext_err;
         }
-        ext->len = (int64_t)bitmap_len;
-        memcpy(ray_data(ext), (char*)ptr + 32 + data_size, bitmap_len);
-        ray_vm_unmap_file(ptr, mapped_size);
-        vec->ext_nullmap = ext;
-    } else {
-        ray_vm_unmap_file(ptr, mapped_size);
     }
+
+    ray_vm_unmap_file(cm.mapped, cm.mapped_size);
 
     /* Fix up header for buddy-allocated block */
     vec->mmod = 0;
     vec->order = saved_order;
     vec->attrs &= ~RAY_ATTR_SLICE;
-    if (!has_ext_nullmap)
+    if (!cm.has_ext_nullmap)
         vec->attrs &= ~RAY_ATTR_NULLMAP_EXT;
     ray_atomic_store(&vec->rc, 1);
 
@@ -684,86 +737,45 @@ ray_t* ray_col_load(const char* path) {
 ray_t* ray_col_mmap(const char* path) {
     if (!path) return ray_error("io", NULL);
 
-    size_t mapped_size = 0;
-    void* ptr = ray_vm_map_file(path, &mapped_size);
-    if (!ptr) return ray_error("io", NULL);
+    col_mapped_t cm;
+    ray_t* err = col_validate_mapped(path, &cm);
+    if (err) return err;
 
-    if (mapped_size < 32) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("corrupt", NULL);
-    }
-
-    ray_t* vec = (ray_t*)ptr;
-
-    /* Validate type from untrusted file data -- allowlist only */
-    if (!is_serializable_type(vec->type)) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("nyi", NULL);
-    }
-    if (vec->len < 0) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("corrupt", NULL);
-    }
-
-    uint8_t esz = ray_sym_elem_size(vec->type, vec->attrs);
-    /* Overflow check: ensure len*esz fits in size_t with 32-byte header room */
-    if ((uint64_t)vec->len > (SIZE_MAX - 32) / (esz ? esz : 1)) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("io", NULL);
-    }
-    size_t data_size = (size_t)vec->len * esz;
-    if (32 + data_size > mapped_size) {
-        ray_vm_unmap_file(ptr, mapped_size);
-        return ray_error("corrupt", NULL);
-    }
-
-    /* Validate that file size matches expected layout.
+    /* Validate that file size matches expected layout exactly.
      * ray_free() reconstructs the munmap size using the same formula. */
-    bool has_ext_nullmap = (vec->attrs & RAY_ATTR_HAS_NULLS) &&
-                           (vec->attrs & RAY_ATTR_NULLMAP_EXT);
-    size_t bitmap_len = has_ext_nullmap ? ((size_t)vec->len + 7) / 8 : 0;
-    size_t expected = 32 + data_size + bitmap_len;
-    if (expected != mapped_size) {
-        ray_vm_unmap_file(ptr, mapped_size);
+    size_t expected = 32 + cm.data_size + cm.bitmap_len;
+    if (expected != cm.mapped_size) {
+        ray_vm_unmap_file(cm.mapped, cm.mapped_size);
         return ray_error("io", NULL);
     }
 
-    /* RAY_SYM: fast-reject via sym count in header rc field + bounds check.
-     * Use memcpy (not atomic_load) since file data is not atomic storage. */
+    ray_t* vec = cm.header;
+
+    /* RAY_SYM: bounds check on data */
     if (vec->type == RAY_SYM) {
-        uint32_t saved_sc;
-        memcpy(&saved_sc, (const char*)ptr + offsetof(ray_t, rc), sizeof(saved_sc));
-        uint32_t cur_sc = ray_sym_count();
-        if (saved_sc > 0 && cur_sc > 0 && cur_sc < saved_sc) {
-            ray_vm_unmap_file(ptr, mapped_size);
-            return ray_error("corrupt", NULL);
-        }
         ray_err_t sym_err = validate_sym_bounds(
-            (const char*)ptr + 32, vec->len, vec->attrs, cur_sc);
+            (const char*)cm.mapped + 32, vec->len, vec->attrs, ray_sym_count());
         if (sym_err != RAY_OK) {
-            ray_vm_unmap_file(ptr, mapped_size);
+            ray_vm_unmap_file(cm.mapped, cm.mapped_size);
             return ray_error(ray_err_code_str(sym_err), NULL);
         }
     }
 
     /* Restore external nullmap: allocate buddy-backed copy
      * (ext_nullmap must be a proper ray_t for ref counting) */
-    if (has_ext_nullmap) {
-        ray_t* ext = ray_vec_new(RAY_U8, (int64_t)bitmap_len);
-        if (!ext || RAY_IS_ERR(ext)) {
-            ray_vm_unmap_file(ptr, mapped_size);
-            return ray_error("oom", NULL);
+    if (cm.has_ext_nullmap) {
+        ray_t* ext_err = col_restore_ext_nullmap(vec, &cm);
+        if (ext_err) {
+            ray_vm_unmap_file(cm.mapped, cm.mapped_size);
+            return ext_err;
         }
-        ext->len = (int64_t)bitmap_len;
-        memcpy(ray_data(ext), (char*)ptr + 32 + data_size, bitmap_len);
-        vec->ext_nullmap = ext;
     }
 
     /* Patch header -- MAP_PRIVATE COW: only the header page gets copied */
     vec->mmod = 1;
     vec->order = 0;
     vec->attrs &= ~RAY_ATTR_SLICE;
-    if (!has_ext_nullmap)
+    if (!cm.has_ext_nullmap)
         vec->attrs &= ~RAY_ATTR_NULLMAP_EXT;
     ray_atomic_store(&vec->rc, 1);
 

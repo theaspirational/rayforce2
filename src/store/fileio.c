@@ -23,7 +23,7 @@
 
 #include "fileio.h"
 
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
 
 #include <errno.h>
 
@@ -111,15 +111,25 @@ ray_err_t ray_file_rename(const char* old_path, const char* new_path) {
     return RAY_OK;
 }
 
+ray_err_t ray_mkdir(const char* path) {
+    if (!path) return RAY_ERR_IO;
+    if (!CreateDirectoryA(path, NULL)) {
+        if (GetLastError() != ERROR_ALREADY_EXISTS) return RAY_ERR_IO;
+    }
+    return RAY_OK;
+}
+
 #else
 
 /* ===== POSIX implementation ===== */
 
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 ray_fd_t ray_file_open(const char* path, int flags) {
     if (!path) return RAY_FD_INVALID;
@@ -192,6 +202,12 @@ ray_err_t ray_file_sync_dir(const char* path) {
 ray_err_t ray_file_rename(const char* old_path, const char* new_path) {
     if (!old_path || !new_path) return RAY_ERR_IO;
     if (rename(old_path, new_path) != 0) return RAY_ERR_IO;
+    return RAY_OK;
+}
+
+ray_err_t ray_mkdir(const char* path) {
+    if (!path) return RAY_ERR_IO;
+    if (mkdir(path, 0755) != 0 && errno != EEXIST) return RAY_ERR_IO;
     return RAY_OK;
 }
 

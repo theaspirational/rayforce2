@@ -23,11 +23,9 @@
 
 #include "splay.h"
 #include "store/col.h"
+#include "store/fileio.h"
 #include <string.h>
 #include <stdio.h>
-#include <sys/stat.h>
-#include <errno.h>
-#include <dirent.h>
 
 /* --------------------------------------------------------------------------
  * Splayed table: directory of column files + .d schema file
@@ -64,7 +62,8 @@ ray_err_t ray_splay_save(ray_t* tbl, const char* dir, const char* sym_path) {
     if (!dir) return RAY_ERR_IO;
 
     /* Create directory (before sym save, since sym_path may be inside dir) */
-    if (mkdir(dir, 0755) != 0 && errno != EEXIST) return RAY_ERR_IO;
+    ray_err_t mkdir_err = ray_mkdir(dir);
+    if (mkdir_err != RAY_OK) return mkdir_err;
 
     /* Save symbol table if sym_path provided */
     if (sym_path) {
@@ -117,10 +116,14 @@ ray_err_t ray_splay_save(ray_t* tbl, const char* dir, const char* sym_path) {
 }
 
 /* --------------------------------------------------------------------------
- * ray_splay_load — load a splayed table from a directory
+ * splay_load_impl — shared implementation for ray_splay_load / ray_read_splayed
+ *
+ * When use_mmap is false, columns are loaded via ray_col_load (buddy copy).
+ * When use_mmap is true, columns are loaded via ray_col_mmap (zero-copy).
+ * The .d schema is always loaded via ray_col_load (small, buddy copy).
  * -------------------------------------------------------------------------- */
 
-ray_t* ray_splay_load(const char* dir, const char* sym_path) {
+static ray_t* splay_load_impl(const char* dir, const char* sym_path, bool use_mmap) {
     if (!dir) return ray_error("io", NULL);
 
     /* Load symbol table if sym_path provided */
@@ -178,7 +181,7 @@ ray_t* ray_splay_load(const char* dir, const char* sym_path) {
             return ray_error("range", NULL);
         }
 
-        ray_t* col = ray_col_load(path);
+        ray_t* col = use_mmap ? ray_col_mmap(path) : ray_col_load(path);
         if (!col || RAY_IS_ERR(col)) {
             ray_release(schema);
             ray_release(tbl);
@@ -207,92 +210,10 @@ ray_t* ray_splay_load(const char* dir, const char* sym_path) {
     return tbl;
 }
 
-/* --------------------------------------------------------------------------
- * ray_read_splayed — zero-copy splayed table load via mmap (mmod=1)
- *
- * Nearly identical to ray_splay_load, but uses ray_col_mmap for each column
- * file. The .d schema is still loaded via ray_col_load (small, buddy copy).
- * -------------------------------------------------------------------------- */
+ray_t* ray_splay_load(const char* dir, const char* sym_path) {
+    return splay_load_impl(dir, sym_path, false);
+}
 
 ray_t* ray_read_splayed(const char* dir, const char* sym_path) {
-    if (!dir) return ray_error("io", NULL);
-
-    /* Load symbol table if sym_path provided — failure is fatal */
-    if (sym_path) {
-        ray_err_t sym_err = ray_sym_load(sym_path);
-        if (sym_err != RAY_OK) return ray_error(ray_err_code_str(sym_err), NULL);
-    }
-
-    /* Load .d schema (small, use ray_col_load — buddy copy is fine) */
-    char path[1024];
-    int path_len = snprintf(path, sizeof(path), "%s/.d", dir);
-    if (path_len < 0 || (size_t)path_len >= sizeof(path))
-        return ray_error("range", NULL);
-    ray_t* schema = ray_col_load(path);
-    if (!schema || RAY_IS_ERR(schema)) return schema;
-
-    int64_t ncols = schema->len;
-    int64_t* name_ids = (int64_t*)ray_data(schema);
-
-    ray_t* tbl = ray_table_new(ncols);
-    if (!tbl || RAY_IS_ERR(tbl)) {
-        ray_release(schema);
-        return tbl;
-    }
-
-    /* Load each column via mmap (zero-copy) */
-    for (int64_t c = 0; c < ncols; c++) {
-        int64_t name_id = name_ids[c];
-        ray_t* name_atom = ray_sym_str(name_id);
-        if (!name_atom) {
-            ray_release(schema);
-            ray_release(tbl);
-            return ray_error("corrupt", NULL);
-        }
-
-        const char* name = ray_str_ptr(name_atom);
-        size_t name_len = ray_str_len(name_atom);
-
-        if (name_len == 0 || name[0] == '.' ||
-            memchr(name, '/', name_len) || memchr(name, '\\', name_len) ||
-            memchr(name, '\0', name_len)) {
-            ray_release(schema);
-            ray_release(tbl);
-            return ray_error("corrupt", NULL);
-        }
-
-        path_len = snprintf(path, sizeof(path), "%s/%.*s", dir, (int)name_len, name);
-        if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
-            ray_release(schema);
-            ray_release(tbl);
-            return ray_error("range", NULL);
-        }
-
-        ray_t* col = ray_col_mmap(path);
-        if (!col || RAY_IS_ERR(col)) {
-            ray_release(schema);
-            ray_release(tbl);
-            return col ? col : ray_error("io", NULL);
-        }
-
-        ray_t* new_df = ray_table_add_col(tbl, name_id, col);
-        if (!new_df || RAY_IS_ERR(new_df)) {
-            ray_release(col);
-            ray_release(schema);
-            ray_release(tbl);
-            return new_df ? new_df : ray_error("oom", NULL);
-        }
-        ray_release(col); /* table_add_col retains; drop our ref */
-        tbl = new_df;
-    }
-
-    ray_release(schema);
-
-    ray_err_t sym_check = validate_sym_columns(tbl, ncols);
-    if (sym_check != RAY_OK) {
-        ray_release(tbl);
-        return ray_error(ray_err_code_str(sym_check), NULL);
-    }
-
-    return tbl;
+    return splay_load_impl(dir, sym_path, true);
 }

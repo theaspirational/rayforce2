@@ -82,6 +82,9 @@
         <a href="datalog.html" class="sidebar-link">Datalog Reference</a>
         <a href="guide-storage.html" class="sidebar-link">Storage Guide</a>
         <a href="guide-ipc.html" class="sidebar-link">IPC Guide</a>
+        <a href="guide-errors.html" class="sidebar-link">Error Handling</a>
+        <a href="guide-memory.html" class="sidebar-link">Memory &amp; Monitoring</a>
+        <a href="guide-types.html" class="sidebar-link">Type Casting</a>
       </div>
       <div class="sidebar-section">
         <div class="sidebar-section-label">ARCHITECTURE</div>
@@ -93,6 +96,10 @@
         <div class="sidebar-section-label">C API</div>
         <a href="c-api-core.html" class="sidebar-link">Core API</a>
         <a href="c-api-dag.html" class="sidebar-link">DAG API</a>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">REFERENCE</div>
+        <a href="reference.html" class="sidebar-link">All Functions</a>
       </div>
     </nav>
 
@@ -112,7 +119,7 @@
 
       <h2>Rayfall Language</h2>
       <p><a href="rayfall-syntax.html"><strong>Syntax &amp; Types</strong></a> &mdash; Complete reference for the Rayfall language: atoms (integers, floats, booleans, symbols, strings, dates, times, timestamps, GUIDs), vectors, lists, tables, dictionaries, function calls, quoting, and comments.</p>
-      <p><a href="rayfall-functions.html"><strong>Functions Reference</strong></a> &mdash; All 120+ built-in functions organized by category: arithmetic, comparison, logic, aggregation, higher-order, collection, sorting, table, query, join, I/O, string, temporal, type, and system operations.</p>
+      <p><a href="rayfall-functions.html"><strong>Functions Reference</strong></a> &mdash; All 170+ built-in functions organized by category: arithmetic, comparison, logic, aggregation, higher-order, collection, sorting, table, query, join, I/O, string, temporal, type, and system operations.</p>
 
       <h2>Queries</h2>
       <p><a href="rayfall-syntax.html#select-update"><strong>Select &amp; Update</strong></a> &mdash; The <code>select</code> and <code>update</code> query verbs with filtering, grouping, column expressions, and aggregation. Bridges directly to the Rayforce DAG executor.</p>
@@ -137,6 +144,14 @@
 
       <h2>Storage</h2>
       <p><a href="rayfall-syntax.html#storage"><strong>Files &amp; Partitions</strong></a> &mdash; Cross-platform file I/O with locking, atomic rename, sym intern table persistence, and CSV loading with parallel parse.</p>
+
+      <h2>Guides</h2>
+      <p><a href="guide-errors.html"><strong>Error Handling</strong></a> &mdash; <code>try</code>/<code>raise</code> patterns, null propagation, defensive programming, and error recovery in pipelines.</p>
+      <p><a href="guide-memory.html"><strong>Memory &amp; Monitoring</strong></a> &mdash; <code>memstat</code>, <code>gc</code>, <code>sysinfo</code>, progress bar, <code>timeit</code> profiling, and memory budget management.</p>
+      <p><a href="guide-types.html"><strong>Type Casting</strong></a> &mdash; The <code>as</code> function, implicit coercion rules, null semantics, symbol vs string, date/time arithmetic, and GUID generation.</p>
+
+      <h2>Reference</h2>
+      <p><a href="reference.html"><strong>All Functions</strong></a> &mdash; Complete alphabetical reference for all 170+ Rayfall built-in functions with signatures, descriptions, and examples.</p>
 
       <!-- Prev/Next -->
             <div class="docs-nav-footer">

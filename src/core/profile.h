@@ -27,7 +27,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
 #include <windows.h>
 #else
 #include <time.h>
@@ -79,7 +79,7 @@ typedef struct {
 extern ray_profile_t g_ray_profile;
 
 static inline int64_t ray_profile_now_ns(void) {
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     LARGE_INTEGER freq, cnt;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&cnt);

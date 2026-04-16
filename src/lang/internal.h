@@ -1,14 +1,33 @@
 /*
  *   Copyright (c) 2025-2026 Anton Kundenko <singaraiona@gmail.com>
  *   All rights reserved.
- *
- *   Shared helpers for eval.c split — included by arith.c, cmp.c, agg.c, etc.
+
+ *   Permission is hereby granted, free of charge, to any person obtaining a copy
+ *   of this software and associated documentation files (the "Software"), to deal
+ *   in the Software without restriction, including without limitation the rights
+ *   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *   copies of the Software, and to permit persons to whom the Software is
+ *   furnished to do so, subject to the following conditions:
+
+ *   The above copyright notice and this permission notice shall be included in all
+ *   copies or substantial portions of the Software.
+
+ *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *   SOFTWARE.
+ */
+
+/**   Shared helpers for eval.c split — included by arith.c, cmp.c, agg.c, etc.
  *   Small hot-path helpers are static inline; larger functions that remain in
  *   eval.c are declared extern.
  */
 
-#ifndef RAY_EVAL_INTERNAL_H
-#define RAY_EVAL_INTERNAL_H
+#ifndef RAY_LANG_INTERNAL_H
+#define RAY_LANG_INTERNAL_H
 
 #include "lang/eval.h"
 #include "lang/format.h"
@@ -173,34 +192,17 @@ static inline ray_t* make_typed_int(int8_t atom_type, int64_t val) {
  * Type name helper
  * ══════════════════════════════════════════ */
 
-static inline const char* type_sym_name(int8_t type) {
-    switch (type < 0 ? -type : type) {
-    case RAY_BOOL:      return type < 0 ? "b8" : "B8";
-    case RAY_U8:        return type < 0 ? "u8" : "U8";
-    case RAY_I16:       return type < 0 ? "i16" : "I16";
-    case RAY_I32:       return type < 0 ? "i32" : "I32";
-    case RAY_I64:       return type < 0 ? "i64" : "I64";
-    case RAY_F32:       return type < 0 ? "f32" : "F32";
-    case RAY_F64:       return type < 0 ? "f64" : "F64";
-    case RAY_DATE:      return type < 0 ? "date" : "DATE";
-    case RAY_TIME:      return type < 0 ? "time" : "TIME";
-    case RAY_TIMESTAMP: return type < 0 ? "timestamp" : "TIMESTAMP";
-    case RAY_SYM:       return type < 0 ? "symbol" : "SYMBOL";
-    case RAY_STR:       return type < 0 ? "str" : "STR";
-    case RAY_GUID:      return type < 0 ? "guid" : "GUID";
-    case RAY_TABLE:     return "TABLE";
-    case RAY_DICT:      return "DICT";
-    case RAY_LIST:      return "LIST";
-    default:            return "?";
-    }
-}
+/* Removed: type_sym_name() — use ray_type_name() directly.
+ * Lowercase for atoms (negative type), uppercase for vectors (positive). */
 
 /* ══════════════════════════════════════════
  * Truthiness
  * ══════════════════════════════════════════ */
 
-/* Logical -- coerce to truthiness (0/nil/false = falsy, else truthy) */
+/* Logical -- coerce to truthiness (0/nil/false = falsy, else truthy).
+ * Null forms (RAY_NULL singleton and typed null atoms) are falsy. */
 static inline int is_truthy(ray_t* x) {
+    if (RAY_IS_NULL(x) || RAY_ATOM_IS_NULL(x)) return 0;
     if (x->type == -RAY_BOOL) return x->b8;
     if (x->type == -RAY_I64)  return x->i64 != 0;
     if (x->type == -RAY_F64)  return x->f64 != 0.0;
@@ -479,4 +481,4 @@ static inline ray_t* atomic_map_binary(ray_binary_fn fn, ray_t* left, ray_t* rig
     return atomic_map_binary_op(fn, 0, left, right);
 }
 
-#endif /* RAY_EVAL_INTERNAL_H */
+#endif /* RAY_LANG_INTERNAL_H */

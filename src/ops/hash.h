@@ -55,7 +55,7 @@
 #endif
 
 #ifndef RAY_HASH_LITTLE_ENDIAN
-  #if defined(_WIN32) || defined(__LITTLE_ENDIAN__) || \
+  #if defined(RAY_OS_WINDOWS) || defined(__LITTLE_ENDIAN__) || \
       (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
     #define RAY_HASH_LITTLE_ENDIAN 1
   #elif defined(__BIG_ENDIAN__) || \

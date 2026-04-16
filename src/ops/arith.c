@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 
 /* Arithmetic builtins (atom-only).
  * Vector dispatch goes through the DAG executor. */
@@ -82,7 +82,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
 
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot add %s and %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
     /* Null propagation */
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return null_for_promoted(a, b);
     if (is_float_op(a, b)) return make_f64(as_f64(a) + as_f64(b));
@@ -148,7 +148,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
 
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot subtract %s and %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
     /* Null propagation */
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return null_for_promoted(a, b);
     if (is_float_op(a, b)) {
@@ -177,7 +177,7 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
 
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot multiply %s and %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
     /* Null propagation */
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return null_for_promoted(a, b);
     if (is_float_op(a, b)) return make_f64(as_f64(a) * as_f64(b));
@@ -211,7 +211,7 @@ ray_t* ray_div_fn(ray_t* a, ray_t* b) {
     }
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot divide %s by %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
     /* u8: unsigned byte division — div by 0 returns 0 */
     if (a->type == -RAY_U8) {
         uint8_t bv = (uint8_t)as_i64(b);
@@ -279,7 +279,7 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
     }
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot mod %s by %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
 
     /* u8: unsigned byte modulo, no null sentinel — mod by 0 returns 0 */
     if (b->type == -RAY_U8) {

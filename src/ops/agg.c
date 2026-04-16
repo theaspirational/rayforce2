@@ -21,13 +21,38 @@
  *   SOFTWARE.
  */
 
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "ops/ops.h"
 #include "mem/heap.h"
 
 /* ══════════════════════════════════════════
  * Aggregation builtins
  * ══════════════════════════════════════════ */
+
+/* Build a one-op DAG over a single input vector and execute it. */
+#define AGG_VEC_VIA_DAG(x, ctor) do {                       \
+    ray_graph_t* g = ray_graph_new(NULL);                   \
+    if (!g) return ray_error("oom", NULL);                  \
+    ray_op_t* in = ray_graph_input_vec(g, x);              \
+    ray_op_t* op = ctor(g, in);                            \
+    return ray_lazy_materialize(ray_lazy_wrap(g, op));      \
+} while(0)
+
+/* DAG executor returns I64 for all integer types — cast back to original. */
+static ray_t* recast_i64_to_orig(ray_t* r, int8_t orig_type) {
+    if (!r || RAY_IS_ERR(r)) return r;
+    if (ray_is_atom(r) && r->type == -RAY_I64 && orig_type != RAY_I64 && orig_type != RAY_F64) {
+        int64_t v = r->i64;
+        ray_release(r);
+        if (orig_type == RAY_DATE) return ray_date((int32_t)v);
+        if (orig_type == RAY_TIME) return ray_time(v);
+        if (orig_type == RAY_TIMESTAMP) return ray_timestamp(v);
+        if (orig_type == RAY_I32) return make_i32((int32_t)v);
+        if (orig_type == RAY_I16) return make_i16((int16_t)v);
+        if (orig_type == RAY_U8) return make_u8((uint8_t)v);
+    }
+    return r;
+}
 
 ray_t* ray_sum_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_SUM);
@@ -74,11 +99,7 @@ ray_t* ray_sum_fn(ray_t* x) {
             }
         }
         /* I64/F64: parallel morsel-driven reduction via DAG executor */
-        ray_graph_t* g = ray_graph_new(NULL);
-        if (!g) return ray_error("oom", NULL);
-        ray_op_t* in = ray_graph_input_vec(g, x);
-        ray_op_t* op = ray_sum(g, in);
-        return ray_lazy_materialize(ray_lazy_wrap(g, op));
+        AGG_VEC_VIA_DAG(x, ray_sum);
     }
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
@@ -126,13 +147,7 @@ ray_t* ray_avg_fn(ray_t* x) {
         if (is_numeric(x)) return make_f64(as_f64(x));
         ray_retain(x); return x;
     }
-    if (ray_is_vec(x)) {
-        ray_graph_t* g = ray_graph_new(NULL);
-        if (!g) return ray_error("oom", NULL);
-        ray_op_t* in = ray_graph_input_vec(g, x);
-        ray_op_t* op = ray_avg(g, in);
-        return ray_lazy_materialize(ray_lazy_wrap(g, op));
-    }
+    if (ray_is_vec(x)) AGG_VEC_VIA_DAG(x, ray_avg);
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
     if (len == 0) return ray_error("domain", NULL);
@@ -158,19 +173,7 @@ ray_t* ray_min_fn(ray_t* x) {
         ray_op_t* in = ray_graph_input_vec(g, x);
         ray_op_t* op = ray_min_op(g, in);
         ray_t* r = ray_lazy_materialize(ray_lazy_wrap(g, op));
-        if (!r || RAY_IS_ERR(r)) return r;
-        /* DAG returns I64 for all integer types — cast back to original */
-        if (ray_is_atom(r) && r->type == -RAY_I64 && orig_type != RAY_I64 && orig_type != RAY_F64) {
-            int64_t v = r->i64;
-            ray_release(r);
-            if (orig_type == RAY_DATE) return ray_date((int32_t)v);
-            if (orig_type == RAY_TIME) return ray_time(v);
-            if (orig_type == RAY_TIMESTAMP) return ray_timestamp(v);
-            if (orig_type == RAY_I32) return make_i32((int32_t)v);
-            if (orig_type == RAY_I16) return make_i16((int16_t)v);
-            if (orig_type == RAY_U8) return make_u8((uint8_t)v);
-        }
-        return r;
+        return recast_i64_to_orig(r, orig_type);
     }
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
@@ -199,18 +202,7 @@ ray_t* ray_max_fn(ray_t* x) {
         ray_op_t* in = ray_graph_input_vec(g, x);
         ray_op_t* op = ray_max_op(g, in);
         ray_t* r = ray_lazy_materialize(ray_lazy_wrap(g, op));
-        if (!r || RAY_IS_ERR(r)) return r;
-        if (ray_is_atom(r) && r->type == -RAY_I64 && orig_type != RAY_I64 && orig_type != RAY_F64) {
-            int64_t v = r->i64;
-            ray_release(r);
-            if (orig_type == RAY_DATE) return ray_date((int32_t)v);
-            if (orig_type == RAY_TIME) return ray_time(v);
-            if (orig_type == RAY_TIMESTAMP) return ray_timestamp(v);
-            if (orig_type == RAY_I32) return make_i32((int32_t)v);
-            if (orig_type == RAY_I16) return make_i16((int16_t)v);
-            if (orig_type == RAY_U8) return make_u8((uint8_t)v);
-        }
-        return r;
+        return recast_i64_to_orig(r, orig_type);
     }
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
@@ -255,11 +247,7 @@ ray_t* ray_first_fn(ray_t* x) {
             int alloc = 0;
             return collection_elem(x, 0, &alloc);
         }
-        ray_graph_t* g = ray_graph_new(NULL);
-        if (!g) return ray_error("oom", NULL);
-        ray_op_t* in = ray_graph_input_vec(g, x);
-        ray_op_t* op = ray_first(g, in);
-        return ray_lazy_materialize(ray_lazy_wrap(g, op));
+        AGG_VEC_VIA_DAG(x, ray_first);
     }
     if (!is_list(x)) return ray_error("type", NULL);
     if (ray_len(x) == 0) return ray_typed_null(-RAY_I64);
@@ -294,11 +282,7 @@ ray_t* ray_last_fn(ray_t* x) {
             int alloc = 0;
             return collection_elem(x, ray_len(x) - 1, &alloc);
         }
-        ray_graph_t* g = ray_graph_new(NULL);
-        if (!g) return ray_error("oom", NULL);
-        ray_op_t* in = ray_graph_input_vec(g, x);
-        ray_op_t* op = ray_last(g, in);
-        return ray_lazy_materialize(ray_lazy_wrap(g, op));
+        AGG_VEC_VIA_DAG(x, ray_last);
     }
     if (!is_list(x)) return ray_error("type", NULL);
     int64_t len = ray_len(x);
@@ -398,53 +382,10 @@ ray_t* ray_med_fn(ray_t* x) {
     return make_f64(median);
 }
 
-/* Helper: compute stddev from compacted array of f64 values (no nulls) */
-static ray_t* dev_from_f64(double* vals, int64_t cnt) {
-    if (cnt == 0) return ray_typed_null(-RAY_F64);
-    double sum = 0.0;
-    for (int64_t i = 0; i < cnt; i++) sum += vals[i];
-    double mean = sum / (double)cnt;
-    double var = 0.0;
-    for (int64_t i = 0; i < cnt; i++) { double d = vals[i] - mean; var += d * d; }
-    return make_f64(sqrt(var / (double)cnt));
-}
+static ray_t* var_stddev_core(ray_t* x, int sample, int take_sqrt);
 
-ray_t* ray_dev_fn(ray_t* x) {
-    if (ray_is_lazy(x)) x = ray_lazy_materialize(x);
-    if (RAY_IS_ERR(x)) return x;
-    if (ray_is_atom(x)) {
-        if (RAY_ATOM_IS_NULL(x)) return ray_typed_null(-RAY_F64);
-        if (is_numeric(x)) return make_f64(0.0);
-        return ray_error("type", NULL);
-    }
-    if (ray_is_vec(x)) {
-        int64_t len = ray_len(x);
-        if (len == 0) return ray_typed_null(-RAY_F64);
-        double* vals;
-        ray_t* scratch = vec_to_f64_scratch(x, &vals);
-        if (RAY_IS_ERR(scratch)) return scratch;
-        ray_t* result = dev_from_f64(vals, scratch->len);
-        ray_release(scratch);
-        return result;
-    }
-    if (!is_list(x)) return ray_error("type", NULL);
-    int64_t len = ray_len(x);
-    if (len == 0) return ray_typed_null(-RAY_F64);
-    ray_t** elems = (ray_t**)ray_data(x);
-    double sum = 0.0;
-    int64_t cnt = 0;
-    for (int64_t i = 0; i < len; i++) {
-        if (!is_numeric(elems[i])) return ray_error("type", NULL);
-        if (!RAY_ATOM_IS_NULL(elems[i])) { sum += as_f64(elems[i]); cnt++; }
-    }
-    if (cnt == 0) return ray_typed_null(-RAY_F64);
-    double mean = sum / (double)cnt;
-    double var = 0.0;
-    for (int64_t i = 0; i < len; i++) {
-        if (!RAY_ATOM_IS_NULL(elems[i])) { double d = as_f64(elems[i]) - mean; var += d * d; }
-    }
-    return make_f64(sqrt(var / (double)cnt));
-}
+
+ray_t* ray_dev_fn(ray_t* x) { return var_stddev_core(x, 0, 1); }
 
 /* Shared core for variance / stddev in sample or population mode.
  * sample=1 -> divide sum-of-squares by (n-1); sample=0 -> divide by n.

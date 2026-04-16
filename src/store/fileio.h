@@ -27,7 +27,7 @@
 #include <rayforce.h>
 
 /* Cross-platform file I/O (locking, sync, atomic rename) */
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
   #include <windows.h>
   typedef HANDLE ray_fd_t;
   #define RAY_FD_INVALID INVALID_HANDLE_VALUE
@@ -48,5 +48,6 @@ ray_err_t ray_file_unlock(ray_fd_t fd);
 ray_err_t ray_file_sync(ray_fd_t fd);
 ray_err_t ray_file_sync_dir(const char* path);
 ray_err_t ray_file_rename(const char* old_path, const char* new_path);
+ray_err_t ray_mkdir(const char* path);
 
 #endif /* RAY_FILEIO_H */

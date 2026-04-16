@@ -23,7 +23,7 @@
 
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE
-#elif !defined(_WIN32)
+#elif !defined(RAY_OS_WINDOWS)
 #define _GNU_SOURCE
 #endif
 #include "part.h"
@@ -110,6 +110,72 @@ static int64_t parse_int_dir(const char* s) {
  * -------------------------------------------------------------------------- */
 
 /* --------------------------------------------------------------------------
+ * collect_part_dirs — scan db_root for partition directories
+ *
+ * Collects directory names that match digit/dot pattern, bubble-sorts them.
+ * If skip_sym is true, entries named "sym" are skipped.
+ * Caller must free each entry with ray_sys_free and the array itself.
+ * -------------------------------------------------------------------------- */
+
+static ray_err_t collect_part_dirs(const char* db_root, char*** out_dirs,
+                                   int64_t* out_count, bool skip_sym) {
+    DIR* d = opendir(db_root);
+    if (!d) return RAY_ERR_IO;
+
+    char** part_dirs = NULL;
+    int64_t part_count = 0;
+    int64_t part_cap = 0;
+
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (skip_sym && strcmp(ent->d_name, "sym") == 0) continue;
+
+        /* Partition directory name format validation is intentionally loose:
+         * accepts any sequence of digits and dots (e.g. "2024.01.15").
+         * Invalid entries fail during splay load and are caught there. */
+        bool valid = (ent->d_name[0] != '\0');
+        for (const char* c = ent->d_name; *c; c++) {
+            if (*c == '.' || (*c >= '0' && *c <= '9')) continue;
+            valid = false; break;
+        }
+        if (!valid) continue;
+
+        if (part_count >= part_cap) {
+            part_cap = part_cap == 0 ? 16 : part_cap * 2;
+            char** tmp = (char**)ray_sys_realloc(part_dirs, (size_t)part_cap * sizeof(char*));
+            if (!tmp) break;
+            part_dirs = tmp;
+        }
+        char* dup = ray_sys_strdup(ent->d_name);
+        if (!dup) break;
+        part_dirs[part_count++] = dup;
+    }
+    closedir(d);
+
+    if (part_count == 0) {
+        ray_sys_free(part_dirs);
+        return RAY_ERR_IO;
+    }
+
+    /* Sort partition names for deterministic order.
+     * O(n^2) but partition count is typically small (< 1000 daily partitions). */
+    for (int64_t i = 0; i < part_count - 1; i++) {
+        for (int64_t j = i + 1; j < part_count; j++) {
+            if (strcmp(part_dirs[i], part_dirs[j]) > 0) {
+                char* tmp = part_dirs[i];
+                part_dirs[i] = part_dirs[j];
+                part_dirs[j] = tmp;
+            }
+        }
+    }
+
+    *out_dirs = part_dirs;
+    *out_count = part_count;
+    return RAY_OK;
+}
+
+/* --------------------------------------------------------------------------
  * ray_part_load — load a partitioned table
  *
  * Discovers partition directories, loads each splayed table, and
@@ -124,62 +190,11 @@ ray_t* ray_part_load(const char* db_root, const char* table_name) {
         strstr(table_name, "..") || table_name[0] == '.')
         return ray_error("io", NULL);
 
-    /* Scan db_root for partition directories (YYYY.MM.DD format) */
-    DIR* d = opendir(db_root);
-    if (!d) return ray_error("io", NULL);
-
-    /* Collect partition directory names */
+    /* Scan db_root for partition directories */
     char** part_dirs = NULL;
     int64_t part_count = 0;
-    int64_t part_cap = 0;
-
-    struct dirent* ent;
-    while ((ent = readdir(d)) != NULL) {
-        /* Skip . and .. and non-directories */
-        if (ent->d_name[0] == '.') continue;
-
-        /* Partition directory name format validation is intentionally loose:
-         * accepts any sequence of digits and dots (e.g. "2024.01.15", "1.2.3").
-         * The actual format is not strictly enforced here -- invalid entries
-         * will simply fail during splay load and be caught there.
-         * Non-conforming entries are harmless and silently skipped. */
-        bool valid = (ent->d_name[0] != '\0');
-        for (const char* c = ent->d_name; *c; c++) {
-            if (*c == '.' || (*c >= '0' && *c <= '9')) continue;
-            valid = false; break;
-        }
-        if (!valid) continue;
-
-        if (part_count >= part_cap) {
-            part_cap = part_cap == 0 ? 16 : part_cap * 2;
-            char** tmp = (char**)ray_sys_realloc(part_dirs, (size_t)part_cap * sizeof(char*));
-            if (!tmp) break; /* OOM — stop collecting */
-            part_dirs = tmp;
-        }
-        char* dup = ray_sys_strdup(ent->d_name);
-        if (!dup) break;
-        part_dirs[part_count] = dup;
-        part_count++;
-    }
-    closedir(d);
-
-    if (part_count == 0) {
-        /* No partition directories found in db_root */
-        ray_sys_free(part_dirs);
-        return ray_error("io", NULL);
-    }
-
-    /* Sort partition names for deterministic order.
-     * O(n^2) but partition count is typically small (< 1000 daily partitions). */
-    for (int64_t i = 0; i < part_count - 1; i++) {
-        for (int64_t j = i + 1; j < part_count; j++) {
-            if (strcmp(part_dirs[i], part_dirs[j]) > 0) {
-                char* tmp = part_dirs[i];
-                part_dirs[i] = part_dirs[j];
-                part_dirs[j] = tmp;
-            }
-        }
-    }
+    ray_err_t collect_err = collect_part_dirs(db_root, &part_dirs, &part_count, false);
+    if (collect_err != RAY_OK) return ray_error("io", NULL);
 
     /* Build sym_path for this db_root */
     char sym_path[1024];
@@ -315,58 +330,11 @@ ray_t* ray_read_parted(const char* db_root, const char* table_name) {
     ray_err_t sym_err = ray_sym_load(sym_path);
     if (sym_err != RAY_OK) return ray_error(ray_err_code_str(sym_err), NULL);
 
-    /* Scan db_root for partition directories */
-    DIR* d = opendir(db_root);
-    if (!d) return ray_error("io", NULL);
-
+    /* Scan db_root for partition directories (skip "sym" entry) */
     char** part_dirs = NULL;
     int64_t part_count = 0;
-    int64_t part_cap = 0;
-
-    struct dirent* ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-        if (strcmp(ent->d_name, "sym") == 0) continue;
-
-        /* Partition directory name format validation is intentionally loose:
-         * accepts any sequence of digits and dots (e.g. "2024.01.15").
-         * Invalid entries fail during splay open and are caught there. */
-        bool valid = (ent->d_name[0] != '\0');
-        for (const char* c = ent->d_name; *c; c++) {
-            if (*c == '.' || (*c >= '0' && *c <= '9')) continue;
-            valid = false; break;
-        }
-        if (!valid) continue;
-
-        if (part_count >= part_cap) {
-            part_cap = part_cap == 0 ? 16 : part_cap * 2;
-            char** tmp = (char**)ray_sys_realloc(part_dirs, (size_t)part_cap * sizeof(char*));
-            if (!tmp) break;
-            part_dirs = tmp;
-        }
-        char* dup = ray_sys_strdup(ent->d_name);
-        if (!dup) break;
-        part_dirs[part_count++] = dup;
-    }
-    closedir(d);
-
-    if (part_count == 0) {
-        /* No partition directories found in db_root */
-        ray_sys_free(part_dirs);
-        return ray_error("io", NULL);
-    }
-
-    /* Sort partition names for deterministic order.
-     * O(n^2) but partition count is typically small (< 1000 daily partitions). */
-    for (int64_t i = 0; i < part_count - 1; i++) {
-        for (int64_t j = i + 1; j < part_count; j++) {
-            if (strcmp(part_dirs[i], part_dirs[j]) > 0) {
-                char* tmp = part_dirs[i];
-                part_dirs[i] = part_dirs[j];
-                part_dirs[j] = tmp;
-            }
-        }
-    }
+    ray_err_t collect_err = collect_part_dirs(db_root, &part_dirs, &part_count, true);
+    if (collect_err != RAY_OK) return ray_error("io", NULL);
 
     /* Open each partition via ray_read_splayed */
     ray_t** part_tables = (ray_t**)ray_sys_alloc((size_t)part_count * sizeof(ray_t*));

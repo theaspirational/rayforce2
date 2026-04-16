@@ -28,7 +28,7 @@
 
 /* ===== Socket Abstraction ===== */
 
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
   typedef intptr_t ray_sock_t;
   #define RAY_INVALID_SOCK ((ray_sock_t)-1)
 #else

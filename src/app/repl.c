@@ -23,7 +23,7 @@
 
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE
-#elif !defined(_WIN32)
+#elif !defined(RAY_OS_WINDOWS)
 #define _GNU_SOURCE
 #endif
 
@@ -46,7 +46,7 @@
 #include <string.h>
 #include <time.h>
 
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
 #include <io.h>
 #include <windows.h>
 #define isatty _isatty
@@ -95,7 +95,7 @@ static const char* const PB_CAP_R = "\xe2\x96\x8f"; /* ▏ */
 static int progress_term_cols(void) {
     static int cached = 0;
     if (cached) return cached;
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     HANDLE herr = GetStdHandle(STD_ERROR_HANDLE);
     if (herr && GetConsoleScreenBufferInfo(herr, &csbi)) {
@@ -114,9 +114,22 @@ static int progress_term_cols(void) {
     return cached;
 }
 
+static const char* fmt_bytes(int64_t bytes, char* buf, size_t bufsz) {
+    if (bytes < 0) bytes = 0;
+    double v = (double)bytes;
+    const char* unit;
+    if      (v >= 1e9) { v /= 1e9; unit = "G"; }
+    else if (v >= 1e6) { v /= 1e6; unit = "M"; }
+    else if (v >= 1e3) { v /= 1e3; unit = "K"; }
+    else               { unit = "B"; }
+    snprintf(buf, bufsz, "%.1f%s", v, unit);
+    return buf;
+}
+
 static void render_progress_full(int64_t done, int64_t total,
                                    const char* op, const char* phase,
-                                   double elapsed_sec) {
+                                   double elapsed_sec,
+                                   int64_t mem_used, int64_t mem_budget) {
     int cols = progress_term_cols();
     /* Reserve a chunk for labels + percent + elapsed; give the rest
      * to the bar. Minimum bar is 10 cells, maximum 40. */
@@ -148,6 +161,12 @@ static void render_progress_full(int64_t done, int64_t total,
                        (op && *op) ? ": " : " \xc2\xb7 ", phase);
     if (elapsed_sec > 0.0)
         tp += snprintf(tail + tp, sizeof(tail) - tp, " \xc2\xb7 %.1fs", elapsed_sec);
+    if (mem_used > 0 && mem_budget > 0) {
+        char ub[16], bb[16];
+        fmt_bytes(mem_used, ub, sizeof(ub));
+        fmt_bytes(mem_budget, bb, sizeof(bb));
+        tp += snprintf(tail + tp, sizeof(tail) - tp, " \xc2\xb7 %s/%s", ub, bb);
+    }
 
     /* Clear the line first, then draw. Using \e[2K avoids leaving
      * stale tail text when a shorter render overwrites a longer one. */
@@ -173,7 +192,7 @@ static void render_progress_full(int64_t done, int64_t total,
 
 /* Profiler push API — keeps the old signature for CSV loader. */
 static void render_progress(int64_t done, int64_t total, const char* label) {
-    render_progress_full(done, total, label, NULL, 0.0);
+    render_progress_full(done, total, label, NULL, 0.0, 0, 0);
 }
 
 static void clear_progress(void) {
@@ -192,7 +211,8 @@ static void repl_query_progress_cb(const ray_progress_t* p, void* user) {
     (void)user;
     if (p->final) { clear_progress(); return; }
     render_progress_full((int64_t)p->rows_done, (int64_t)p->rows_total,
-                         p->op_name, p->phase, p->elapsed_sec);
+                         p->op_name, p->phase, p->elapsed_sec,
+                         p->mem_used, p->mem_budget);
 }
 
 /* ===== Profiler span tree printer (reads from g_ray_profile) ===== */
@@ -272,7 +292,7 @@ static void get_cpu_name(char* buf, size_t sz) {
     size_t len = sz;
     if (sysctlbyname("machdep.cpu.brand_string", buf, &len, NULL, 0) != 0)
         snprintf(buf, sz, "unknown");
-#elif defined(_WIN32)
+#elif defined(RAY_OS_WINDOWS)
     snprintf(buf, sz, "unknown");
 #else
     snprintf(buf, sz, "unknown");
@@ -291,7 +311,7 @@ static int64_t get_total_mem_mb(void) {
     size_t len = sizeof(mem);
     sysctlbyname("hw.memsize", &mem, &len, NULL, 0);
     return mem / (1024 * 1024);
-#elif defined(_WIN32)
+#elif defined(RAY_OS_WINDOWS)
     MEMORYSTATUSEX ms;
     ms.dwLength = sizeof(ms);
     GlobalMemoryStatusEx(&ms);
@@ -737,7 +757,7 @@ static ray_t* repl_read(ray_poll_t* poll, ray_selector_t* sel)
             term->buf_len = 0;
             term->buf_pos = 0;
             term->multiline_len = 0;
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
             { ssize_t r_ = write(STDOUT_FILENO, "^C\n", 3); (void)r_; }
 #endif
             ray_term_prompt(term);
@@ -835,7 +855,7 @@ static void run_interactive(ray_repl_t* repl) {
                     term->buf_len = 0;
                     term->buf_pos = 0;
                     term->multiline_len = 0;
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
                     { ssize_t r_ = write(STDOUT_FILENO, "^C\n", 3); (void)r_; }
 #endif
                     ray_term_prompt(term);

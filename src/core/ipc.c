@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-#ifndef _WIN32
+#ifndef RAY_OS_WINDOWS
   #define _GNU_SOURCE
 #endif
 
@@ -31,7 +31,7 @@
 #include <stdio.h>
 #include <errno.h>
 
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
   #define WIN32_LEAN_AND_MEAN
   #include <winsock2.h>
   #include <ws2tcpip.h>
@@ -675,7 +675,7 @@ void ray_ipc_server_destroy(ray_ipc_server_t* srv)
     srv->listen_fd = RAY_INVALID_SOCK;
 
     if (srv->poll_fd >= 0) {
-#ifndef _WIN32
+#ifndef RAY_OS_WINDOWS
         close(srv->poll_fd);
 #endif
     }
@@ -953,7 +953,7 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
         return -1;
     }
 
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
     { DWORD z = 0;
       setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&z, sizeof(z));
       setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&z, sizeof(z)); }

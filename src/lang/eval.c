@@ -22,7 +22,7 @@
  */
 
 #include "lang/eval.h"
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "lang/env.h"
 #include "lang/nfo.h"
 #include "lang/parse.h"
@@ -1095,15 +1095,7 @@ ray_t* ray_cond_fn(ray_t** args, int64_t n) {
     if (ray_is_lazy(cond))
         cond = ray_lazy_materialize(cond);
     if (RAY_IS_ERR(cond)) return cond;
-    /* All null forms are falsy */
-    if (RAY_ATOM_IS_NULL(cond)) {
-        ray_release(cond);
-        return (n >= 3) ? ray_eval(args[2]) : make_i64(0);
-    }
-    int truthy = 0;
-    if (cond->type == -RAY_BOOL) truthy = cond->b8;
-    else if (cond->type == -RAY_I64) truthy = cond->i64 != 0;
-    else truthy = 1;  /* non-null is truthy */
+    int truthy = is_truthy(cond);
     ray_release(cond);
     if (truthy) return ray_eval(args[1]);
     if (n >= 3) return ray_eval(args[2]);
@@ -1186,40 +1178,25 @@ ray_t* ray_fn(ray_t** args, int64_t n) {
     return lambda;
 }
 
-/* Build a single error trace frame from a lambda's debug/nfo info at the given
- * bytecode IP.  Appends [span_i64, filename, fn_name, source] to g_error_trace. */
-static void add_error_frame(ray_t* fn, int32_t ip) {
-    if (!fn || fn->type != RAY_LAMBDA) return;
-    ray_t* dbg = LAMBDA_DBG(fn);
-    ray_t* nfo = LAMBDA_NFO(fn);
-    if (!dbg && !nfo) return;
-
-    ray_span_t span = {0};
-    if (dbg) span = ray_bc_dbg_get(dbg, ip);
+/* Build a [span_i64, filename, fn_name, source] frame from a resolved span
+ * and append it to g_error_trace.  Shared by the bytecode and eval paths. */
+static void append_error_frame(ray_t* nfo, ray_span_t span) {
     if (span.id == 0) return;
 
-    /* Build frame: alloc 4-slot list, set elements directly */
     ray_t* frame = ray_alloc(4 * sizeof(ray_t*));
     if (!frame || RAY_IS_ERR(frame)) return;
     frame->type = RAY_LIST;
     frame->len = 4;
     ray_t** fe = (ray_t**)ray_data(frame);
 
-    /* [0] span as i64 atom */
     fe[0] = ray_i64(span.id);
-
-    /* [1] filename from nfo */
     if (nfo && NFO_FILENAME(nfo)) {
         fe[1] = NFO_FILENAME(nfo);
         ray_retain(fe[1]);
     } else {
         fe[1] = ray_str("<unknown>", 9);
     }
-
-    /* [2] function name — NULL for anonymous lambdas */
     fe[2] = NULL;
-
-    /* [3] source from nfo */
     if (nfo && NFO_SOURCE(nfo)) {
         fe[3] = NFO_SOURCE(nfo);
         ray_retain(fe[3]);
@@ -1227,7 +1204,6 @@ static void add_error_frame(ray_t* fn, int32_t ip) {
         fe[3] = ray_str("", 0);
     }
 
-    /* Append frame to trace list */
     if (!g_error_trace) {
         g_error_trace = ray_alloc(sizeof(ray_t*));
         if (!g_error_trace) { ray_release(frame); return; }
@@ -1240,35 +1216,23 @@ static void add_error_frame(ray_t* fn, int32_t ip) {
     }
 }
 
+/* Build a single error trace frame from a lambda's debug/nfo info at the given
+ * bytecode IP. */
+static void add_error_frame(ray_t* fn, int32_t ip) {
+    if (!fn || fn->type != RAY_LAMBDA) return;
+    ray_t* dbg = LAMBDA_DBG(fn);
+    ray_t* nfo = LAMBDA_NFO(fn);
+    if (!dbg && !nfo) return;
+
+    ray_span_t span = {0};
+    if (dbg) span = ray_bc_dbg_get(dbg, ip);
+    append_error_frame(nfo, span);
+}
+
 /* Add error frame from eval context (nfo + AST node) for call-site errors. */
 static void add_eval_error_frame(ray_t* nfo, ray_t* node) {
     if (!nfo || !node) return;
-    ray_span_t span = ray_nfo_get(nfo, node);
-    if (span.id == 0) return;
-
-    ray_t* frame = ray_alloc(4 * sizeof(ray_t*));
-    if (!frame || RAY_IS_ERR(frame)) return;
-    frame->type = RAY_LIST;
-    frame->len = 4;
-    ray_t** fe = (ray_t**)ray_data(frame);
-
-    fe[0] = ray_i64(span.id);
-    fe[1] = NFO_FILENAME(nfo) ? (ray_retain(NFO_FILENAME(nfo)), NFO_FILENAME(nfo))
-                              : ray_str("<unknown>", 9);
-    fe[2] = NULL;
-    fe[3] = NFO_SOURCE(nfo) ? (ray_retain(NFO_SOURCE(nfo)), NFO_SOURCE(nfo))
-                            : ray_str("", 0);
-
-    if (!g_error_trace) {
-        g_error_trace = ray_alloc(sizeof(ray_t*));
-        if (!g_error_trace) { ray_release(frame); return; }
-        g_error_trace->type = RAY_LIST;
-        g_error_trace->len = 1;
-        ((ray_t**)ray_data(g_error_trace))[0] = frame;
-    } else {
-        g_error_trace = ray_list_append(g_error_trace, frame);
-        ray_release(frame);
-    }
+    append_error_frame(nfo, ray_nfo_get(nfo, node));
 }
 
 /* Execute compiled bytecode for a lambda. */
@@ -1479,11 +1443,7 @@ op_jmpf: {
     int16_t offset = (int16_t)((code[ip] << 8) | code[ip + 1]);
     ip += 2;
     ray_t *cond = POP();
-    int truthy = 0;
-    if (RAY_ATOM_IS_NULL(cond)) truthy = 0;
-    else if (cond->type == -RAY_BOOL) truthy = cond->b8;
-    else if (cond->type == -RAY_I64) truthy = cond->i64 != 0;
-    else truthy = 1;
+    int truthy = is_truthy(cond);
     ray_release(cond);
     if (!truthy) ip += offset;
     DISPATCH();

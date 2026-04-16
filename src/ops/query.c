@@ -1,12 +1,31 @@
 /*
  *   Copyright (c) 2025-2026 Anton Kundenko <singaraiona@gmail.com>
  *   All rights reserved.
- *
- *   Query bridge: select, update, insert, upsert, join operations.
+
+ *   Permission is hereby granted, free of charge, to any person obtaining a copy
+ *   of this software and associated documentation files (the "Software"), to deal
+ *   in the Software without restriction, including without limitation the rights
+ *   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *   copies of the Software, and to permit persons to whom the Software is
+ *   furnished to do so, subject to the following conditions:
+
+ *   The above copyright notice and this permission notice shall be included in all
+ *   copies or substantial portions of the Software.
+
+ *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *   SOFTWARE.
+ */
+
+/**   Query bridge: select, update, insert, upsert, join operations.
  *   Extracted from eval.c.
  */
 
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "lang/eval.h"
 #include "lang/env.h"
 #include "ops/ops.h"
@@ -1156,60 +1175,94 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
                 /* Build result table: key column first (gathered from
                  * the original at fi[]), then every other column the
-                 * same way. */
+                 * same way. Allocation failures and width mismatches
+                 * must propagate — partial results silently dropping
+                 * columns would be a correctness bug. */
                 int64_t nc_src = ray_table_ncols(eval_tbl);
                 ray_t* res = ray_table_new(nc_src);
-                if (!res || RAY_IS_ERR(res)) { ray_free(fi_hdr); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return res ? res : ray_error("oom", NULL); }
-
-                /* Helper macro captures common gather-first-by-fi pattern */
-                #define PV_GATHER(sym) do { \
-                    ray_t* sc = ray_table_get_col(eval_tbl, (sym)); \
-                    if (!sc) break; \
-                    ray_t* dst = NULL; \
-                    if (sc->type == RAY_STR) { \
-                        dst = ray_vec_new(RAY_STR, ngroups); \
-                        for (int64_t gi = 0; gi < ngroups && dst && !RAY_IS_ERR(dst); gi++) { \
-                            size_t slen = 0; \
-                            const char* sp = ray_str_vec_get(sc, fi[gi], &slen); \
-                            dst = ray_str_vec_append(dst, sp ? sp : "", sp ? slen : 0); \
-                        } \
-                    } else if (sc->type == RAY_LIST) { \
-                        dst = ray_list_new((int32_t)ngroups); \
-                        if (dst && !RAY_IS_ERR(dst)) { \
-                            ray_t** sitems = (ray_t**)ray_data(sc); \
-                            ray_t** dout = (ray_t**)ray_data(dst); \
-                            for (int64_t gi = 0; gi < ngroups; gi++) { dout[gi] = sitems[fi[gi]]; ray_retain(dout[gi]); } \
-                            dst->len = ngroups; \
-                        } \
-                    } else { \
-                        dst = ray_vec_new(sc->type, ngroups); \
-                        if (dst && !RAY_IS_ERR(dst)) { \
-                            dst->len = ngroups; \
-                            uint8_t esz = ray_sym_elem_size(sc->type, sc->attrs); \
-                            const char* src_base = (const char*)ray_data(sc); \
-                            char* dst_base = (char*)ray_data(dst); \
-                            for (int64_t gi = 0; gi < ngroups; gi++) \
-                                memcpy(dst_base + (size_t)gi * esz, \
-                                       src_base + (size_t)fi[gi] * esz, esz); \
-                        } \
-                    } \
-                    if (dst && !RAY_IS_ERR(dst)) { \
-                        res = ray_table_add_col(res, (sym), dst); \
-                        ray_release(dst); \
-                    } \
-                } while (0)
-
-                PV_GATHER(by_key_sym);
-                for (int64_t c = 0; c < nc_src && !RAY_IS_ERR(res); c++) {
-                    int64_t cn = ray_table_col_name(eval_tbl, c);
-                    if (cn == by_key_sym) continue;
-                    PV_GATHER(cn);
+                ray_t* first_err = NULL;
+                if (!res || RAY_IS_ERR(res)) {
+                    first_err = res && RAY_IS_ERR(res) ? res : ray_error("oom", NULL);
+                    res = NULL;
+                    goto fog_cleanup;
                 }
-                #undef PV_GATHER
 
+                for (int64_t pass = 0; pass < nc_src + 1 && !first_err; pass++) {
+                    int64_t cn;
+                    if (pass == 0) cn = by_key_sym;
+                    else {
+                        cn = ray_table_col_name(eval_tbl, pass - 1);
+                        if (cn == by_key_sym) continue;
+                    }
+                    ray_t* sc = ray_table_get_col(eval_tbl, cn);
+                    if (!sc) continue;
+                    ray_t* dst = NULL;
+                    int8_t sct = sc->type;
+                    if (RAY_IS_PARTED(sct)) sct = (int8_t)RAY_PARTED_BASETYPE(sct);
+
+                    if (sct == RAY_STR) {
+                        dst = ray_vec_new(RAY_STR, ngroups);
+                        for (int64_t gi = 0; gi < ngroups && dst && !RAY_IS_ERR(dst); gi++) {
+                            size_t slen = 0;
+                            const char* sp = ray_str_vec_get(sc, fi[gi], &slen);
+                            dst = ray_str_vec_append(dst, sp ? sp : "", sp ? slen : 0);
+                        }
+                    } else if (sct == RAY_LIST) {
+                        dst = ray_list_new((int32_t)ngroups);
+                        if (dst && !RAY_IS_ERR(dst)) {
+                            ray_t** sitems = (ray_t**)ray_data(sc);
+                            ray_t** dout = (ray_t**)ray_data(dst);
+                            for (int64_t gi = 0; gi < ngroups; gi++) {
+                                dout[gi] = sitems[fi[gi]];
+                                ray_retain(dout[gi]);
+                            }
+                            dst->len = ngroups;
+                        }
+                    } else if (sct == RAY_SYM) {
+                        /* Preserve the source sym-width from attrs so
+                         * narrow sym columns (1/2/4-byte indices)
+                         * memcpy the same esz on both sides. */
+                        dst = ray_sym_vec_new(sc->attrs & RAY_SYM_W_MASK, ngroups);
+                        if (dst && !RAY_IS_ERR(dst)) {
+                            dst->len = ngroups;
+                            uint8_t esz = ray_sym_elem_size(sct, dst->attrs);
+                            const char* sb = (const char*)ray_data(sc);
+                            char* db = (char*)ray_data(dst);
+                            for (int64_t gi = 0; gi < ngroups; gi++)
+                                memcpy(db + (size_t)gi * esz,
+                                       sb + (size_t)fi[gi] * esz, esz);
+                        }
+                    } else {
+                        dst = ray_vec_new(sct, ngroups);
+                        if (dst && !RAY_IS_ERR(dst)) {
+                            dst->len = ngroups;
+                            uint8_t esz = ray_sym_elem_size(sct, sc->attrs);
+                            const char* sb = (const char*)ray_data(sc);
+                            char* db = (char*)ray_data(dst);
+                            for (int64_t gi = 0; gi < ngroups; gi++)
+                                memcpy(db + (size_t)gi * esz,
+                                       sb + (size_t)fi[gi] * esz, esz);
+                        }
+                    }
+
+                    if (!dst || RAY_IS_ERR(dst)) {
+                        first_err = (dst && RAY_IS_ERR(dst)) ? dst : ray_error("oom", NULL);
+                        if (dst && !RAY_IS_ERR(dst)) ray_release(dst);
+                        break;
+                    }
+                    res = ray_table_add_col(res, cn, dst);
+                    ray_release(dst);
+                    if (RAY_IS_ERR(res)) { first_err = res; res = NULL; break; }
+                }
+
+            fog_cleanup:
                 ray_free(fi_hdr);
                 if (eval_tbl != tbl) ray_release(eval_tbl);
                 ray_release(tbl);
+                if (first_err) {
+                    if (res) ray_release(res);
+                    return first_err;
+                }
                 return apply_sort_take(res, dict_elems, dict_n, asc_id, desc_id, take_id);
             }
 

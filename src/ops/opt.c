@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#if !defined(RAY_OS_WINDOWS) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
 

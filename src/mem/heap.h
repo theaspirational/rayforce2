@@ -300,7 +300,6 @@ static inline int heap_find_pool(const ray_heap_t* h, const void* ptr) {
  * Thread-local state
  * -------------------------------------------------------------------------- */
 extern RAY_TLS ray_heap_t*     ray_tl_heap;
-extern RAY_TLS ray_mem_stats_t ray_tl_stats;
 
 /* --------------------------------------------------------------------------
  * Global heap registry: look up any heap by ID so foreign blocks can be

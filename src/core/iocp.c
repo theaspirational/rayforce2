@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
 
 #include "core/poll.h"
 #include <stdio.h>

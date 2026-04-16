@@ -249,9 +249,9 @@ static MunitResult test_fmt_table(const void* params, void* fixture) {
     munit_assert_ptr_not_null(strstr(s, "x"));
     munit_assert_ptr_not_null(strstr(s, "y"));
 
-    /* Check type names present */
-    munit_assert_ptr_not_null(strstr(s, "i64"));
-    munit_assert_ptr_not_null(strstr(s, "f64"));
+    /* Check type names present (uppercase — columns are vectors) */
+    munit_assert_ptr_not_null(strstr(s, "I64"));
+    munit_assert_ptr_not_null(strstr(s, "F64"));
 
     /* Check footer with row count */
     munit_assert_ptr_not_null(strstr(s, "3 rows"));
@@ -265,25 +265,30 @@ static MunitResult test_fmt_table(const void* params, void* fixture) {
 /* ---- Test: ray_type_name ---- */
 static MunitResult test_type_name_i64(const void* params, void* fixture) {
     (void)params; (void)fixture;
-    munit_assert_string_equal(ray_type_name(RAY_I64), "i64");
+    /* Positive = vector type → uppercase */
+    munit_assert_string_equal(ray_type_name(RAY_I64), "I64");
+    /* Negative = atom type → lowercase */
+    munit_assert_string_equal(ray_type_name(-RAY_I64), "i64");
     return MUNIT_OK;
 }
 
 static MunitResult test_type_name_f64(const void* params, void* fixture) {
     (void)params; (void)fixture;
-    munit_assert_string_equal(ray_type_name(RAY_F64), "f64");
+    munit_assert_string_equal(ray_type_name(RAY_F64), "F64");
+    munit_assert_string_equal(ray_type_name(-RAY_F64), "f64");
     return MUNIT_OK;
 }
 
 static MunitResult test_type_name_table(const void* params, void* fixture) {
     (void)params; (void)fixture;
-    munit_assert_string_equal(ray_type_name(RAY_TABLE), "table");
+    munit_assert_string_equal(ray_type_name(RAY_TABLE), "TABLE");
     return MUNIT_OK;
 }
 
 static MunitResult test_type_name_sym(const void* params, void* fixture) {
     (void)params; (void)fixture;
-    munit_assert_string_equal(ray_type_name(RAY_SYM), "sym");
+    munit_assert_string_equal(ray_type_name(RAY_SYM), "SYM");
+    munit_assert_string_equal(ray_type_name(-RAY_SYM), "sym");
     return MUNIT_OK;
 }
 

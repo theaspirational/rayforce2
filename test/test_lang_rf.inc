@@ -2687,7 +2687,7 @@ static MunitResult test_rf_take(const void* params, void* fixture) {
     ASSERT_EQ("(take [0 1 2 3] -5)", "[3 0 1 2 3]");
 
     ASSERT_EQ("(take 'a 0h)", "[]");
-    ASSERT_EQ("(type (take 'a 0i))", "'SYMBOL");
+    ASSERT_EQ("(type (take 'a 0i))", "'SYM");
     ASSERT_EQ("(take 'a 2)", "['a 'a]");
     ASSERT_EQ("(take ['a 'b 'c 'd] 3)", "['a 'b 'c]");
     ASSERT_EQ("(take ['a 'b 'c 'd] -3)", "['b 'c 'd]");
@@ -5389,21 +5389,21 @@ static MunitResult test_rf_cast(const void* params, void* fixture) {
     ASSERT_EQ("(as 'symbol 42)", "'42");
     ASSERT_EQ("(as 'symbol -9999999999)", "'-9999999999");
     // symbol <- f64
-    ASSERT_EQ("(type (as 'symbol 42.5))", "'symbol");
+    ASSERT_EQ("(type (as 'symbol 42.5))", "'sym");
     // symbol <- date
-    ASSERT_EQ("(type (as 'symbol 2024.03.20))", "'symbol");
+    ASSERT_EQ("(type (as 'symbol 2024.03.20))", "'sym");
     // symbol <- time
-    ASSERT_EQ("(type (as 'symbol 12:30:45.123))", "'symbol");
+    ASSERT_EQ("(type (as 'symbol 12:30:45.123))", "'sym");
     // symbol <- timestamp
-    ASSERT_EQ("(type (as 'symbol 2024.03.20D12:30:45.123456789))", "'symbol");
+    ASSERT_EQ("(type (as 'symbol 2024.03.20D12:30:45.123456789))", "'sym");
     // symbol <- guid
-    ASSERT_EQ("(type (as 'symbol (as 'guid \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\")))", "'symbol");
+    ASSERT_EQ("(type (as 'symbol (as 'guid \"d49f18a4-1969-49e8-9b8a-6bb9a4832eea\")))", "'sym");
     // symbol <- String
     ASSERT_EQ("(as 'symbol \"hello\")", "'hello");
 
     // ========== SYMBOL VECTOR CASTS ==========
     // SYMBOL <- I64
-    ASSERT_EQ("(type (as 'SYMBOL (til 5)))", "'SYMBOL");
+    ASSERT_EQ("(type (as 'SYMBOL (til 5)))", "'SYM");
     ASSERT_EQ("(as 'SYMBOL [0 1 2])", "[0 1 2]");
     ASSERT_EQ("(as 'SYMBOL [42 -100 999])", "[42 -100 999]");
     ASSERT_EQ("(count (as 'SYMBOL (til 1000)))", "1000");

@@ -23,7 +23,7 @@
 
 /*  Table builtins — extracted from eval.c  */
 
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "lang/env.h"
 #include "ops/ops.h"
 #include "ops/internal.h"

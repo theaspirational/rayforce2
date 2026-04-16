@@ -27,7 +27,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
 #include <windows.h>
 #else
 #include <unistd.h>
@@ -176,7 +176,7 @@ ray_runtime_t* ray_runtime_create(int argc, char** argv) {
     __VM = rt->vms[0];
 
     /* Detect memory budget: 80% of physical RAM */
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
     MEMORYSTATUSEX ms;
     ms.dwLength = sizeof(ms);
     if (GlobalMemoryStatusEx(&ms))

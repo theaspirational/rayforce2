@@ -23,7 +23,7 @@
 
 /*  Collection / higher-order builtins — extracted from eval.c  */
 
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "core/types.h"
 #include "core/pool.h"
 #include "mem/sys.h"

@@ -22,7 +22,7 @@
  */
 
 #include "ops/internal.h"
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "ops/ops.h"
 #include "mem/sys.h"
 

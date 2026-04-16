@@ -39,9 +39,14 @@ _Static_assert(sizeof(ray_pool_hdr_t) <= 16,
  * Thread-local state
  * -------------------------------------------------------------------------- */
 RAY_TLS ray_heap_t*     ray_tl_heap  = NULL;
-RAY_TLS ray_mem_stats_t ray_tl_stats;
 
-/* Stats tracking — always enabled (plain integer ops, negligible vs atomics) */
+/* Stats tracking — always enabled (plain integer ops, negligible vs atomics).
+ * All stats go through the per-heap struct (ray_tl_heap->stats) so that
+ * heap merges keep bytes_allocated accurate.
+ *
+ * bytes_allocated is only modified by the owning thread (alloc/local-free)
+ * or by the main thread during GC flush (return_to_owner=true, workers idle).
+ * No atomics needed. */
 #define RAY_STAT(x) (x)
 
 /* --------------------------------------------------------------------------
@@ -288,44 +293,53 @@ static void heap_flush_slabs(ray_heap_t* h) {
  * -------------------------------------------------------------------------- */
 
 static void heap_flush_foreign(ray_heap_t* h, bool return_to_owner) {
+    /* When workers are active (return_to_owner=false), skip entirely.
+     * Foreign blocks stay queued until the proper GC flush after workers
+     * finish. Absorbing foreign blocks locally would let them be re-
+     * allocated under a different heap while pool ownership stays with
+     * the original heap, corrupting bytes_allocated accounting. */
+    if (!return_to_owner) return;
+
     ray_t* blk = h->foreign;
     while (blk) {
         ray_t* next = blk->fl_next;
-        if (return_to_owner) {
-            ray_pool_hdr_t* phdr = ray_pool_of(blk);  /* GC path, not hot */
-            if (!phdr) { blk = next; continue; }
-            uint16_t owner_id = phdr->heap_id;
-            ray_heap_t* owner = ray_heap_registry[owner_id % RAY_HEAP_REGISTRY_SIZE];
-            if (owner && owner->id == owner_id && owner != h) {
-                int pidx = heap_find_pool(owner, blk);
-                uintptr_t pb;
-                uint8_t po;
-                if (pidx >= 0) {
-                    pb = (uintptr_t)owner->pools[pidx].base;
-                    po = owner->pools[pidx].pool_order;
-                } else {
-                    pb = (uintptr_t)phdr;
-                    po = phdr->pool_order;
-                }
-                heap_coalesce(owner, blk, pb, po);
-                blk = next;
-                continue;
+        ray_pool_hdr_t* phdr = ray_pool_of(blk);
+        if (!phdr) { blk = next; continue; }
+        uint16_t owner_id = phdr->heap_id;
+        ray_heap_t* owner = ray_heap_registry[owner_id % RAY_HEAP_REGISTRY_SIZE];
+        if (owner && owner->id == owner_id && owner != h) {
+            /* Return to owner and decrement owner's bytes_allocated.
+             * Safe: workers are idle (return_to_owner=true implies
+             * ray_parallel_flag==0). */
+            int pidx = heap_find_pool(owner, blk);
+            uintptr_t pb;
+            uint8_t po;
+            if (pidx >= 0) {
+                pb = (uintptr_t)owner->pools[pidx].base;
+                po = owner->pools[pidx].pool_order;
+            } else {
+                pb = (uintptr_t)phdr;
+                po = phdr->pool_order;
             }
-        }
-        /* Local coalesce */
-        int pidx = heap_find_pool(h, blk);
-        uintptr_t pb;
-        uint8_t po;
-        if (pidx >= 0) {
-            pb = (uintptr_t)h->pools[pidx].base;
-            po = h->pools[pidx].pool_order;
+            RAY_STAT(owner->stats.bytes_allocated -= BSIZEOF(blk->order));
+            heap_coalesce(owner, blk, pb, po);
         } else {
-            ray_pool_hdr_t* phdr = ray_pool_of(blk);
-            if (!phdr) { blk = next; continue; }
-            pb = (uintptr_t)phdr;
-            po = phdr->pool_order;
+            /* Owner gone (destroyed/unregistered) — coalesce locally.
+             * No stats adjustment: the owner's stats were destroyed
+             * with the heap, and h never charged the alloc. */
+            int pidx = heap_find_pool(h, blk);
+            uintptr_t pb;
+            uint8_t po;
+            if (pidx >= 0) {
+                pb = (uintptr_t)h->pools[pidx].base;
+                po = h->pools[pidx].pool_order;
+            } else {
+                if (!phdr) { blk = next; continue; }
+                pb = (uintptr_t)phdr;
+                po = phdr->pool_order;
+            }
+            heap_coalesce(h, blk, pb, po);
         }
-        heap_coalesce(h, blk, pb, po);
         blk = next;
     }
     h->foreign = NULL;
@@ -595,11 +609,11 @@ ray_t* ray_alloc(size_t data_size) {
             else
                 v->rc = 1;
 
-            RAY_STAT(ray_tl_stats.alloc_count++);
-            RAY_STAT(ray_tl_stats.slab_hits++);
-            RAY_STAT(ray_tl_stats.bytes_allocated += BSIZEOF(order));
-            RAY_STAT(ray_tl_stats.peak_bytes = ray_tl_stats.bytes_allocated > ray_tl_stats.peak_bytes
-                ? ray_tl_stats.bytes_allocated : ray_tl_stats.peak_bytes);
+            RAY_STAT(h->stats.alloc_count++);
+            RAY_STAT(h->stats.slab_hits++);
+            RAY_STAT(h->stats.bytes_allocated += BSIZEOF(order));
+            RAY_STAT(h->stats.peak_bytes = h->stats.bytes_allocated > h->stats.peak_bytes
+                ? h->stats.bytes_allocated : h->stats.peak_bytes);
             return v;
         }
     }
@@ -655,10 +669,10 @@ ray_t* ray_alloc(size_t data_size) {
     else
         blk->rc = 1;
 
-    RAY_STAT(ray_tl_stats.alloc_count++);
-    RAY_STAT(ray_tl_stats.bytes_allocated += BSIZEOF(order));
-    RAY_STAT(ray_tl_stats.peak_bytes = ray_tl_stats.bytes_allocated > ray_tl_stats.peak_bytes
-        ? ray_tl_stats.bytes_allocated : ray_tl_stats.peak_bytes);
+    RAY_STAT(h->stats.alloc_count++);
+    RAY_STAT(h->stats.bytes_allocated += BSIZEOF(order));
+    RAY_STAT(h->stats.peak_bytes = h->stats.bytes_allocated > h->stats.peak_bytes
+        ? h->stats.bytes_allocated : h->stats.peak_bytes);
 
     return blk;
 }
@@ -677,6 +691,8 @@ void ray_free(ray_t* v) {
 
     ray_release_owned_refs(v);
 
+    ray_heap_t* h = ray_tl_heap;
+
     /* File-mapped: munmap */
     if (v->mmod == 1) {
         if (v->type == RAY_TABLE || v->type == RAY_LIST) return;
@@ -690,14 +706,13 @@ void ray_free(ray_t* v) {
         } else {
             ray_vm_unmap_file(v, 4096);
         }
-        RAY_STAT(ray_tl_stats.free_count++);
+        if (h) RAY_STAT(h->stats.free_count++);
         return;
     }
 
     /* Legacy mmod==2 guard */
     if (v->mmod == 2) return;
 
-    ray_heap_t* h = ray_tl_heap;
     if (!h) return;
 
     uint8_t order = v->order;
@@ -724,28 +739,28 @@ void ray_free(ray_t* v) {
              * Must be atomic: buddy coalescing on another thread reads rc. */
             ray_atomic_store(&v->rc, 1);
             h->slabs[idx].stack[h->slabs[idx].count++] = v;
-            RAY_STAT(ray_tl_stats.free_count++);
-            RAY_STAT(ray_tl_stats.bytes_allocated -= block_size);
+            RAY_STAT(h->stats.free_count++);
+            RAY_STAT(h->stats.bytes_allocated -= block_size);
             return;
         }
     }
 
-    /* Foreign: different heap — enqueue to foreign list.
-     * Do NOT adjust bytes_allocated here: the allocation was charged to the
-     * owning thread's stats, not ours.  Stats are reconciled when the owning
-     * heap flushes foreign blocks via heap_flush_foreign(). */
+    /* Foreign: different heap — enqueue to foreign list for later
+     * return to the owner during GC (flush with return_to_owner=true).
+     * Do NOT adjust any heap's bytes_allocated here: the block stays
+     * counted on the owning heap until properly returned and coalesced. */
     if (!is_local) {
         v->fl_next = h->foreign;
         h->foreign = v;
-        RAY_STAT(ray_tl_stats.free_count++);
+        RAY_STAT(h->stats.free_count++);
         return;
     }
 
     /* Local block — coalesce with buddy */
     heap_coalesce(h, v, (uintptr_t)phdr, phdr->pool_order);
 
-    RAY_STAT(ray_tl_stats.free_count++);
-    RAY_STAT(ray_tl_stats.bytes_allocated -= block_size);
+    RAY_STAT(h->stats.free_count++);
+    RAY_STAT(h->stats.bytes_allocated -= block_size);
 }
 
 /* --------------------------------------------------------------------------
@@ -853,7 +868,10 @@ ray_t* ray_scratch_realloc(ray_t* v, size_t new_data_size) {
  * -------------------------------------------------------------------------- */
 
 void ray_mem_stats(ray_mem_stats_t* out) {
-    *out = ray_tl_stats;
+    if (ray_tl_heap)
+        *out = ray_tl_heap->stats;
+    else
+        memset(out, 0, sizeof(*out));
     int64_t sc = 0, sp = 0;
     ray_sys_get_stat(&sc, &sp);
     out->sys_current = (size_t)sc;
@@ -888,7 +906,6 @@ void ray_heap_init(void) {
         fl_init(&h->freelist[i]);
 
     ray_tl_heap = h;
-    memset(&ray_tl_stats, 0, sizeof(ray_tl_stats));
 }
 
 void ray_heap_destroy(void) {
@@ -914,7 +931,6 @@ void ray_heap_destroy(void) {
     size_t heap_sz = (sizeof(ray_heap_t) + 4095) & ~(size_t)4095;
     ray_vm_free(h, heap_sz);
     ray_tl_heap = NULL;
-    memset(&ray_tl_stats, 0, sizeof(ray_tl_stats));
 
     /* Release bitmap ID after all memory is freed */
     heap_id_release(saved_id);
@@ -1131,6 +1147,17 @@ void ray_heap_release_pages(void) {
 void ray_heap_merge(ray_heap_t* src) {
     ray_heap_t* dst = ray_tl_heap;
     if (!dst || !src) return;
+
+    /* Merge stats: dst inherits src's outstanding allocations so that
+     * future local frees of those blocks correctly decrement dst. */
+    dst->stats.alloc_count     += src->stats.alloc_count;
+    dst->stats.free_count      += src->stats.free_count;
+    dst->stats.bytes_allocated += src->stats.bytes_allocated;
+    dst->stats.slab_hits       += src->stats.slab_hits;
+    dst->stats.direct_count    += src->stats.direct_count;
+    dst->stats.direct_bytes    += src->stats.direct_bytes;
+    if (src->stats.peak_bytes > dst->stats.peak_bytes)
+        dst->stats.peak_bytes = src->stats.peak_bytes;
 
     /* Transfer slabs: fit into dst cache, coalesce overflow */
     for (int i = 0; i < RAY_SLAB_ORDERS; i++) {

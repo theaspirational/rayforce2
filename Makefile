@@ -10,7 +10,7 @@ VERSION       = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_PATCH)
 GIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE := $(shell date -u +%Y-%m-%d)
 
-WARNS   = -Wall -Wextra -Werror=return-type -Wno-unused-parameter
+WARNS   = -Wall -Wextra -Werror -Wstrict-prototypes -Wno-unused-parameter
 DEFS    = -DRAYFORCE_GIT_COMMIT=\"$(GIT_HASH)\" -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
 INCLUDES = -Iinclude -Isrc
 

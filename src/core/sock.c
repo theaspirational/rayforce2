@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-#ifndef _WIN32
+#ifndef RAY_OS_WINDOWS
   #define _GNU_SOURCE
 #endif
 
@@ -30,7 +30,7 @@
 #include <stdio.h>
 #include <errno.h>
 
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
   #define WIN32_LEAN_AND_MEAN
   #include <winsock2.h>
   #include <ws2tcpip.h>
@@ -108,7 +108,7 @@ ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms)
 
     /* Set send/recv timeout if requested */
     if (timeout_ms > 0) {
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
         DWORD tv = (DWORD)timeout_ms;
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
@@ -138,7 +138,7 @@ int64_t ray_sock_send(ray_sock_t s, const void* buf, size_t len)
     const uint8_t* p   = (const uint8_t*)buf;
     size_t         rem = len;
     while (rem > 0) {
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
         int n = send(s, (const char*)p, (int)rem, 0);
 #else
         ssize_t n = send(s, p, rem, MSG_NOSIGNAL);
@@ -162,7 +162,7 @@ int64_t ray_sock_send(ray_sock_t s, const void* buf, size_t len)
 int64_t ray_sock_recv(ray_sock_t s, void* buf, size_t len)
 {
     for (;;) {
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
         int n = recv(s, (char*)buf, (int)len, 0);
 #else
         ssize_t n = recv(s, buf, len, 0);
@@ -178,7 +178,7 @@ int64_t ray_sock_recv(ray_sock_t s, void* buf, size_t len)
 void ray_sock_close(ray_sock_t s)
 {
     if (s == RAY_INVALID_SOCK) return;
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
     closesocket(s);
 #else
     close(s);
@@ -187,7 +187,7 @@ void ray_sock_close(ray_sock_t s)
 
 ray_err_t ray_sock_set_nonblocking(ray_sock_t s)
 {
-#ifdef _WIN32
+#ifdef RAY_OS_WINDOWS
     u_long mode = 1;
     if (ioctlsocket(s, FIONBIO, &mode) != 0)
         return RAY_ERR_IO;

@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 
 /* Helper: compare char atom vs string atom.
  * Returns: -1 if no char/string pair, else memcmp-like result via *out. */
@@ -53,7 +53,7 @@ ray_t* ray_gt_fn(ray_t* a, ray_t* b) {
     }
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot compare %s and %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
     int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
     if (na && nb) return make_bool(0);       /* null == null → not > */
     if (na) return make_bool(0);             /* null > X → false */
@@ -72,7 +72,7 @@ ray_t* ray_lt_fn(ray_t* a, ray_t* b) {
     }
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot compare %s and %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
     int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
     if (na && nb) return make_bool(0);       /* null == null → not < */
     if (na) return make_bool(1);             /* null < X → true */
@@ -92,7 +92,7 @@ ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
     }
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot compare %s and %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
     int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
     if (na && nb) return make_bool(1);       /* null == null → >= true */
     if (na) return make_bool(0);             /* null >= X → false */
@@ -112,7 +112,7 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
     }
     if (!is_numeric(a) || !is_numeric(b))
         return ray_error("type", "cannot compare %s and %s",
-                         ray_type_name(abs(a->type)), ray_type_name(abs(b->type)));
+                         ray_type_name(a->type), ray_type_name(b->type));
     int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
     if (na && nb) return make_bool(1);       /* null == null → <= true */
     if (na) return make_bool(1);             /* null <= X → true */
@@ -167,81 +167,51 @@ ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
     return make_bool(as_i64(a) != as_i64(b) ? 1 : 0);
 }
 
+/* Bool vector element-wise helpers to reduce duplication in and/or/not. */
+#define BOOL_VEC_BINOP(a, b, op) do {                       \
+    int64_t n = a->len < b->len ? a->len : b->len;        \
+    ray_t* r = ray_vec_new(RAY_BOOL, n);                   \
+    if (RAY_IS_ERR(r)) return r;                           \
+    bool* da = (bool*)ray_data(a);                         \
+    bool* db = (bool*)ray_data(b);                         \
+    bool* dr = (bool*)ray_data(r);                         \
+    for (int64_t i = 0; i < n; i++) dr[i] = da[i] op db[i]; \
+    r->len = n;                                            \
+    return r;                                              \
+} while(0)
+
+#define BOOL_VEC_SCALAR_L(vec, sv, op) do {                 \
+    int64_t n = vec->len;                                  \
+    ray_t* r = ray_vec_new(RAY_BOOL, n);                   \
+    if (RAY_IS_ERR(r)) return r;                           \
+    bool* dv = (bool*)ray_data(vec);                       \
+    bool* dr = (bool*)ray_data(r);                         \
+    for (int64_t i = 0; i < n; i++) dr[i] = dv[i] op sv;  \
+    r->len = n;                                            \
+    return r;                                              \
+} while(0)
+
 ray_t* ray_and_fn(ray_t* a, ray_t* b) {
     /* Element-wise for bool vectors */
-    if (ray_is_vec(a) && a->type == RAY_BOOL && ray_is_vec(b) && b->type == RAY_BOOL) {
-        int64_t n = a->len < b->len ? a->len : b->len;
-        ray_t* r = ray_vec_new(RAY_BOOL, n);
-        if (RAY_IS_ERR(r)) return r;
-        bool* da = (bool*)ray_data(a);
-        bool* db = (bool*)ray_data(b);
-        bool* dr = (bool*)ray_data(r);
-        for (int64_t i = 0; i < n; i++) dr[i] = da[i] && db[i];
-        r->len = n;
-        return r;
-    }
+    if (ray_is_vec(a) && a->type == RAY_BOOL && ray_is_vec(b) && b->type == RAY_BOOL)
+        BOOL_VEC_BINOP(a, b, &&);
     /* Scalar broadcast: vec and scalar */
-    if (ray_is_vec(a) && a->type == RAY_BOOL && ray_is_atom(b)) {
-        int64_t n = a->len;
-        bool bv = is_truthy(b);
-        ray_t* r = ray_vec_new(RAY_BOOL, n);
-        if (RAY_IS_ERR(r)) return r;
-        bool* da = (bool*)ray_data(a);
-        bool* dr = (bool*)ray_data(r);
-        for (int64_t i = 0; i < n; i++) dr[i] = da[i] && bv;
-        r->len = n;
-        return r;
-    }
-    if (ray_is_atom(a) && ray_is_vec(b) && b->type == RAY_BOOL) {
-        int64_t n = b->len;
-        bool av = is_truthy(a);
-        ray_t* r = ray_vec_new(RAY_BOOL, n);
-        if (RAY_IS_ERR(r)) return r;
-        bool* db = (bool*)ray_data(b);
-        bool* dr = (bool*)ray_data(r);
-        for (int64_t i = 0; i < n; i++) dr[i] = av && db[i];
-        r->len = n;
-        return r;
-    }
+    if (ray_is_vec(a) && a->type == RAY_BOOL && ray_is_atom(b))
+        BOOL_VEC_SCALAR_L(a, is_truthy(b), &&);
+    if (ray_is_atom(a) && ray_is_vec(b) && b->type == RAY_BOOL)
+        BOOL_VEC_SCALAR_L(b, is_truthy(a), &&);
     return make_bool((is_truthy(a) && is_truthy(b)) ? 1 : 0);
 }
 
 ray_t* ray_or_fn(ray_t* a, ray_t* b) {
     /* Element-wise for bool vectors */
-    if (ray_is_vec(a) && a->type == RAY_BOOL && ray_is_vec(b) && b->type == RAY_BOOL) {
-        int64_t n = a->len < b->len ? a->len : b->len;
-        ray_t* r = ray_vec_new(RAY_BOOL, n);
-        if (RAY_IS_ERR(r)) return r;
-        bool* da = (bool*)ray_data(a);
-        bool* db = (bool*)ray_data(b);
-        bool* dr = (bool*)ray_data(r);
-        for (int64_t i = 0; i < n; i++) dr[i] = da[i] || db[i];
-        r->len = n;
-        return r;
-    }
+    if (ray_is_vec(a) && a->type == RAY_BOOL && ray_is_vec(b) && b->type == RAY_BOOL)
+        BOOL_VEC_BINOP(a, b, ||);
     /* Scalar broadcast */
-    if (ray_is_vec(a) && a->type == RAY_BOOL && ray_is_atom(b)) {
-        int64_t n = a->len;
-        bool bv = is_truthy(b);
-        ray_t* r = ray_vec_new(RAY_BOOL, n);
-        if (RAY_IS_ERR(r)) return r;
-        bool* da = (bool*)ray_data(a);
-        bool* dr = (bool*)ray_data(r);
-        for (int64_t i = 0; i < n; i++) dr[i] = da[i] || bv;
-        r->len = n;
-        return r;
-    }
-    if (ray_is_atom(a) && ray_is_vec(b) && b->type == RAY_BOOL) {
-        int64_t n = b->len;
-        bool av = is_truthy(a);
-        ray_t* r = ray_vec_new(RAY_BOOL, n);
-        if (RAY_IS_ERR(r)) return r;
-        bool* db = (bool*)ray_data(b);
-        bool* dr = (bool*)ray_data(r);
-        for (int64_t i = 0; i < n; i++) dr[i] = av || db[i];
-        r->len = n;
-        return r;
-    }
+    if (ray_is_vec(a) && a->type == RAY_BOOL && ray_is_atom(b))
+        BOOL_VEC_SCALAR_L(a, is_truthy(b), ||);
+    if (ray_is_atom(a) && ray_is_vec(b) && b->type == RAY_BOOL)
+        BOOL_VEC_SCALAR_L(b, is_truthy(a), ||);
     return make_bool((is_truthy(a) || is_truthy(b)) ? 1 : 0);
 }
 
@@ -253,8 +223,8 @@ ray_t* ray_not_fn(ray_t* x) {
         ray_t* r = ray_vec_new(RAY_BOOL, n);
         if (RAY_IS_ERR(r)) return r;
         bool* src = (bool*)ray_data(x);
-        bool* dst = (bool*)ray_data(r);
-        for (int64_t i = 0; i < n; i++) dst[i] = !src[i];
+        bool* dr = (bool*)ray_data(r);
+        for (int64_t i = 0; i < n; i++) dr[i] = !src[i];
         r->len = n;
         return r;
     }

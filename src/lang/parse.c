@@ -131,31 +131,9 @@ static void skip_ws_and_comments(ray_parser_t *p) {
 /* Forward declarations */
 static ray_t* parse_expr(ray_parser_t *p);
 
-/* ── Date/time/timestamp helpers for parser ── */
+/* ── Date/time/timestamp helpers ── */
 
-static const uint32_t PARSE_MONTHDAYS[2][13] = {
-    {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365},
-    {0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366},
-};
-
-static int parse_leap_year(int year) {
-    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-}
-
-static int32_t parse_years_by_days(int yy) {
-    return (int32_t)((int64_t)yy * 365 + yy / 4 - yy / 100 + yy / 400);
-}
-
-#define PARSE_DATE_EPOCH 2000
-
-static int32_t parse_ymd_to_days(int year, int month, int day) {
-    int yy = (year > 0) ? year - 1 : 0;
-    int32_t ydays = parse_years_by_days(yy);
-    int leap = parse_leap_year(year);
-    int mm = (month > 0) ? month - 1 : 0;
-    int32_t mdays = (int32_t)PARSE_MONTHDAYS[leap][mm];
-    return ydays - parse_years_by_days(PARSE_DATE_EPOCH - 1) + mdays + day - 1;
-}
+#include "lang/cal.h"
 
 #define PARSE_NSECS_IN_DAY ((int64_t)24 * 60 * 60 * 1000000000LL)
 
@@ -258,7 +236,7 @@ static ray_t* parse_number(ray_parser_t *p) {
         int day = (p->pos[0] - '0') * 10 + (p->pos[1] - '0');
         p->pos += 2;
 
-        int32_t days = parse_ymd_to_days(year, month, day);
+        int32_t days = ymd_to_date(year, month, day);
 
         /* Check for timestamp separator 'D' */
         if (*p->pos == 'D') {

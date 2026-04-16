@@ -1,12 +1,31 @@
 /*
  *   Copyright (c) 2025-2026 Anton Kundenko <singaraiona@gmail.com>
  *   All rights reserved.
- *
- *   I/O builtins, type casting, and misc builtins extracted from eval.c.
+
+ *   Permission is hereby granted, free of charge, to any person obtaining a copy
+ *   of this software and associated documentation files (the "Software"), to deal
+ *   in the Software without restriction, including without limitation the rights
+ *   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *   copies of the Software, and to permit persons to whom the Software is
+ *   furnished to do so, subject to the following conditions:
+
+ *   The above copyright notice and this permission notice shall be included in all
+ *   copies or substantial portions of the Software.
+
+ *   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *   SOFTWARE.
+ */
+
+/**   I/O builtins, type casting, and misc builtins extracted from eval.c.
  */
 
 #include "lang/eval.h"
-#include "lang/eval_internal.h"
+#include "lang/internal.h"
 #include "lang/env.h"
 #include "vec/vec.h"
 #include "lang/nfo.h"
@@ -25,7 +44,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
-#if !defined(_WIN32)
+#if !defined(RAY_OS_WINDOWS)
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -36,6 +55,22 @@
  * I/O builtins: println, show, format, read-csv, write-csv, as, type
  * ══════════════════════════════════════════ */
 
+/* Helper: return the null literal string for a typed null atom (e.g. "0Ni" for I32). */
+static const char* null_literal_str(int8_t type) {
+    switch (-type) {
+        case RAY_I16:       return "0Nh";
+        case RAY_I32:       return "0Ni";
+        case RAY_I64:       return "0Nl";
+        case RAY_F32:       return "0Ne";
+        case RAY_F64:       return "0Nf";
+        case RAY_DATE:      return "0Nd";
+        case RAY_TIME:      return "0Nt";
+        case RAY_TIMESTAMP: return "0Np";
+        case RAY_SYM:       return "0Ns";
+        default:            return "null";
+    }
+}
+
 /* Helper: print a ray_t value to a file handle */
 void ray_lang_print(FILE* fp, ray_t* val) {
     if (!val || RAY_IS_ERR(val)) { fprintf(fp, "error"); return; }
@@ -45,20 +80,7 @@ void ray_lang_print(FILE* fp, ray_t* val) {
         val = ray_lazy_materialize(val);
     if (!val || RAY_IS_ERR(val)) { fprintf(fp, "error"); return; }
     if (RAY_ATOM_IS_NULL(val)) {
-        const char* s;
-        switch (-val->type) {
-            case RAY_I16:       s = "0Nh"; break;
-            case RAY_I32:       s = "0Ni"; break;
-            case RAY_I64:       s = "0Nl"; break;
-            case RAY_F32:       s = "0Ne"; break;
-            case RAY_F64:       s = "0Nf"; break;
-            case RAY_DATE:      s = "0Nd"; break;
-            case RAY_TIME:      s = "0Nt"; break;
-            case RAY_TIMESTAMP: s = "0Np"; break;
-            case RAY_SYM:       s = "0Ns"; break;
-            default:            s = "null"; break;
-        }
-        fprintf(fp, "%s", s);
+        fprintf(fp, "%s", null_literal_str(val->type));
         return;
     }
     switch (val->type) {
@@ -134,20 +156,7 @@ static char* fmt_interpolate(const char* fmt, size_t flen, ray_t** args, int64_t
             if (!a || RAY_IS_ERR(a)) {
                 tlen = snprintf(tmp, sizeof(tmp), "error");
             } else if (RAY_ATOM_IS_NULL(a)) {
-                const char* s;
-                switch (-a->type) {
-                    case RAY_I16:       s = "0Nh"; break;
-                    case RAY_I32:       s = "0Ni"; break;
-                    case RAY_I64:       s = "0Nl"; break;
-                    case RAY_F32:       s = "0Ne"; break;
-                    case RAY_F64:       s = "0Nf"; break;
-                    case RAY_DATE:      s = "0Nd"; break;
-                    case RAY_TIME:      s = "0Nt"; break;
-                    case RAY_TIMESTAMP: s = "0Np"; break;
-                    case RAY_SYM:       s = "0Ns"; break;
-                    default:            s = "null"; break;
-                }
-                tlen = snprintf(tmp, sizeof(tmp), "%s", s);
+                tlen = snprintf(tmp, sizeof(tmp), "%s", null_literal_str(a->type));
             } else if (a->type == -RAY_I64) {
                 tlen = snprintf(tmp, sizeof(tmp), "%ld", (long)a->i64);
             } else if (a->type == -RAY_F64) {
@@ -490,6 +499,53 @@ static int cast_match(const char* tname, size_t tlen, const char* target) {
     return 1;
 }
 
+/* Helper: copy null bitmap from source vec/list to destination vec. */
+static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
+    if (ray_is_vec(val)) {
+        if (ray_vec_copy_nulls(vec, val) != RAY_OK)
+            { ray_release(vec); return ray_error("oom", NULL); }
+    } else if (val->type == RAY_LIST) {
+        ray_t** le = (ray_t**)ray_data(val);
+        for (int64_t j = 0; j < vec->len; j++)
+            if (le[j] && RAY_ATOM_IS_NULL(le[j]))
+                ray_vec_set_null(vec, j, true);
+    }
+    return vec;
+}
+
+/* Helper: cast a vector/list to a numeric/temporal/bool type.
+ * Handles I64, I32, I16, U8, F64, BOOL, DATE, TIME, TIMESTAMP, SYM. */
+static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
+    int64_t n2 = val->len;
+    ray_t* vec = ray_vec_new(out_type, n2);
+    if (RAY_IS_ERR(vec)) return vec;
+    vec->len = n2;
+    void* out = ray_data(vec);
+    for (int64_t i = 0; i < n2; i++) {
+        int alloc = 0;
+        ray_t* elem = collection_elem(val, i, &alloc);
+        if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
+        ray_t* cast = ray_cast_fn(type_sym, elem);
+        if (alloc) ray_release(elem);
+        if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
+        switch (out_type) {
+        case RAY_I64: case RAY_TIMESTAMP: case RAY_SYM:
+            ((int64_t*)out)[i] = cast->i64; break;
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+            ((int32_t*)out)[i] = cast->i32; break;
+        case RAY_I16:  ((int16_t*)out)[i] = cast->i16; break;
+        case RAY_U8:   ((uint8_t*)out)[i] = cast->u8;  break;
+        case RAY_F64:  ((double*)out)[i]  = cast->f64;  break;
+        case RAY_BOOL: ((bool*)out)[i]    = cast->b8;   break;
+        default: break;
+        }
+        ray_release(cast);
+    }
+    ray_t* result = cast_vec_copy_nulls(vec, val);
+    if (RAY_IS_ERR(result)) return result;
+    return vec;
+}
+
 ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
     if (type_sym->type != -RAY_SYM) return ray_error("type", NULL);
     /* Null propagation: casting a typed null atom produces a typed null of target type */
@@ -540,33 +596,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return make_i64(v);
         }
         /* Vector/list cast */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_I64, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            int64_t* out = (int64_t*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->i64;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_I64);
         return ray_error("type", NULL);
     }
     /* Cast to I32 / i32 */
@@ -587,33 +618,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_i32((int32_t)v);
         }
         /* Vector cast */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_I32, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            int32_t* out = (int32_t*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->i32;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_I32);
         return ray_error("type", NULL);
     }
     /* Cast to I16 / i16 */
@@ -634,33 +640,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_i16((int16_t)v);
         }
         /* Vector cast */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_I16, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            int16_t* out = (int16_t*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->i16;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_I16);
         return ray_error("type", NULL);
     }
     /* Cast to F64 / f64 */
@@ -683,33 +664,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return make_f64(v);
         }
         /* Vector cast */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_F64, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            double* out = (double*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->f64;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_F64);
         return ray_error("type", NULL);
     }
     /* Cast to B8/BOOL/b8 */
@@ -726,33 +682,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_TIMESTAMP) return make_bool(val->i64 != 0 ? 1 : 0);
         if (val->type == -RAY_STR) return make_bool(ray_str_len(val) > 0 ? 1 : 0);
         /* Vector cast: b8/B8 */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_BOOL, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            bool* out = (bool*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->b8;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_BOOL);
         return ray_error("type", NULL);
     }
     /* Cast to STR/str */
@@ -808,15 +739,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 ray_release(cast);
                 if (RAY_IS_ERR(vec)) return vec;
             }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
+            ray_t* result = cast_vec_copy_nulls(vec, val);
+            if (RAY_IS_ERR(result)) return result;
             return vec;
         }
         return ray_error("type", NULL);
@@ -862,33 +786,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             if (formatted) ray_release(formatted);
         }
         /* Vector cast: SYMBOL vec from other vecs */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_SYM, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            int64_t* out = (int64_t*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->i64;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_SYM);
         return ray_error("type", NULL);
     }
     /* Cast to DATE/date */
@@ -921,33 +820,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_date(days);
         }
         /* Vector cast */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_DATE, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            int32_t* out = (int32_t*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->i32;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_DATE);
         return ray_error("type", NULL);
     }
     /* Cast to TIME/time */
@@ -980,33 +854,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_time((int64_t)ms);
         }
         /* Vector cast */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_TIME, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            int32_t* out = (int32_t*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->i32;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_TIME);
         return ray_error("type", NULL);
     }
     /* Cast to TIMESTAMP/timestamp */
@@ -1094,33 +943,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_timestamp(ns);
         }
         /* Vector cast */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_TIMESTAMP, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            int64_t* out = (int64_t*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->i64;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_TIMESTAMP);
         return ray_error("type", NULL);
     }
     /* Cast to GUID/guid */
@@ -1162,15 +986,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
                 else memcpy(data + i * 16, ray_data(cast), 16);
                 ray_release(cast);
             }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
+            ray_t* result = cast_vec_copy_nulls(vec, val);
+            if (RAY_IS_ERR(result)) return result;
             return vec;
         }
         return ray_error("type", NULL);
@@ -1191,33 +1008,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_u8((uint8_t)v);
         }
         /* Vector cast */
-        if (ray_is_vec(val) || val->type == RAY_LIST) {
-            int64_t n2 = val->len;
-            ray_t* vec = ray_vec_new(RAY_U8, n2);
-            if (RAY_IS_ERR(vec)) return vec;
-            vec->len = n2;
-            uint8_t* out = (uint8_t*)ray_data(vec);
-            for (int64_t i = 0; i < n2; i++) {
-                int alloc = 0;
-                ray_t* elem = collection_elem(val, i, &alloc);
-                if (RAY_IS_ERR(elem)) { ray_release(vec); return elem; }
-                ray_t* cast = ray_cast_fn(type_sym, elem);
-                if (alloc) ray_release(elem);
-                if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                out[i] = cast->u8;
-                ray_release(cast);
-            }
-            if (ray_is_vec(val)) {
-                if (ray_vec_copy_nulls(vec, val) != RAY_OK)
-                    { ray_release(vec); return ray_error("oom", NULL); }
-            } else if (val->type == RAY_LIST) {
-                ray_t** le = (ray_t**)ray_data(val);
-                for (int64_t j = 0; j < vec->len; j++)
-                    if (le[j] && RAY_ATOM_IS_NULL(le[j]))
-                        ray_vec_set_null(vec, j, true);
-            }
-            return vec;
-        }
+        if (ray_is_vec(val) || val->type == RAY_LIST)
+            return cast_vec_numeric(type_sym, val, RAY_U8);
         return ray_error("type", NULL);
     }
     /* Cast to DICT */
@@ -1275,16 +1067,15 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
 }
 
 /* (type val) — return the type code of a value */
-/* type_sym_name moved to eval_internal.h */
+/* ray_type_name moved to internal.h */
 
 ray_t* ray_type_fn(ray_t* val) {
     if (!val || RAY_IS_NULL(val)) return ray_sym(ray_sym_intern("null", 4));
-    /* Dict is a LIST with ATTR_DICT flag */
     if (val->type == RAY_LIST && (val->attrs & RAY_ATTR_DICT)) {
         int64_t id = ray_sym_intern("DICT", 4);
         return ray_sym(id);
     }
-    const char* name = type_sym_name(val->type);
+    const char* name = ray_type_name(val->type);
     int64_t id = ray_sym_intern(name, strlen(name));
     return ray_sym(id);
 }
@@ -1319,7 +1110,7 @@ ray_t* ray_load_file_fn(ray_t* path_obj) {
     if (!path) return ray_error("domain", NULL);
     size_t path_len = ray_str_len(path_obj);
 
-#if defined(_WIN32)
+#if defined(RAY_OS_WINDOWS)
     /* Windows: fall back to fread */
     FILE* fp = fopen(path, "r");
     if (!fp) return ray_error("io", NULL);

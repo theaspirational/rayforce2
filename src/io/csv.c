@@ -56,7 +56,7 @@
 #include <stdlib.h>  /* strtoll fallback for fast_i64 overflow */
 #include <sys/stat.h>
 #include <fcntl.h>
-#ifndef _WIN32
+#ifndef RAY_OS_WINDOWS
 #include <unistd.h>
 #endif
 #include <sys/mman.h>
