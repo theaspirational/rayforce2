@@ -1279,7 +1279,7 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
     /* ---- 8b. Pre-allocate nullmaps for all columns ---- */
     uint8_t* col_nullmaps[CSV_MAX_COLS];
     bool col_had_null[CSV_MAX_COLS];
-    memset(col_had_null, 0, (size_t)ncols * sizeof(bool));
+    if (ncols > 0) memset(col_had_null, 0, (size_t)ncols * sizeof(bool));
 
     for (int c = 0; c < ncols; c++) {
         ray_t* vec = col_vecs[c];

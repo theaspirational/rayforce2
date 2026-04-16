@@ -315,9 +315,6 @@ static void cexpr_env_pop(ray_graph_t* g, int n) {
  * call (which may grow g->nodes via graph_alloc_node and invalidate
  * all previously-returned pointers).  The ID is stable; only the
  * backing address may change. */
-static inline ray_op_t* cexpr_node_by_id(ray_graph_t* g, uint32_t id) {
-    return &g->nodes[id];
-}
 
 /* Compile a Rayfall AST expression into a DAG node */
 static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
