@@ -1341,18 +1341,20 @@ join_gather:;
         }
     }
 
-    /* Propagate RAY_STR string pools from source to gathered columns */
+    /* Propagate RAY_STR string pools and null bitmaps from source columns */
     {
         int64_t si = 0;
         for (int64_t c = 0; c < left_ncols && si < l_out_count; c++) {
             ray_t* col = ray_table_get_col_idx(left_table, c);
             if (!col) continue;
             col_propagate_str_pool(l_out_cols[si], col);
+            col_propagate_nulls_gather(l_out_cols[si], col, l_idx, pair_count);
             si++;
         }
     }
     for (int64_t i = 0; i < r_out_count; i++) {
         col_propagate_str_pool(r_out_cols[i], r_src_cols[i]);
+        col_propagate_nulls_gather(r_out_cols[i], r_src_cols[i], r_idx, pair_count);
     }
 
     /* Add columns to result */

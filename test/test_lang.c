@@ -3175,6 +3175,47 @@ static MunitResult test_datalog_query_inline_rules(const void* params, void* fix
  * ═══════════════════════════════════════════════════════════════ */
 #include "test_lang_rf.inc"
 
+/* Null bitmap propagation regression tests.
+ * Verify that nulls survive through insert, left-join, select (head/tail/filter),
+ * and group-by operations. */
+static MunitResult test_rf_null_propagate(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* INSERT preserves nulls in existing columns */
+    ray_eval_str("(set __np_t (table [x] (list [1 0Nl 3])))");
+    ray_eval_str("(set __np_t2 (insert __np_t (list 4)))");
+    ASSERT_EQ("(at (at __np_t2 'x) 0)", "1");
+    ASSERT_EQ("(at (at __np_t2 'x) 1)", "0Nl");
+    ASSERT_EQ("(at (at __np_t2 'x) 2)", "3");
+    ASSERT_EQ("(at (at __np_t2 'x) 3)", "4");
+
+    /* LEFT-JOIN produces nulls for unmatched right rows */
+    ray_eval_str("(set __np_l (table [k v] (list [1 2 3] [10 20 30])))");
+    ray_eval_str("(set __np_r (table [k w] (list [2] [200])))");
+    ray_eval_str("(set __np_j (left-join [k] __np_l __np_r))");
+    ASSERT_EQ("(at (at __np_j 'w) 0)", "0Nl");
+    ASSERT_EQ("(at (at __np_j 'w) 1)", "200");
+    ASSERT_EQ("(at (at __np_j 'w) 2)", "0Nl");
+
+    /* LEFT-JOIN preserves source nulls from left table */
+    ray_eval_str("(set __np_l2 (table [k v] (list [1 2] [10 0Nl])))");
+    ray_eval_str("(set __np_r2 (table [k w] (list [1 2] [100 200])))");
+    ray_eval_str("(set __np_j2 (left-join [k] __np_l2 __np_r2))");
+    ASSERT_EQ("(at (at __np_j2 'v) 1)", "0Nl");
+    ASSERT_EQ("(at (at __np_j2 'w) 0)", "100");
+
+    /* SELECT with filter preserves nulls (WHERE) */
+    ray_eval_str("(set __np_ft (table [a b] (list [1 2 3] [10 0Nl 30])))");
+    ASSERT_EQ(
+        "(at (at (select {from: __np_ft where: (> a 1)}) 'b) 0)",
+        "0Nl");
+    ASSERT_EQ(
+        "(at (at (select {from: __np_ft where: (> a 1)}) 'b) 1)",
+        "30");
+
+    return MUNIT_OK;
+}
+
 static MunitTest lang_tests[] = {
     { "/fn_unary",   test_fn_unary,   lang_setup, lang_teardown, 0, NULL },
     { "/fn_binary",  test_fn_binary,  lang_setup, lang_teardown, 0, NULL },
@@ -3356,6 +3397,7 @@ static MunitTest lang_tests[] = {
     { "/rf/list",                  test_rf_list,          lang_setup, lang_teardown, 0, NULL },
     { "/rf/alter",                 test_rf_alter,         lang_setup, lang_teardown, 0, NULL },
     { "/rf/null",                  test_rf_null,          lang_setup, lang_teardown, 0, NULL },
+    { "/rf/null_propagate",        test_rf_null_propagate, lang_setup, lang_teardown, 0, NULL },
     { "/rf/set_ops",               test_rf_set_ops,       lang_setup, lang_teardown, 0, NULL },
     { "/rf/cast",                  test_rf_cast,          lang_setup, lang_teardown, 0, NULL },
     { "/rf/lambda",                test_rf_lambda,        lang_setup, lang_teardown, 0, NULL },

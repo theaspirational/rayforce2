@@ -61,6 +61,9 @@ static void parted_gather_col(ray_t* parted_col, const int64_t* match_idx,
         int64_t local_row = row - seg_start;
         char* src = (char*)ray_data(segs[seg]);
         memcpy(dst + i * esz, src + local_row * esz, esz);
+        if ((segs[seg]->attrs & RAY_ATTR_HAS_NULLS) &&
+            ray_vec_is_null(segs[seg], local_row))
+            ray_vec_set_null(dst_col, i, true);
     }
 }
 
@@ -91,6 +94,8 @@ static ray_t* exec_filter_vec(ray_t* input, ray_t* pred, int64_t pass_count) {
     }
 
     col_propagate_str_pool(result, input);
+    col_propagate_nulls_filter(result, input,
+                               (const uint8_t*)ray_data(pred), input->len);
     return result;
 }
 
@@ -149,9 +154,12 @@ static ray_t* exec_filter_parted_vec(ray_t* parted_col, ray_t* pred,
         }
         char* src = (char*)ray_data(segs[s]);
         char* dst = (char*)ray_data(result);
+        bool seg_has_nulls = (segs[s]->attrs & RAY_ATTR_HAS_NULLS) != 0;
         for (int64_t i = 0; i < seg_len; i++) {
             if (pred_data[pred_off + i]) {
                 memcpy(dst + out_idx * esz, src + i * esz, esz);
+                if (seg_has_nulls && ray_vec_is_null(segs[s], i))
+                    ray_vec_set_null(result, out_idx, true);
                 out_idx++;
             }
         }
@@ -663,8 +671,10 @@ ray_t* sel_compact(ray_graph_t* g, ray_t* tbl, ray_t* sel) {
                 ray_t** sp = (ray_t**)ray_data(scol);
                 col_propagate_str_pool_parted(new_cols[c], sp, scol->len);
             }
+            /* Parted null propagation handled in parted_gather_col / parted_gather_str_rows */
         } else if (scol) {
             col_propagate_str_pool(new_cols[c], scol);
+            col_propagate_nulls_gather(new_cols[c], scol, match_idx, pass_count);
         }
         out = ray_table_add_col(out, col_names[c], new_cols[c]);
         ray_release(new_cols[c]);

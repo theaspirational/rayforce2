@@ -414,6 +414,78 @@ static MunitResult test_csv_explicit_str_schema(const void* params, void* data) 
     return MUNIT_OK;
 }
 
+/* Round-trip for strings containing commas, quotes, and newlines.
+ * Regression test: escaped fields (with "") were stored as pointers into
+ * a stack-local esc_buf that died before csv_fill_str_cols could read them,
+ * causing use-after-return. */
+static MunitResult test_csv_escaped_str_roundtrip(const void* params, void* data) {
+    (void)params; (void)data;
+    ray_heap_init();
+    (void)ray_sym_init();
+
+    /* Write a CSV with fields that require quoting/escaping */
+    FILE* f = fopen(TMP_CSV, "w");
+    fprintf(f, "s\n"
+               "\"he,llo\"\n"
+               "\"wo\"\"rld\"\n"
+               "plain\n"
+               "\"line1\nline2\"\n");
+    fclose(f);
+
+    /* Read back as RAY_STR */
+    int8_t schema[1] = { RAY_STR };
+    ray_t* loaded = ray_read_csv_opts(TMP_CSV, 0, true, schema, 1);
+    munit_assert_false(RAY_IS_ERR(loaded));
+    munit_assert_int(ray_table_nrows(loaded), ==, 4);
+
+    ray_t* col = ray_table_get_col_idx(loaded, 0);
+    munit_assert_int(col->type, ==, RAY_STR);
+
+    size_t l;
+    const char* s;
+
+    s = ray_str_vec_get(col, 0, &l);
+    munit_assert_int((int)l, ==, 6);
+    munit_assert_memory_equal(6, s, "he,llo");
+
+    s = ray_str_vec_get(col, 1, &l);
+    munit_assert_int((int)l, ==, 6);
+    munit_assert_memory_equal(6, s, "wo\"rld");
+
+    s = ray_str_vec_get(col, 2, &l);
+    munit_assert_int((int)l, ==, 5);
+    munit_assert_memory_equal(5, s, "plain");
+
+    s = ray_str_vec_get(col, 3, &l);
+    munit_assert_int((int)l, ==, 11);
+    munit_assert_memory_equal(11, s, "line1\nline2");
+
+    /* Write it back out and verify byte-identical CSV */
+    const char* tmp2 = "/tmp/rayforce_test_esc2.csv";
+    ray_err_t err = ray_write_csv(loaded, tmp2);
+    munit_assert_int(err, ==, RAY_OK);
+
+    /* Re-read and compare */
+    ray_t* loaded2 = ray_read_csv_opts(tmp2, 0, true, schema, 1);
+    munit_assert_false(RAY_IS_ERR(loaded2));
+    ray_t* col2 = ray_table_get_col_idx(loaded2, 0);
+    for (int64_t r = 0; r < 4; r++) {
+        size_t l1, l2;
+        const char* s1 = ray_str_vec_get(col, r, &l1);
+        const char* s2 = ray_str_vec_get(col2, r, &l2);
+        munit_assert_int((int)l1, ==, (int)l2);
+        munit_assert_memory_equal(l1, s1, s2);
+    }
+
+    ray_release(loaded2);
+    unlink(tmp2);
+    ray_release(loaded);
+    unlink(TMP_CSV);
+    ray_sym_destroy();
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
 static MunitTest csv_tests[] = {
     { "/roundtrip_i64",  test_csv_roundtrip_i64,  NULL, NULL, 0, NULL },
     { "/roundtrip_f64",  test_csv_roundtrip_f64,  NULL, NULL, 0, NULL },
@@ -427,6 +499,7 @@ static MunitTest csv_tests[] = {
     { "/no_nulls_no_nullmap",   test_csv_no_nulls_no_nullmap,  NULL, NULL, 0, NULL },
     { "/null_mixed_columns",    test_csv_null_mixed_columns,    NULL, NULL, 0, NULL },
     { "/explicit_str_schema",   test_csv_explicit_str_schema,   NULL, NULL, 0, NULL },
+    { "/escaped_str_roundtrip", test_csv_escaped_str_roundtrip, NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL }
 };
 

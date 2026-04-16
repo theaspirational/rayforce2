@@ -1225,9 +1225,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                             uint8_t esz = ray_sym_elem_size(sct, dst->attrs);
                             const char* sb = (const char*)ray_data(sc);
                             char* db = (char*)ray_data(dst);
-                            for (int64_t gi = 0; gi < ngroups; gi++)
+                            bool src_has_nulls = (sc->attrs & RAY_ATTR_HAS_NULLS) != 0;
+                            for (int64_t gi = 0; gi < ngroups; gi++) {
                                 memcpy(db + (size_t)gi * esz,
                                        sb + (size_t)fi[gi] * esz, esz);
+                                if (src_has_nulls && ray_vec_is_null(sc, fi[gi]))
+                                    ray_vec_set_null(dst, gi, true);
+                            }
                         }
                     } else {
                         dst = ray_vec_new(sct, ngroups);
@@ -1236,9 +1240,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                             uint8_t esz = ray_sym_elem_size(sct, sc->attrs);
                             const char* sb = (const char*)ray_data(sc);
                             char* db = (char*)ray_data(dst);
-                            for (int64_t gi = 0; gi < ngroups; gi++)
+                            bool src_has_nulls = (sc->attrs & RAY_ATTR_HAS_NULLS) != 0;
+                            for (int64_t gi = 0; gi < ngroups; gi++) {
                                 memcpy(db + (size_t)gi * esz,
                                        sb + (size_t)fi[gi] * esz, esz);
+                                if (src_has_nulls && ray_vec_is_null(sc, fi[gi]))
+                                    ray_vec_set_null(dst, gi, true);
+                            }
                         }
                     }
 
@@ -1507,10 +1515,17 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     ray_t* dst = NULL;
                     if (sc->type == RAY_STR) {
                         dst = ray_vec_new(RAY_STR, n_groups);
+                        bool src_has_nulls = (sc->attrs & RAY_ATTR_HAS_NULLS) != 0;
                         for (int64_t gi = 0; gi < n_groups && dst && !RAY_IS_ERR(dst); gi++) {
-                            size_t slen = 0;
-                            const char* sp = ray_str_vec_get(sc, fi[gi], &slen);
-                            dst = ray_str_vec_append(dst, sp ? sp : "", sp ? slen : 0);
+                            if (src_has_nulls && ray_vec_is_null(sc, fi[gi])) {
+                                dst = ray_str_vec_append(dst, "", 0);
+                                if (dst && !RAY_IS_ERR(dst))
+                                    ray_vec_set_null(dst, dst->len - 1, true);
+                            } else {
+                                size_t slen = 0;
+                                const char* sp = ray_str_vec_get(sc, fi[gi], &slen);
+                                dst = ray_str_vec_append(dst, sp ? sp : "", sp ? slen : 0);
+                            }
                         }
                     } else if (sc->type == RAY_LIST) {
                         dst = ray_alloc(n_groups * sizeof(ray_t*));
@@ -2114,8 +2129,12 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                                 new_col->len = nrows_r;
                                 char* src = (char*)ray_data(col);
                                 char* dst = (char*)ray_data(new_col);
-                                for (int64_t r = 0; r < nrows_r; r++)
+                                bool has_nulls = (col->attrs & RAY_ATTR_HAS_NULLS) != 0;
+                                for (int64_t r = 0; r < nrows_r; r++) {
                                     memcpy(dst + r * esz, src + (nrows_r - 1 - r) * esz, esz);
+                                    if (has_nulls && ray_vec_is_null(col, nrows_r - 1 - r))
+                                        ray_vec_set_null(new_col, r, true);
+                                }
                                 reordered = ray_table_add_col(reordered, cn, new_col);
                                 ray_release(new_col);
                                 if (RAY_IS_ERR(reordered)) { ok = 0; break; }
@@ -3324,11 +3343,18 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
         if (RAY_IS_ERR(new_col)) { ray_release(result); return new_col; }
 
         /* Copy existing data */
+        bool src_has_nulls = (orig_col->attrs & RAY_ATTR_HAS_NULLS) != 0;
         if (ct == RAY_STR) {
             for (int64_t r = 0; r < nrows; r++) {
-                size_t slen = 0;
-                const char* sp = ray_str_vec_get(orig_col, r, &slen);
-                new_col = ray_str_vec_append(new_col, sp ? sp : "", sp ? slen : 0);
+                if (src_has_nulls && ray_vec_is_null(orig_col, r)) {
+                    new_col = ray_str_vec_append(new_col, "", 0);
+                    if (!RAY_IS_ERR(new_col))
+                        ray_vec_set_null(new_col, new_col->len - 1, true);
+                } else {
+                    size_t slen = 0;
+                    const char* sp = ray_str_vec_get(orig_col, r, &slen);
+                    new_col = ray_str_vec_append(new_col, sp ? sp : "", sp ? slen : 0);
+                }
                 if (RAY_IS_ERR(new_col)) { ray_release(result); return new_col; }
             }
         } else if (ct == RAY_SYM) {
@@ -3336,6 +3362,8 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
                 int64_t sym_val = ray_read_sym(ray_data(orig_col), r, orig_col->type, orig_col->attrs);
                 new_col = ray_vec_append(new_col, &sym_val);
                 if (RAY_IS_ERR(new_col)) { ray_release(result); return new_col; }
+                if (src_has_nulls && ray_vec_is_null(orig_col, r))
+                    ray_vec_set_null(new_col, new_col->len - 1, true);
             }
         } else {
             size_t elem_sz = (ct == RAY_BOOL) ? 1 : 8;
@@ -3343,6 +3371,8 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
             for (int64_t r = 0; r < nrows; r++) {
                 new_col = ray_vec_append(new_col, src + r * elem_sz);
                 if (RAY_IS_ERR(new_col)) { ray_release(result); return new_col; }
+                if (src_has_nulls && ray_vec_is_null(orig_col, r))
+                    ray_vec_set_null(new_col, new_col->len - 1, true);
             }
         }
 

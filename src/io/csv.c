@@ -764,6 +764,24 @@ static bool csv_intern_strings(csv_strref_t** str_refs, int n_cols,
     return ok;
 }
 
+/* Free strref pointers that were heap-allocated for escaped CSV fields.
+ * Any strref whose ptr falls outside the mmap buffer [buf, buf+buf_size)
+ * was allocated by the parse loop and must be freed here. */
+static void csv_free_escaped_strrefs(csv_strref_t** str_refs, int n_cols,
+                                      const csv_type_t* col_types,
+                                      int64_t n_rows,
+                                      const char* buf, size_t buf_size) {
+    const char* buf_end = buf + buf_size;
+    for (int c = 0; c < n_cols; c++) {
+        if (col_types[c] != CSV_TYPE_STR || !str_refs[c]) continue;
+        for (int64_t r = 0; r < n_rows; r++) {
+            const char* p = str_refs[c][r].ptr;
+            if (p && (p < buf || p >= buf_end))
+                ray_sys_free((void*)p);
+        }
+    }
+}
+
 /* Materialize RAY_STR columns from parsed strrefs. Two-pass so the per-column
  * string pool is sized exactly once — avoids the repeated realloc/COW path
  * that ray_str_vec_set would take for a freshly-owned vector. */
@@ -952,6 +970,17 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                         ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         my_had_null[c] = true;
                     } else {
+                        /* fld may point into esc_buf (stack) or dyn_esc
+                         * (freed below) — both die before csv_fill_str_cols
+                         * reads the strref.  Persist escaped fields. */
+                        if (fld < ctx->buf || fld >= buf_end) {
+                            if (dyn_esc && fld == dyn_esc) {
+                                dyn_esc = NULL; /* transfer ownership */
+                            } else {
+                                char* cp = (char*)ray_sys_alloc(flen);
+                                if (cp) { memcpy(cp, fld, flen); fld = cp; }
+                            }
+                        }
                         ctx->str_refs[c][row].ptr = fld;
                         ctx->str_refs[c][row].len = (uint32_t)flen;
                     }
@@ -1085,6 +1114,17 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                         col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         col_had_null[c] = true;
                     } else {
+                        /* fld may point into esc_buf (stack) or dyn_esc
+                         * (freed below) — both die before csv_fill_str_cols
+                         * reads the strref.  Persist escaped fields. */
+                        if (fld < buf || fld >= buf_end) {
+                            if (dyn_esc && fld == dyn_esc) {
+                                dyn_esc = NULL; /* transfer ownership */
+                            } else {
+                                char* cp = (char*)ray_sys_alloc(flen);
+                                if (cp) { memcpy(cp, fld, flen); fld = cp; }
+                            }
+                        }
                         str_refs[c][row].ptr = fld;
                         str_refs[c][row].len = (uint32_t)flen;
                     }
@@ -1398,6 +1438,7 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
         bool fill_ok = csv_fill_str_cols(str_ref_bufs, ncols, resolved_types,
                            col_vecs, n_rows, col_nullmaps);
         if (!fill_ok) {
+            csv_free_escaped_strrefs(str_ref_bufs, ncols, parse_types, n_rows, buf, file_size);
             for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
             for (int c = 0; c < ncols; c++) ray_release(col_vecs[c]);
             goto fail_offsets;
@@ -1406,13 +1447,15 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
                            resolved_types, col_data, n_rows, sym_max_ids,
                            col_nullmaps);
         if (!intern_ok) {
+            csv_free_escaped_strrefs(str_ref_bufs, ncols, parse_types, n_rows, buf, file_size);
             for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
             for (int c = 0; c < ncols; c++) ray_release(col_vecs[c]);
             goto fail_offsets;
         }
     }
 
-    /* Free strref buffers */
+    /* Free heap-allocated escaped string copies, then strref buffers */
+    csv_free_escaped_strrefs(str_ref_bufs, ncols, parse_types, n_rows, buf, file_size);
     for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
 
     /* ---- 9c. Strip nullmaps from all-valid columns ---- */

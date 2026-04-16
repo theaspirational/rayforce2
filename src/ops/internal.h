@@ -235,6 +235,50 @@ static inline bool parted_str_single_pool(ray_t** segs, int64_t n_segs) {
     return true;
 }
 
+/* ---- Null bitmap propagation helpers ---- */
+
+/* Propagate nulls from src to dst via index array: dst[r] gets src's null
+ * bit at indices[r].  indices may contain -1 for LEFT/OUTER join fill rows
+ * (those are set null unconditionally). */
+static inline void col_propagate_nulls_gather(ray_t* dst, const ray_t* src,
+                                               const int64_t* indices,
+                                               int64_t count) {
+    bool src_has_nulls = (src->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    for (int64_t r = 0; r < count; r++) {
+        if (indices[r] < 0 ||
+            (src_has_nulls && ray_vec_is_null((ray_t*)src, indices[r])))
+            ray_vec_set_null(dst, r, true);
+    }
+}
+
+/* Propagate nulls from src[src_off..src_off+count) to dst[dst_off..),
+ * for contiguous range copies (HEAD, TAIL, range inserts). */
+static inline void col_propagate_nulls_range(ray_t* dst, int64_t dst_off,
+                                              const ray_t* src, int64_t src_off,
+                                              int64_t count) {
+    if (!(src->attrs & RAY_ATTR_HAS_NULLS)) return;
+    for (int64_t i = 0; i < count; i++) {
+        if (ray_vec_is_null((ray_t*)src, src_off + i))
+            ray_vec_set_null(dst, dst_off + i, true);
+    }
+}
+
+/* Propagate nulls through a boolean filter mask: for each set bit in
+ * mask[0..src_len), copy the null bit from src to dst[out_idx++]. */
+static inline void col_propagate_nulls_filter(ray_t* dst, const ray_t* src,
+                                               const uint8_t* mask,
+                                               int64_t src_len) {
+    if (!(src->attrs & RAY_ATTR_HAS_NULLS)) return;
+    int64_t out = 0;
+    for (int64_t i = 0; i < src_len; i++) {
+        if (mask[i]) {
+            if (ray_vec_is_null((ray_t*)src, i))
+                ray_vec_set_null(dst, out, true);
+            out++;
+        }
+    }
+}
+
 /* Append one string element from a parted segment, preserving nulls. */
 static inline ray_t* parted_str_append_elem(ray_t* out, ray_t* seg,
                                             int64_t local_idx,

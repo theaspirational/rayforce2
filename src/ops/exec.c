@@ -1398,6 +1398,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                             head_vec->len = n;
                             memcpy(ray_data(head_vec), ray_data(col),
                                    (size_t)n * esz);
+                            col_propagate_nulls_range(head_vec, 0, col, 0, n);
                         }
                         result = ray_table_add_col(result, name_id, head_vec);
                         ray_release(head_vec);
@@ -1413,6 +1414,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
             if (result && !RAY_IS_ERR(result)) {
                 result->len = n;
                 memcpy(ray_data(result), ray_data(input), (size_t)n * esz);
+                col_propagate_nulls_range(result, 0, input, 0, n);
             }
             ray_release(input);
             return result;
@@ -1507,6 +1509,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                             memcpy(ray_data(tail_vec),
                                    (char*)ray_data(col) + (size_t)skip * esz,
                                    (size_t)n * esz);
+                            col_propagate_nulls_range(tail_vec, 0, col, skip, n);
                         }
                         result = ray_table_add_col(result, name_id, tail_vec);
                         ray_release(tail_vec);
@@ -1524,6 +1527,7 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
                 memcpy(ray_data(result),
                        (char*)ray_data(input) + (size_t)skip * esz,
                        (size_t)n * esz);
+                col_propagate_nulls_range(result, 0, input, skip, n);
             }
             ray_release(input);
             return result;
