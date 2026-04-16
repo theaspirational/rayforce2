@@ -615,6 +615,23 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
             return result;
         }
     }
+    /* Typed vector: search without boxing */
+    if (ray_is_vec(vec) && ray_is_atom(val)) {
+        int64_t len = vec->len;
+        bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
+        for (int64_t i = 0; i < len; i++) {
+            if (has_nulls && ray_vec_is_null(vec, i)) {
+                if (RAY_ATOM_IS_NULL(val)) return make_bool(1);
+                continue;
+            }
+            int alloc = 0;
+            ray_t* elem = collection_elem(vec, i, &alloc);
+            int eq = atom_eq(val, elem);
+            if (alloc) ray_release(elem);
+            if (eq) return make_bool(1);
+        }
+        return make_bool(0);
+    }
     ray_t* _bx = NULL;
     vec = unbox_vec_arg(vec, &_bx);
     if (RAY_IS_ERR(vec)) return vec;
@@ -651,58 +668,75 @@ ray_t* list_to_typed_vec(ray_t* list, int8_t orig_vec_type) {
     return vec;
 }
 
+/* Helper: check if element at index i in vec1 exists anywhere in vec2.
+ * Works on typed vectors without boxing. */
+static bool vec_elem_in(ray_t* vec1, int64_t i, ray_t* vec2) {
+    bool v1_null = (vec1->attrs & RAY_ATTR_HAS_NULLS) && ray_vec_is_null(vec1, i);
+    int64_t len2 = vec2->len;
+    bool v2_has_nulls = (vec2->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    int alloc_a = 0;
+    ray_t* a = v1_null ? NULL : collection_elem(vec1, i, &alloc_a);
+    for (int64_t j = 0; j < len2; j++) {
+        if (v1_null) {
+            if (v2_has_nulls && ray_vec_is_null(vec2, j)) {
+                if (alloc_a) ray_release(a);
+                return true;
+            }
+            continue;
+        }
+        if (v2_has_nulls && ray_vec_is_null(vec2, j)) continue;
+        int alloc_b = 0;
+        ray_t* b = collection_elem(vec2, j, &alloc_b);
+        int eq = atom_eq(a, b);
+        if (alloc_b) ray_release(b);
+        if (eq) { if (alloc_a) ray_release(a); return true; }
+    }
+    if (alloc_a) ray_release(a);
+    return false;
+}
+
 /* (except vec1 vec2) — elements in vec1 not in vec2 */
 ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
     if (ray_is_lazy(vec1)) vec1 = ray_lazy_materialize(vec1);
     if (ray_is_lazy(vec2)) vec2 = ray_lazy_materialize(vec2);
-    int8_t orig_type = ray_is_vec(vec1) ? vec1->type : -1;
-    /* Handle scalar vec2: treat as single-element filter */
-    if (ray_is_atom(vec2) && !ray_is_atom(vec1)) {
-        ray_t *_bx1 = NULL;
-        ray_t* v1 = unbox_vec_arg(vec1, &_bx1);
-        if (RAY_IS_ERR(v1)) return v1;
-        if (!is_list(v1)) { if (_bx1) ray_release(_bx1); return ray_error("type", NULL); }
-        int64_t len = ray_len(v1);
-        ray_t** e1 = (ray_t**)ray_data(v1);
-        ray_t* result = ray_alloc(len * sizeof(ray_t*));
-        if (!result) { if (_bx1) ray_release(_bx1); return ray_error("oom", NULL); }
-        result->type = RAY_LIST;
-        ray_t** out = (ray_t**)ray_data(result);
+
+    /* Typed vector path: index-based without boxing */
+    if (ray_is_vec(vec1) && (ray_is_vec(vec2) || ray_is_atom(vec2))) {
+        int64_t len1 = vec1->len;
+        int64_t idx_stack[256];
+        int64_t* idx = (len1 <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len1 * sizeof(int64_t));
+        if (!idx) return ray_error("oom", NULL);
         int64_t count = 0;
-        for (int64_t i = 0; i < len; i++) {
-            if (!atom_eq(e1[i], vec2)) {
-                ray_retain(e1[i]);
-                out[count++] = e1[i];
+        if (ray_is_atom(vec2)) {
+            /* Scalar: filter out matching elements */
+            for (int64_t i = 0; i < len1; i++) {
+                int alloc = 0;
+                ray_t* elem = collection_elem(vec1, i, &alloc);
+                int eq = atom_eq(elem, vec2);
+                if (alloc) ray_release(elem);
+                if (!eq) idx[count++] = i;
+            }
+        } else {
+            for (int64_t i = 0; i < len1; i++) {
+                if (!vec_elem_in(vec1, i, vec2))
+                    idx[count++] = i;
             }
         }
-        result->len = count;
-        if (_bx1) ray_release(_bx1);
-        if (orig_type >= 0 && orig_type != RAY_SYM && orig_type != RAY_STR) {
-            ray_t* vec = ray_vec_new(orig_type, count);
-            if (!RAY_IS_ERR(vec)) {
-                vec->len = count;
-                ray_t** elems = (ray_t**)ray_data(result);
-                for (int64_t i = 0; i < count; i++) {
-                    store_typed_elem(vec, i, elems[i]);
-                    ray_release(elems[i]);
-                }
-                result->len = 0;
-                ray_release(result);
-                return vec;
-            }
-        }
+        ray_t* result = gather_by_idx(vec1, idx, count);
+        if (idx != idx_stack) ray_sys_free(idx);
         return result;
     }
+
+    /* Boxed list fallback */
+    int8_t orig_type = ray_is_vec(vec1) ? vec1->type : -1;
     ray_t *_bx1 = NULL, *_bx2 = NULL;
     vec1 = unbox_vec_arg(vec1, &_bx1);
     if (RAY_IS_ERR(vec1)) return vec1;
     vec2 = unbox_vec_arg(vec2, &_bx2);
     if (RAY_IS_ERR(vec2)) { if (_bx1) ray_release(_bx1); return vec2; }
-    if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
+    if (!is_list(vec1)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
     int64_t len1 = ray_len(vec1);
-    int64_t len2 = ray_len(vec2);
     ray_t** e1 = (ray_t**)ray_data(vec1);
-    ray_t** e2 = (ray_t**)ray_data(vec2);
 
     ray_t* result = ray_alloc(len1 * sizeof(ray_t*));
     if (!result) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("oom", NULL); }
@@ -710,38 +744,25 @@ ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
     ray_t** out = (ray_t**)ray_data(result);
     int64_t count = 0;
 
-    for (int64_t i = 0; i < len1; i++) {
-        int found = 0;
-        for (int64_t j = 0; j < len2; j++) {
-            if (atom_eq(e1[i], e2[j])) { found = 1; break; }
+    if (ray_is_atom(vec2)) {
+        for (int64_t i = 0; i < len1; i++) {
+            if (!atom_eq(e1[i], vec2)) { ray_retain(e1[i]); out[count++] = e1[i]; }
         }
-        if (!found) {
-            ray_retain(e1[i]);
-            out[count++] = e1[i];
+    } else {
+        int64_t len2 = ray_len(vec2);
+        ray_t** e2 = (ray_t**)ray_data(vec2);
+        for (int64_t i = 0; i < len1; i++) {
+            int found = 0;
+            for (int64_t j = 0; j < len2; j++) {
+                if (atom_eq(e1[i], e2[j])) { found = 1; break; }
+            }
+            if (!found) { ray_retain(e1[i]); out[count++] = e1[i]; }
         }
     }
     result->len = count;
     if (_bx1) ray_release(_bx1);
     if (_bx2) ray_release(_bx2);
-    /* Convert back to typed vector if original was typed */
-    if (orig_type >= 0 && orig_type != RAY_SYM && orig_type != RAY_STR) {
-        ray_t* vec = ray_vec_new(orig_type, count);
-        if (!RAY_IS_ERR(vec)) {
-            vec->len = count;
-            ray_t** elems = (ray_t**)ray_data(result);
-            for (int64_t i = 0; i < count; i++) {
-                store_typed_elem(vec, i, elems[i]);
-                ray_release(elems[i]);
-            }
-            result->len = 0; /* prevent double-free of elements */
-            ray_release(result);
-            return vec;
-        }
-    }
-    if (orig_type >= 0 && count == 0) {
-        ray_release(result);
-        return ray_vec_new(orig_type, 0);
-    }
+    if (orig_type >= 0 && count == 0) { ray_release(result); return ray_vec_new(orig_type, 0); }
     return result;
 }
 
@@ -749,15 +770,35 @@ ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
 ray_t* ray_union_fn(ray_t* vec1, ray_t* vec2) {
     if (ray_is_lazy(vec1)) vec1 = ray_lazy_materialize(vec1);
     if (ray_is_lazy(vec2)) vec2 = ray_lazy_materialize(vec2);
-    int8_t orig_type = ray_is_vec(vec1) ? vec1->type : -1;
+
+    /* Typed vector path */
+    if (ray_is_vec(vec1) && ray_is_vec(vec2)) {
+        int64_t len2 = vec2->len;
+        /* Concat vec1 + non-duplicate elements of vec2 */
+        int64_t idx_stack[256];
+        int64_t* idx = (len2 <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len2 * sizeof(int64_t));
+        if (!idx) return ray_error("oom", NULL);
+        int64_t extra = 0;
+        for (int64_t i = 0; i < len2; i++) {
+            if (!vec_elem_in(vec2, i, vec1))
+                idx[extra++] = i;
+        }
+        ray_t* part2 = gather_by_idx(vec2, idx, extra);
+        if (idx != idx_stack) ray_sys_free(idx);
+        if (RAY_IS_ERR(part2)) return part2;
+        ray_t* result = ray_concat_fn(vec1, part2);
+        ray_release(part2);
+        return result;
+    }
+
+    /* Boxed list fallback */
     ray_t *_bx1 = NULL, *_bx2 = NULL;
     vec1 = unbox_vec_arg(vec1, &_bx1);
     if (RAY_IS_ERR(vec1)) return vec1;
     vec2 = unbox_vec_arg(vec2, &_bx2);
     if (RAY_IS_ERR(vec2)) { if (_bx1) ray_release(_bx1); return vec2; }
     if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
-    int64_t len1 = ray_len(vec1);
-    int64_t len2 = ray_len(vec2);
+    int64_t len1 = ray_len(vec1), len2 = ray_len(vec2);
     ray_t** e1 = (ray_t**)ray_data(vec1);
     ray_t** e2 = (ray_t**)ray_data(vec2);
 
@@ -766,42 +807,16 @@ ray_t* ray_union_fn(ray_t* vec1, ray_t* vec2) {
     result->type = RAY_LIST;
     ray_t** out = (ray_t**)ray_data(result);
     int64_t count = 0;
-
-    for (int64_t i = 0; i < len1; i++) {
-        ray_retain(e1[i]);
-        out[count++] = e1[i];
-    }
+    for (int64_t i = 0; i < len1; i++) { ray_retain(e1[i]); out[count++] = e1[i]; }
     for (int64_t i = 0; i < len2; i++) {
         int found = 0;
-        for (int64_t j = 0; j < count; j++) {
+        for (int64_t j = 0; j < count; j++)
             if (atom_eq(out[j], e2[i])) { found = 1; break; }
-        }
-        if (!found) {
-            ray_retain(e2[i]);
-            out[count++] = e2[i];
-        }
+        if (!found) { ray_retain(e2[i]); out[count++] = e2[i]; }
     }
     result->len = count;
     if (_bx1) ray_release(_bx1);
     if (_bx2) ray_release(_bx2);
-    if (orig_type >= 0 && orig_type != RAY_SYM && orig_type != RAY_STR) {
-        ray_t* vec = ray_vec_new(orig_type, count);
-        if (!RAY_IS_ERR(vec)) {
-            vec->len = count;
-            ray_t** elems = (ray_t**)ray_data(result);
-            for (int64_t i = 0; i < count; i++) {
-                store_typed_elem(vec, i, elems[i]);
-                ray_release(elems[i]);
-            }
-            result->len = 0;
-            ray_release(result);
-            return vec;
-        }
-    }
-    if (orig_type >= 0 && count == 0) {
-        ray_release(result);
-        return ray_vec_new(orig_type, 0);
-    }
     return result;
 }
 
@@ -809,7 +824,24 @@ ray_t* ray_union_fn(ray_t* vec1, ray_t* vec2) {
 ray_t* ray_sect_fn(ray_t* vec1, ray_t* vec2) {
     if (ray_is_lazy(vec1)) vec1 = ray_lazy_materialize(vec1);
     if (ray_is_lazy(vec2)) vec2 = ray_lazy_materialize(vec2);
-    int8_t orig_type = ray_is_vec(vec1) ? vec1->type : -1;
+
+    /* Typed vector path */
+    if (ray_is_vec(vec1) && ray_is_vec(vec2)) {
+        int64_t len1 = vec1->len;
+        int64_t idx_stack[256];
+        int64_t* idx = (len1 <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len1 * sizeof(int64_t));
+        if (!idx) return ray_error("oom", NULL);
+        int64_t count = 0;
+        for (int64_t i = 0; i < len1; i++) {
+            if (vec_elem_in(vec1, i, vec2))
+                idx[count++] = i;
+        }
+        ray_t* result = gather_by_idx(vec1, idx, count);
+        if (idx != idx_stack) ray_sys_free(idx);
+        return result;
+    }
+
+    /* Boxed list fallback */
     ray_t *_bx1 = NULL, *_bx2 = NULL;
     vec1 = unbox_vec_arg(vec1, &_bx1);
     if (RAY_IS_ERR(vec1)) return vec1;
@@ -817,46 +849,23 @@ ray_t* ray_sect_fn(ray_t* vec1, ray_t* vec2) {
     if (RAY_IS_ERR(vec2)) { if (_bx1) ray_release(_bx1); return vec2; }
     if (!is_list(vec1) || !is_list(vec2)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
     int64_t len1 = ray_len(vec1);
-    int64_t len2 = ray_len(vec2);
     ray_t** e1 = (ray_t**)ray_data(vec1);
     ray_t** e2 = (ray_t**)ray_data(vec2);
+    int64_t len2 = ray_len(vec2);
 
     ray_t* result = ray_alloc(len1 * sizeof(ray_t*));
     if (!result) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("oom", NULL); }
     result->type = RAY_LIST;
     ray_t** out = (ray_t**)ray_data(result);
     int64_t count = 0;
-
     for (int64_t i = 0; i < len1; i++) {
         for (int64_t j = 0; j < len2; j++) {
-            if (atom_eq(e1[i], e2[j])) {
-                ray_retain(e1[i]);
-                out[count++] = e1[i];
-                break;
-            }
+            if (atom_eq(e1[i], e2[j])) { ray_retain(e1[i]); out[count++] = e1[i]; break; }
         }
     }
     result->len = count;
     if (_bx1) ray_release(_bx1);
     if (_bx2) ray_release(_bx2);
-    if (orig_type >= 0 && orig_type != RAY_SYM && orig_type != RAY_STR) {
-        ray_t* vec = ray_vec_new(orig_type, count);
-        if (!RAY_IS_ERR(vec)) {
-            vec->len = count;
-            ray_t** elems = (ray_t**)ray_data(result);
-            for (int64_t i = 0; i < count; i++) {
-                store_typed_elem(vec, i, elems[i]);
-                ray_release(elems[i]);
-            }
-            result->len = 0;
-            ray_release(result);
-            return vec;
-        }
-    }
-    if (orig_type >= 0 && count == 0) {
-        ray_release(result);
-        return ray_vec_new(orig_type, 0);
-    }
     return result;
 }
 
@@ -1300,6 +1309,25 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
             }
         }
         return result;
+    }
+    /* Typed vector: search without boxing */
+    if (ray_is_vec(vec)) {
+        int64_t len = vec->len;
+        bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
+        bool val_null = RAY_ATOM_IS_NULL(val);
+        for (int64_t i = 0; i < len; i++) {
+            if (has_nulls && ray_vec_is_null(vec, i)) {
+                if (val_null) return make_i64(i);
+                continue;
+            }
+            if (val_null) continue;
+            int alloc = 0;
+            ray_t* elem = collection_elem(vec, i, &alloc);
+            int eq = atom_eq(elem, val);
+            if (alloc) ray_release(elem);
+            if (eq) return make_i64(i);
+        }
+        return ray_typed_null(-RAY_I64);
     }
     ray_t* _bx = NULL;
     vec = unbox_vec_arg(vec, &_bx);

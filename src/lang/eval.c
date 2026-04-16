@@ -991,20 +991,13 @@ ray_t* ray_key_fn(ray_t* x) {
     }
     if (x->type != RAY_TABLE) return ray_error("type", NULL);
     int64_t ncols = ray_table_ncols(x);
-    ray_t* result = ray_alloc(ncols * sizeof(ray_t*));
-    if (!result) return ray_error("oom", NULL);
-    result->type = RAY_LIST;
-    result->len = ncols;
-    ray_t** out = (ray_t**)ray_data(result);
-    for (int64_t i = 0; i < ncols; i++) {
-        int64_t name_id = ray_table_col_name(x, i);
-        ray_t* sym = ray_alloc(0);
-        if (!sym) { ray_release(result); return ray_error("oom", NULL); }
-        sym->type = -RAY_SYM;
-        sym->i64 = name_id;
-        out[i] = sym;
-    }
-    return result;
+    ray_t* vec = ray_vec_new(RAY_SYM, ncols);
+    if (RAY_IS_ERR(vec)) return vec;
+    vec->len = ncols;
+    int64_t* out = (int64_t*)ray_data(vec);
+    for (int64_t i = 0; i < ncols; i++)
+        out[i] = ray_table_col_name(x, i);
+    return vec;
 }
 
 /* (value dict/table) — extract values */

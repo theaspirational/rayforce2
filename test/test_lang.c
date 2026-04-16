@@ -941,11 +941,8 @@ static MunitResult test_eval_key_table(const void* params, void* fixture) {
         "(do (set t (table ['a 'b] (list [1 2 3] [10 20 30]))) (key t))");
     munit_assert_ptr_not_null(result);
     munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_LIST);
+    munit_assert_int(result->type, ==, RAY_SYM);
     munit_assert_int(ray_len(result), ==, 2);
-    ray_t** elems = (ray_t**)ray_data(result);
-    munit_assert_int(elems[0]->type, ==, -RAY_SYM);
-    munit_assert_int(elems[1]->type, ==, -RAY_SYM);
     ray_release(result);
     return MUNIT_OK;
 }
