@@ -189,7 +189,7 @@ sys-current     | 8388608</code></pre>
 (<span class="hl-kw">set</span> after (<span class="hl-fn">memstat</span>))
 
 <span class="hl-comment">;; See how much memory the load consumed</span>
-(<span class="hl-fn">-</span> (after <span class="hl-sym">`bytes-allocated</span>) (before <span class="hl-sym">`bytes-allocated</span>))</code></pre>
+(<span class="hl-fn">-</span> (after <span class="hl-sym">'bytes-allocated</span>) (before <span class="hl-sym">'bytes-allocated</span>))</code></pre>
       <pre><code>838860800</code></pre>
       <p>In this example, loading 10 million rows consumed roughly 800 MB of heap memory.</p>
 

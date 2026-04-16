@@ -276,7 +276,7 @@
 (<span class="hl-fn">ser</span> <span class="hl-str">"hello"</span>)
 
 <span class="hl-comment">;; Serialize a table</span>
-(<span class="hl-kw">set</span> t (<span class="hl-fn">table</span> [<span class="hl-sym">x</span> <span class="hl-sym">y</span>] (<span class="hl-fn">list</span> [<span class="hl-num">1</span> <span class="hl-num">2</span> <span class="hl-num">3</span>] [<span class="hl-sym">`A</span> <span class="hl-sym">`B</span> <span class="hl-sym">`C</span>])))
+(<span class="hl-kw">set</span> t (<span class="hl-fn">table</span> [<span class="hl-sym">x</span> <span class="hl-sym">y</span>] (<span class="hl-fn">list</span> [<span class="hl-num">1</span> <span class="hl-num">2</span> <span class="hl-num">3</span>] [<span class="hl-sym">'A</span> <span class="hl-sym">'B</span> <span class="hl-sym">'C</span>])))
 (<span class="hl-fn">ser</span> t)</code></pre>
 
       <p>The result is always a <code>U8</code> byte vector containing the IPC header followed by the serialized payload.</p>
@@ -309,7 +309,7 @@
 <span class="hl-comment">;; =&gt; (1 "two" 3.0)</span>
 
 <span class="hl-comment">;; Round-trip a table</span>
-(<span class="hl-kw">set</span> t (<span class="hl-fn">table</span> [<span class="hl-sym">x</span> <span class="hl-sym">y</span>] (<span class="hl-fn">list</span> [<span class="hl-num">1</span> <span class="hl-num">2</span> <span class="hl-num">3</span>] [<span class="hl-sym">`A</span> <span class="hl-sym">`B</span> <span class="hl-sym">`C</span>])))
+(<span class="hl-kw">set</span> t (<span class="hl-fn">table</span> [<span class="hl-sym">x</span> <span class="hl-sym">y</span>] (<span class="hl-fn">list</span> [<span class="hl-num">1</span> <span class="hl-num">2</span> <span class="hl-num">3</span>] [<span class="hl-sym">'A</span> <span class="hl-sym">'B</span> <span class="hl-sym">'C</span>])))
 (<span class="hl-fn">de</span> (<span class="hl-fn">ser</span> t))
 <span class="hl-comment">;; =&gt; the same 3-row table with columns x (i64) and y (sym)</span></code></pre>
 
