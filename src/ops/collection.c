@@ -1137,56 +1137,12 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
 /* (at vec idx) or (at table 'col) — index into vector or table */
 ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
     if (ray_is_lazy(vec)) vec = ray_lazy_materialize(vec);
-    /* Table column access by symbol key */
+    /* Table column access by symbol key — return the typed vector directly */
     if (vec->type == RAY_TABLE && idx->type == -RAY_SYM) {
         ray_t* col = ray_table_get_col(vec, idx->i64);
         if (!col) return ray_error("domain", NULL);
-        int8_t ctype = col->type;
-        /* Return typed vectors directly for temporal/GUID types that need
-         * to work with arithmetic and other vector operations.
-         * Other types are converted to boxed lists. */
-        if (ctype == RAY_TIME || ctype == RAY_DATE || ctype == RAY_TIMESTAMP ||
-            ctype == RAY_GUID) {
-            ray_retain(col);
-            return col;
-        }
-        /* Convert typed column vector to a Rayfall list */
-        int64_t nrows = col->len;
-        ray_t* result = ray_alloc(nrows * sizeof(ray_t*));
-        if (!result) return ray_error("oom", NULL);
-        result->type = RAY_LIST;
-        result->len = nrows;
-        ray_t** out = (ray_t**)ray_data(result);
-        for (int64_t i = 0; i < nrows; i++) {
-            if (ray_vec_is_null(col, i)) {
-                out[i] = ray_typed_null(-ctype);
-            } else if (ctype == RAY_I64) {
-                out[i] = make_i64(((int64_t*)ray_data(col))[i]);
-            } else if (ctype == RAY_F64) {
-                out[i] = make_f64(((double*)ray_data(col))[i]);
-            } else if (ctype == RAY_BOOL) {
-                out[i] = make_bool(((uint8_t*)ray_data(col))[i]);
-            } else if (ctype == RAY_SYM) {
-                ray_t* s = ray_alloc(0);
-                if (!s) { ray_release(result); return ray_error("oom", NULL); }
-                s->type = -RAY_SYM;
-                s->i64 = ((int64_t*)ray_data(col))[i];
-                out[i] = s;
-            } else if (ctype == RAY_STR) {
-                size_t slen;
-                const char *sptr = ray_str_vec_get(col, i, &slen);
-                out[i] = ray_str(sptr ? sptr : "", sptr ? slen : 0);
-            } else {
-                int alloc = 0;
-                out[i] = collection_elem(col, i, &alloc);
-            }
-            if (RAY_IS_ERR(out[i])) {
-                for (int64_t j = 0; j < i; j++) ray_release(out[j]);
-                result->len = 0; ray_release(result);
-                return out[i];
-            }
-        }
-        return result;
+        ray_retain(col);
+        return col;
     }
 
     /* Table row access by integer index: (at table 0) → {col1: val1, col2: val2} */

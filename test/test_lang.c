@@ -924,12 +924,12 @@ static MunitResult test_eval_at_table(const void* params, void* fixture) {
         "(do (set t (table ['a 'b] (list [1 2 3] [10 20 30]))) (at t 'a))");
     munit_assert_ptr_not_null(result);
     munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_LIST);
+    munit_assert_int(result->type, ==, RAY_I64);
     munit_assert_int(ray_len(result), ==, 3);
-    ray_t** elems = (ray_t**)ray_data(result);
-    munit_assert_int(elems[0]->i64, ==, 1);
-    munit_assert_int(elems[1]->i64, ==, 2);
-    munit_assert_int(elems[2]->i64, ==, 3);
+    int64_t* data = (int64_t*)ray_data(result);
+    munit_assert_int(data[0], ==, 1);
+    munit_assert_int(data[1], ==, 2);
+    munit_assert_int(data[2], ==, 3);
     ray_release(result);
     return MUNIT_OK;
 }
