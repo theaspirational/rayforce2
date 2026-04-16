@@ -3198,8 +3198,6 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
     ray_pool_t* gather_pool = (gather_rows > RAY_PARALLEL_THRESHOLD) ? ray_pool_get() : NULL;
     ray_t* new_cols[ncols];
     int64_t col_names[ncols];
-    int64_t valid_ncols = 0;
-
     for (int64_t c = 0; c < ncols; c++) {
         ray_t* col = ray_table_get_col_idx(tbl, c);
         col_names[c] = ray_table_col_name(tbl, c);
@@ -3232,7 +3230,6 @@ ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {
         }
         nc->len = gather_rows;
         new_cols[c] = nc;
-        valid_ncols++;
     }
 
     /* Decode-gather optimisation: decode the sort key column directly from
