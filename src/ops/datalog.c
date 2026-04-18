@@ -387,8 +387,25 @@ int dl_rule_add_agg(dl_rule_t* rule, int op, int target_var,
     snprintf(b->agg_pred, sizeof(b->agg_pred), "%s", pred);
     b->agg_arity      = pred_arity;
     b->agg_value_col  = value_col;
+    b->agg_n_group_keys = 0;
     if (target_var + 1 > rule->n_vars) rule->n_vars = target_var + 1;
     return idx;
+}
+
+int dl_rule_agg_set_group(dl_rule_t* rule, int body_idx,
+                          const int* key_vars, const int* key_cols, int n_keys) {
+    if (!rule || body_idx < 0 || body_idx >= rule->n_body) return -1;
+    if (n_keys < 0 || n_keys > DL_AGG_MAX_KEYS) return -1;
+    dl_body_t* b = &rule->body[body_idx];
+    if (b->type != DL_AGG) return -1;
+    b->agg_n_group_keys = n_keys;
+    for (int i = 0; i < n_keys; i++) {
+        b->agg_group_key_vars[i] = key_vars[i];
+        b->agg_group_key_cols[i] = key_cols[i];
+        if (key_vars[i] + 1 > rule->n_vars)
+            rule->n_vars = key_vars[i] + 1;
+    }
+    return 0;
 }
 
 /* ========================================================================
@@ -1021,6 +1038,85 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         }
 
         case DL_AGG: {
+            if (body->agg_n_group_keys > 0) {
+                /* Grouped aggregation: use rayforce's ray_group on src_table. */
+                int src_idx = dl_find_rel(prog, body->agg_pred);
+                if (src_idx < 0) { ray_release(accum); return NULL; }
+                ray_t* src_table = prog->rels[src_idx].table;
+                int64_t src_nrows = (src_table && !RAY_IS_ERR(src_table))
+                    ? ray_table_nrows(src_table) : 0;
+                if (src_nrows == 0) {
+                    /* No source rows -> no groups -> rule produces no head tuples. */
+                    ray_release(accum);
+                    return NULL;
+                }
+
+                dl_rel_t* src_rel = &prog->rels[src_idx];
+                int nk = body->agg_n_group_keys;
+
+                /* Build a sub-graph that SCANs src_table's columns by symbol name. */
+                ray_retain(src_table);
+                ray_graph_t* gg = ray_graph_new(src_table);
+                if (!gg) { ray_release(src_table); ray_release(accum); return NULL; }
+
+                ray_op_t* keys_ops[DL_AGG_MAX_KEYS];
+                for (int i = 0; i < nk; i++) {
+                    int64_t sym = src_rel->col_names[body->agg_group_key_cols[i]];
+                    ray_t* s = ray_sym_str(sym);
+                    keys_ops[i] = ray_scan(gg, ray_str_ptr(s));
+                }
+
+                /* Agg input: value column (for COUNT we still pass a column; any
+                 * column works since COUNT only counts rows). */
+                int value_col = body->agg_value_col;
+                if (value_col < 0 || value_col >= src_rel->arity) value_col = 0;
+                ray_t* vs = ray_sym_str(src_rel->col_names[value_col]);
+                ray_op_t* agg_in = ray_scan(gg, ray_str_ptr(vs));
+
+                uint16_t op_code;
+                switch (body->agg_op) {
+                    case DL_AGG_COUNT: op_code = OP_COUNT; break;
+                    case DL_AGG_SUM:   op_code = OP_SUM;   break;
+                    case DL_AGG_MIN:   op_code = OP_MIN;   break;
+                    case DL_AGG_MAX:   op_code = OP_MAX;   break;
+                    case DL_AGG_AVG:   op_code = OP_AVG;   break;
+                    default:
+                        ray_graph_free(gg); ray_release(src_table);
+                        ray_release(accum); return NULL;
+                }
+
+                ray_op_t* ag_ins[1] = { agg_in };
+                ray_op_t* root = ray_group(gg, keys_ops, (uint8_t)nk, &op_code, ag_ins, 1);
+                ray_t* group_tbl = ray_execute(gg, root);
+                ray_graph_free(gg);
+                ray_release(src_table);
+
+                if (!group_tbl || RAY_IS_ERR(group_tbl)) {
+                    if (group_tbl) ray_release(group_tbl);
+                    ray_release(accum);
+                    return NULL;
+                }
+
+                /* Replace accum with group_tbl (schema: key0..key{nk-1}, agg).
+                 * This is valid because the DL_AGG case for aggregate-only rules
+                 * created a singleton _unit accum that we can discard. Mixed
+                 * rules (body atoms + grouped agg) are not supported here; they
+                 * would require a join on shared vars and fall under A5/later. */
+                ray_release(accum);
+                accum = group_tbl;
+
+                /* Bind key variables to the key columns in the group output */
+                for (int i = 0; i < nk; i++) {
+                    int kv = body->agg_group_key_vars[i];
+                    var_bound[kv] = true;
+                    var_col[kv] = i;
+                }
+                /* Bind target variable to the aggregate column (last column) */
+                var_bound[body->agg_target_var] = true;
+                var_col[body->agg_target_var] = nk;  /* agg column immediately follows keys */
+                break;
+            }
+            /* -------- existing scalar path below unchanged -------- */
             int src_idx = dl_find_rel(prog, body->agg_pred);
             if (src_idx < 0) {
                 ray_release(accum);

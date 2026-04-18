@@ -59,6 +59,8 @@
 #define DL_AGG_MAX   3
 #define DL_AGG_AVG   4
 
+#define DL_AGG_MAX_KEYS 4
+
 /* ===== Assignment operators (for DL_ASSIGN) ===== */
 #define DL_OP_EQ    0   /* simple assignment: X = expr */
 
@@ -128,6 +130,9 @@ typedef struct {
     char    agg_pred[64];          /* predicate name being aggregated over */
     int     agg_arity;             /* arity of agg_pred */
     int     agg_value_col;         /* column index inside agg_pred to aggregate (sum/min/max/avg) */
+    int     agg_n_group_keys;      /* 0 = scalar; >0 = grouped */
+    int     agg_group_key_vars[DL_AGG_MAX_KEYS];
+    int     agg_group_key_cols[DL_AGG_MAX_KEYS];
 } dl_body_t;
 
 /* ===== Datalog rule: head :- body ===== */
@@ -273,6 +278,13 @@ int dl_rule_add_interval(dl_rule_t* rule, int fact_var, int start_var, int end_v
  * Returns body literal index. */
 int dl_rule_add_agg(dl_rule_t* rule, int op, int target_var,
                     const char* pred, int pred_arity, int value_col);
+
+/* Attach group-by keys to an aggregate body literal previously added via
+ * dl_rule_add_agg. body_idx is that builder's return value.
+ * key_vars and key_cols have n_keys entries (<= DL_AGG_MAX_KEYS).
+ * Returns 0 on success, -1 if n_keys is out of range. */
+int dl_rule_agg_set_group(dl_rule_t* rule, int body_idx,
+                          const int* key_vars, const int* key_cols, int n_keys);
 
 /* ===== Expression tree builders ===== */
 

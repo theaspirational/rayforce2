@@ -568,6 +568,96 @@ static MunitResult test_agg_count_empty(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* weight_by_user(user_id, kg): (1,50), (1,60), (2,75), (2,85)
+ * Rule: user_count(?u, ?n) :- count(?n, weight_by_user) by (?u, col 0)
+ * Expected: (1,2), (2,2) */
+static MunitResult test_agg_count_grouped(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t users[]   = {1, 1, 2, 2};
+    int64_t weights[] = {50, 60, 75, 85};
+    ray_t* u_col = ray_vec_from_raw(RAY_I64, users, 4);
+    ray_t* w_col = ray_vec_from_raw(RAY_I64, weights, 4);
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("weight_by_user__c0", 18), u_col);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("weight_by_user__c1", 18), w_col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight_by_user", tbl, 2);
+
+    dl_rule_t r; dl_rule_init(&r, "user_count", 2);
+    dl_rule_head_var(&r, 0, 0);  /* u */
+    dl_rule_head_var(&r, 1, 1);  /* n */
+    int idx = dl_rule_add_agg(&r, DL_AGG_COUNT, 1, "weight_by_user", 2, 0);
+    int key_vars[] = { 0 };
+    int key_cols[] = { 0 };
+    munit_assert_int(dl_rule_agg_set_group(&r, idx, key_vars, key_cols, 1), ==, 0);
+    r.n_vars = 2;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "user_count");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 2);
+
+    /* Rows may appear in any order; check both keys present with count == 2. */
+    int64_t* uo = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    int64_t* no = (int64_t*)ray_data(ray_table_get_col_idx(out, 1));
+    int seen_u1 = 0, seen_u2 = 0;
+    for (int i = 0; i < 2; i++) {
+        if (uo[i] == 1) { munit_assert_int((int)no[i], ==, 2); seen_u1 = 1; }
+        else if (uo[i] == 2) { munit_assert_int((int)no[i], ==, 2); seen_u2 = 1; }
+    }
+    munit_assert_int(seen_u1 && seen_u2, ==, 1);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(u_col); ray_release(w_col);
+    return MUNIT_OK;
+}
+
+/* Rule: user_sum(?u, ?s) :- sum(?s, weight_by_user col 1) by (?u, col 0)
+ * Expected: (1, 110), (2, 160) */
+static MunitResult test_agg_sum_grouped(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t users[]   = {1, 1, 2, 2};
+    int64_t weights[] = {50, 60, 75, 85};
+    ray_t* u_col = ray_vec_from_raw(RAY_I64, users, 4);
+    ray_t* w_col = ray_vec_from_raw(RAY_I64, weights, 4);
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("weight_by_user__c0", 18), u_col);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("weight_by_user__c1", 18), w_col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight_by_user", tbl, 2);
+
+    dl_rule_t r; dl_rule_init(&r, "user_sum", 2);
+    dl_rule_head_var(&r, 0, 0);  /* u */
+    dl_rule_head_var(&r, 1, 1);  /* s */
+    int idx = dl_rule_add_agg(&r, DL_AGG_SUM, 1, "weight_by_user", 2, 1);
+    int key_vars[] = { 0 };
+    int key_cols[] = { 0 };
+    munit_assert_int(dl_rule_agg_set_group(&r, idx, key_vars, key_cols, 1), ==, 0);
+    r.n_vars = 2;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "user_sum");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 2);
+
+    int64_t* uo = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    int64_t* so = (int64_t*)ray_data(ray_table_get_col_idx(out, 1));
+    int seen_u1 = 0, seen_u2 = 0;
+    for (int i = 0; i < 2; i++) {
+        if (uo[i] == 1) { munit_assert_int((int)so[i], ==, 110); seen_u1 = 1; }
+        else if (uo[i] == 2) { munit_assert_int((int)so[i], ==, 160); seen_u2 = 1; }
+    }
+    munit_assert_int(seen_u1 && seen_u2, ==, 1);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(u_col); ray_release(w_col);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -582,6 +672,8 @@ static MunitTest datalog_tests[] = {
     { "/agg_avg",                    test_agg_avg,                    datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_min_empty",              test_agg_min_empty,              datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_count_empty",            test_agg_count_empty,            datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_count_grouped",          test_agg_count_grouped,          datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_sum_grouped",            test_agg_sum_grouped,            datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
