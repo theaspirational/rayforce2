@@ -59,7 +59,7 @@
 #define DL_AGG_MAX   3
 #define DL_AGG_AVG   4
 
-#define DL_AGG_MAX_KEYS 4
+#define DL_AGG_MAX_KEYS 8
 
 /* ===== Assignment operators (for DL_ASSIGN) ===== */
 #define DL_OP_EQ    0   /* simple assignment: X = expr */

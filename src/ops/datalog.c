@@ -1039,7 +1039,23 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
 
         case DL_AGG: {
             if (body->agg_n_group_keys > 0) {
-                /* Grouped aggregation: use rayforce's ray_group on src_table. */
+                /* Grouped aggregation: use rayforce's ray_group on src_table.
+                 *
+                 * Mixed-rule guard: this path assumes accum is the singleton
+                 * _unit placeholder created for aggregate-only rules. If the
+                 * rule has real positive body atoms, accum carries bound
+                 * variables from a prior join that we would need to intersect
+                 * against the group result — not yet supported. Bail early. */
+                bool has_pos = false;
+                for (int bi = 0; bi < rule->n_body; bi++) {
+                    if (rule->body[bi].type == DL_POS) { has_pos = true; break; }
+                }
+                if (has_pos) {
+                    fprintf(stderr, "dl: grouped aggregate with positive body atoms not yet supported\n");
+                    ray_release(accum);
+                    return NULL;
+                }
+
                 int src_idx = dl_find_rel(prog, body->agg_pred);
                 if (src_idx < 0) { ray_release(accum); return NULL; }
                 ray_t* src_table = prog->rels[src_idx].table;
@@ -1054,10 +1070,10 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 dl_rel_t* src_rel = &prog->rels[src_idx];
                 int nk = body->agg_n_group_keys;
 
-                /* Build a sub-graph that SCANs src_table's columns by symbol name. */
-                ray_retain(src_table);
+                /* Build a sub-graph that SCANs src_table's columns by symbol name.
+                 * ray_graph_new retains src_table internally; no extra retain needed. */
                 ray_graph_t* gg = ray_graph_new(src_table);
-                if (!gg) { ray_release(src_table); ray_release(accum); return NULL; }
+                if (!gg) { ray_release(accum); return NULL; }
 
                 ray_op_t* keys_ops[DL_AGG_MAX_KEYS];
                 for (int i = 0; i < nk; i++) {
@@ -1081,7 +1097,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                     case DL_AGG_MAX:   op_code = OP_MAX;   break;
                     case DL_AGG_AVG:   op_code = OP_AVG;   break;
                     default:
-                        ray_graph_free(gg); ray_release(src_table);
+                        ray_graph_free(gg);
                         ray_release(accum); return NULL;
                 }
 
@@ -1089,7 +1105,6 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 ray_op_t* root = ray_group(gg, keys_ops, (uint8_t)nk, &op_code, ag_ins, 1);
                 ray_t* group_tbl = ray_execute(gg, root);
                 ray_graph_free(gg);
-                ray_release(src_table);
 
                 if (!group_tbl || RAY_IS_ERR(group_tbl)) {
                     if (group_tbl) ray_release(group_tbl);
