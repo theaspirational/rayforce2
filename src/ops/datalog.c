@@ -1229,9 +1229,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             case DL_AGG_MIN:
             case DL_AGG_MAX:
             case DL_AGG_AVG:
-                if (src_nrows <= 0) {
-                    result = 0;
-                } else {
+                if (src_nrows > 0) {
                     ray_t* val_col =
                         ray_table_get_col_idx(src_table, body->agg_value_col);
                     if (!val_col || val_col->type != RAY_I64) {

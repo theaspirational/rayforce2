@@ -274,6 +274,7 @@ int dl_rule_add_cmp_expr(dl_rule_t* rule, int cmp_op, dl_expr_t* lhs, dl_expr_t*
  * position into start_var and end_var. Returns body literal index. */
 int dl_rule_add_interval(dl_rule_t* rule, int fact_var, int start_var, int end_var);
 
+/* pred_arity is advisory; evaluator re-resolves against program EDB/IDB at compile time. */
 /* Add an aggregate body literal: (op ?target pred col)
  *  - op: DL_AGG_COUNT (col is ignored), DL_AGG_SUM/MIN/MAX/AVG
  *  - target_var: variable that receives the aggregate result
