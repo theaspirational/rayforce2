@@ -42,6 +42,7 @@
 #define DL_ASSIGN   3   /* assignment:    X = expr */
 #define DL_BUILTIN  4   /* builtin predicate */
 #define DL_INTERVAL 5   /* interval bind: F @[S, E] */
+#define DL_AGG      6   /* aggregate: (count ?N pred), (sum ?S ?expr pred), ... */
 
 /* ===== Comparison operators (for DL_CMP) ===== */
 #define DL_CMP_EQ   0
@@ -50,6 +51,13 @@
 #define DL_CMP_LE   3
 #define DL_CMP_GT   4
 #define DL_CMP_GE   5
+
+/* ===== Aggregate operators (for DL_AGG) ===== */
+#define DL_AGG_COUNT 0
+#define DL_AGG_SUM   1
+#define DL_AGG_MIN   2
+#define DL_AGG_MAX   3
+#define DL_AGG_AVG   4
 
 /* ===== Assignment operators (for DL_ASSIGN) ===== */
 #define DL_OP_EQ    0   /* simple assignment: X = expr */
@@ -115,6 +123,11 @@ typedef struct {
     int     interval_fact_var;     /* fact variable index (for DL_INTERVAL) */
     int     interval_start_var;    /* start variable index (for DL_INTERVAL) */
     int     interval_end_var;      /* end variable index (for DL_INTERVAL) */
+    int     agg_op;                /* aggregate operator (for DL_AGG) */
+    int     agg_target_var;        /* variable that receives the aggregate result */
+    char    agg_pred[64];          /* predicate name being aggregated over */
+    int     agg_arity;             /* arity of agg_pred */
+    int     agg_value_col;         /* column index inside agg_pred to aggregate (sum/min/max/avg) */
 } dl_body_t;
 
 /* ===== Datalog rule: head :- body ===== */
@@ -250,6 +263,16 @@ int dl_rule_add_cmp_expr(dl_rule_t* rule, int cmp_op, dl_expr_t* lhs, dl_expr_t*
 /* Add an interval bind: decompose two consecutive columns at the fact variable's
  * position into start_var and end_var. Returns body literal index. */
 int dl_rule_add_interval(dl_rule_t* rule, int fact_var, int start_var, int end_var);
+
+/* Add an aggregate body literal: (op ?target pred col)
+ *  - op: DL_AGG_COUNT (col is ignored), DL_AGG_SUM/MIN/MAX/AVG
+ *  - target_var: variable that receives the aggregate result
+ *  - pred: predicate to aggregate over
+ *  - pred_arity: arity of that predicate
+ *  - value_col: which column to aggregate (ignored for COUNT)
+ * Returns body literal index. */
+int dl_rule_add_agg(dl_rule_t* rule, int op, int target_var,
+                    const char* pred, int pred_arity, int value_col);
 
 /* ===== Expression tree builders ===== */
 
