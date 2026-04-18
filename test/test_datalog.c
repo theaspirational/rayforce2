@@ -374,6 +374,147 @@ static MunitResult test_agg_stratifies_above_source(const void* params, void* fi
     return MUNIT_OK;
 }
 
+/* (count ?N weight) where weight has 4 rows -> N = 4. */
+static MunitResult test_agg_count_edb(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t vals[] = {50, 60, 75, 85};
+    ray_t* col = ray_vec_from_raw(RAY_I64, vals, 4);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wcount", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_COUNT, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wcount");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 4);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(col);
+    return MUNIT_OK;
+}
+
+static ray_t* make_weight_edb(void) {
+    int64_t vals[] = {50, 60, 75, 85};
+    ray_t* col = ray_vec_from_raw(RAY_I64, vals, 4);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), col);
+    return weight;
+}
+
+static MunitResult test_agg_sum(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* weight = make_weight_edb();
+    ray_t* col = ray_table_get_col_idx(weight, 0);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wsum", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_SUM, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wsum");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 270);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(col);
+    return MUNIT_OK;
+}
+
+static MunitResult test_agg_min(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* weight = make_weight_edb();
+    ray_t* col = ray_table_get_col_idx(weight, 0);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wmin", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_MIN, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wmin");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 50);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(col);
+    return MUNIT_OK;
+}
+
+static MunitResult test_agg_max(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* weight = make_weight_edb();
+    ray_t* col = ray_table_get_col_idx(weight, 0);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wmax", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_MAX, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wmax");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 85);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(col);
+    return MUNIT_OK;
+}
+
+static MunitResult test_agg_avg(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* weight = make_weight_edb();
+    ray_t* col = ray_table_get_col_idx(weight, 0);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wavg", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_AVG, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wavg");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 67);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(col);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -381,6 +522,11 @@ static MunitTest datalog_tests[] = {
     { "/arith_assignment",          test_arith_assignment,          datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_builder",                test_agg_builder,                datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_stratifies_above_source", test_agg_stratifies_above_source, datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_count_edb",              test_agg_count_edb,              datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_sum",                    test_agg_sum,                    datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_min",                    test_agg_min,                    datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_max",                    test_agg_max,                    datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_avg",                    test_agg_avg,                    datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 

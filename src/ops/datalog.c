@@ -929,6 +929,31 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         }
     }
 
+    /* Rules with only aggregates (no positive body atoms) still need a
+     * one-row binding environment so aggregate results can be projected. */
+    if (!accum) {
+        bool has_agg = false;
+        for (int bi = 0; bi < rule->n_body; bi++) {
+            if (rule->body[bi].type == DL_AGG) {
+                has_agg = true;
+                break;
+            }
+        }
+        if (!has_agg)
+            return NULL;
+        ray_t* one_val = ray_vec_new(RAY_I64, 1);
+        if (!one_val || RAY_IS_ERR(one_val))
+            return NULL;
+        one_val->len = 1;
+        ((int64_t*)ray_data(one_val))[0] = 0;
+        accum = ray_table_new(1);
+        int64_t unit_sym = ray_sym_intern("_unit", 5);
+        accum = ray_table_add_col(accum, unit_sym, one_val);
+        ray_release(one_val);
+        if (!accum || RAY_IS_ERR(accum))
+            return NULL;
+    }
+
     if (!accum) return NULL;
 
     /* Process non-join body literals in declared order.
@@ -992,6 +1017,88 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
 
             var_bound[body->assign_var] = true;
             var_col[body->assign_var] = new_col_idx;
+            break;
+        }
+
+        case DL_AGG: {
+            int src_idx = dl_find_rel(prog, body->agg_pred);
+            if (src_idx < 0) {
+                ray_release(accum);
+                return NULL;
+            }
+            ray_t* src_table = prog->rels[src_idx].table;
+            int64_t src_nrows = (src_table && !RAY_IS_ERR(src_table))
+                ? ray_table_nrows(src_table)
+                : 0;
+
+            int64_t result = 0;
+            switch (body->agg_op) {
+            case DL_AGG_COUNT:
+                result = src_nrows;
+                break;
+            case DL_AGG_SUM:
+            case DL_AGG_MIN:
+            case DL_AGG_MAX:
+            case DL_AGG_AVG:
+                if (src_nrows <= 0) {
+                    result = 0;
+                } else {
+                    ray_t* val_col =
+                        ray_table_get_col_idx(src_table, body->agg_value_col);
+                    if (!val_col) {
+                        result = 0;
+                    } else {
+                        int64_t* vd = (int64_t*)ray_data(val_col);
+                        if (body->agg_op == DL_AGG_SUM) {
+                            result = 0;
+                            for (int64_t i = 0; i < src_nrows; i++)
+                                result += vd[i];
+                        } else if (body->agg_op == DL_AGG_MIN) {
+                            result = vd[0];
+                            for (int64_t i = 1; i < src_nrows; i++) {
+                                if (vd[i] < result)
+                                    result = vd[i];
+                            }
+                        } else if (body->agg_op == DL_AGG_MAX) {
+                            result = vd[0];
+                            for (int64_t i = 1; i < src_nrows; i++) {
+                                if (vd[i] > result)
+                                    result = vd[i];
+                            }
+                        } else { /* DL_AGG_AVG */
+                            int64_t acc = 0;
+                            for (int64_t i = 0; i < src_nrows; i++)
+                                acc += vd[i];
+                            result = acc / src_nrows;
+                        }
+                    }
+                }
+                break;
+            default:
+                break;
+            }
+
+            int64_t nrows = ray_table_nrows(accum);
+            if (nrows == 0)
+                break;
+            ray_t* new_col = ray_vec_new(RAY_I64, nrows);
+            if (!new_col || RAY_IS_ERR(new_col))
+                break;
+            new_col->len = nrows;
+            int64_t* nd = (int64_t*)ray_data(new_col);
+            for (int64_t r = 0; r < nrows; r++)
+                nd[r] = result;
+
+            int new_col_idx = (int)ray_table_ncols(accum);
+            char colname[32];
+            snprintf(colname, sizeof(colname), "_g%d", body->agg_target_var);
+            ray_t* new_accum = dl_table_add_computed_col(accum, new_col, colname);
+            ray_release(new_col);
+            ray_release(accum);
+            accum = new_accum;
+
+            var_bound[body->agg_target_var] = true;
+            var_col[body->agg_target_var] = new_col_idx;
             break;
         }
 
