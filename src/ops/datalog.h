@@ -179,6 +179,9 @@ dl_program_t* dl_program_new(void);
 /* Free a Datalog program and release all owned tables */
 void dl_program_free(dl_program_t* prog);
 
+/** Append rules registered via the Rayfall (rule ...) special form into a program. */
+void dl_append_global_rules(dl_program_t* prog);
+
 /* Register an EDB (extensional) relation backed by an existing table.
  * Column names are auto-generated as "c0", "c1", ... unless the table
  * already has named columns. */

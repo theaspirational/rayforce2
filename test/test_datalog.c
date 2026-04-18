@@ -29,7 +29,14 @@
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/datalog.h"
+#include "lang/eval.h"
 #include <string.h>
+
+struct ray_runtime_s;
+typedef struct ray_runtime_s ray_runtime_t;
+extern ray_runtime_t* ray_runtime_create(int argc, char** argv);
+extern void           ray_runtime_destroy(ray_runtime_t* rt);
+extern ray_runtime_t* __RUNTIME;
 
 static void* datalog_setup(const void* params, void* user_data) {
     (void)params; (void)user_data;
@@ -42,6 +49,18 @@ static void datalog_teardown(void* fixture) {
     (void)fixture;
     ray_sym_destroy();
     ray_heap_destroy();
+}
+
+/* Full runtime — required for ray_eval_str("(rule ...)") surface-syntax tests. */
+static void* datalog_rf_setup(const void* params, void* user_data) {
+    (void)params; (void)user_data;
+    ray_runtime_create(0, NULL);
+    return NULL;
+}
+
+static void datalog_rf_teardown(void* fixture) {
+    (void)fixture;
+    ray_runtime_destroy(__RUNTIME);
 }
 
 /* Verify that dl_get_provenance_src_offsets and dl_get_provenance_src_data
@@ -658,6 +677,104 @@ static MunitResult test_agg_sum_grouped(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* Surface syntax: (rule (wcount ?n) (count ?n weight)) */
+static MunitResult test_agg_parse_count_scalar(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    ray_t* ok = ray_eval_str("(rule (wcount ?n) (count ?n weight))");
+    munit_assert_ptr_not_null(ok);
+    munit_assert(!RAY_IS_ERR(ok));
+    ray_release(ok);
+
+    int64_t vals[] = {50, 60, 75, 85};
+    ray_t* col = ray_vec_from_raw(RAY_I64, vals, 4);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+    dl_append_global_rules(prog);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wcount");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 4);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(col);
+    return MUNIT_OK;
+}
+
+/* Surface syntax: (rule (wsum ?s) (sum ?s weight 0)) */
+static MunitResult test_agg_parse_sum_scalar(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    ray_t* ok = ray_eval_str("(rule (wsum ?s) (sum ?s weight 0))");
+    munit_assert_ptr_not_null(ok);
+    munit_assert(!RAY_IS_ERR(ok));
+    ray_release(ok);
+
+    ray_t* weight = make_weight_edb();
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+    dl_append_global_rules(prog);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wsum");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 270);
+
+    dl_program_free(prog);
+    ray_release(weight);
+    return MUNIT_OK;
+}
+
+/* Surface syntax: (count ?n weight_by_user by ?u 0) */
+static MunitResult test_agg_parse_count_grouped(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    ray_t* ok = ray_eval_str(
+        "(rule (user_count ?u ?n) (count ?n weight_by_user by ?u 0))");
+    munit_assert_ptr_not_null(ok);
+    munit_assert(!RAY_IS_ERR(ok));
+    ray_release(ok);
+
+    int64_t users[]   = {1, 1, 2, 2};
+    int64_t weights[] = {50, 60, 75, 85};
+    ray_t* u_col = ray_vec_from_raw(RAY_I64, users, 4);
+    ray_t* w_col = ray_vec_from_raw(RAY_I64, weights, 4);
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("weight_by_user__c0", 18), u_col);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("weight_by_user__c1", 18), w_col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight_by_user", tbl, 2);
+    dl_append_global_rules(prog);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "user_count");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 2);
+
+    int64_t* uo = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    int64_t* no = (int64_t*)ray_data(ray_table_get_col_idx(out, 1));
+    int seen_u1 = 0, seen_u2 = 0;
+    for (int i = 0; i < 2; i++) {
+        if (uo[i] == 1) { munit_assert_int((int)no[i], ==, 2); seen_u1 = 1; }
+        else if (uo[i] == 2) { munit_assert_int((int)no[i], ==, 2); seen_u2 = 1; }
+    }
+    munit_assert_int(seen_u1 && seen_u2, ==, 1);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(u_col); ray_release(w_col);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -674,6 +791,9 @@ static MunitTest datalog_tests[] = {
     { "/agg_count_empty",            test_agg_count_empty,            datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_count_grouped",          test_agg_count_grouped,          datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_sum_grouped",            test_agg_sum_grouped,            datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_parse_count_scalar",     test_agg_parse_count_scalar,     datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/agg_parse_sum_scalar",       test_agg_parse_sum_scalar,       datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/agg_parse_count_grouped",    test_agg_parse_count_grouped,    datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 

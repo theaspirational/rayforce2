@@ -2413,6 +2413,12 @@ static int is_dl_var(ray_t* x) {
 static dl_rule_t  g_dl_rules[DL_MAX_RULES];
 static int        g_dl_n_rules = 0;
 
+void dl_append_global_rules(dl_program_t* prog) {
+    if (!prog) return;
+    for (int i = 0; i < g_dl_n_rules; i++)
+        dl_add_rule(prog, &g_dl_rules[i]);
+}
+
 /* Variable name -> index map for parsing a single rule or query body */
 typedef struct {
     int64_t syms[DL_MAX_ARITY * DL_MAX_BODY];
@@ -2539,6 +2545,33 @@ static bool dl_is_assignment(ray_t* clause) {
     return is_dl_var(ce[1]);
 }
 
+static bool dl_is_aggregate(ray_t* clause) {
+    if (!is_list(clause) || ray_len(clause) < 3) return false;
+    ray_t** ce = (ray_t**)ray_data(clause);
+    if (ce[0]->type != -RAY_SYM) return false;
+    ray_t* name = ray_sym_str(ce[0]->i64);
+    if (!name) return false;
+    const char* n = ray_str_ptr(name);
+    return strcmp(n, "count") == 0 || strcmp(n, "sum") == 0
+        || strcmp(n, "min")   == 0 || strcmp(n, "max") == 0
+        || strcmp(n, "avg")   == 0;
+}
+
+static int dl_agg_op_from_name(const char* n) {
+    if (strcmp(n, "count") == 0) return DL_AGG_COUNT;
+    if (strcmp(n, "sum")   == 0) return DL_AGG_SUM;
+    if (strcmp(n, "min")   == 0) return DL_AGG_MIN;
+    if (strcmp(n, "max")   == 0) return DL_AGG_MAX;
+    if (strcmp(n, "avg")   == 0) return DL_AGG_AVG;
+    return -1;
+}
+
+static bool dl_sym_is_name(ray_t* sym, const char* lit) {
+    if (!sym || sym->type != -RAY_SYM) return false;
+    ray_t* s = ray_sym_str(sym->i64);
+    return s && strcmp(ray_str_ptr(s), lit) == 0;
+}
+
 /* Resolve an AST node to a variable or constant in a body atom.
  * Sets the body position to either a variable or constant.
  * For expressions like (quote x), evaluates them first. */
@@ -2585,7 +2618,7 @@ static ray_t* dl_set_body_pos(dl_rule_t* rule, int bidx, int pos,
  * Handles triple patterns, negations, comparisons, assignments,
  * and rule invocations (positive atoms). */
 static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
-                                     dl_var_map_t* vars) {
+                                     dl_var_map_t* vars, dl_program_t* prog) {
     if (!is_list(clause) || ray_len(clause) < 1)
         return ray_error("type", "rule/query: body clause must be a list");
 
@@ -2644,6 +2677,85 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
                 ray_t* err = dl_set_body_pos(rule, bidx, (int)(j - 1), ie[j], vars);
                 if (err) return err;
             }
+        }
+        return NULL;
+    }
+
+    /* -- Aggregate: (count ?N pred) | (sum ?S pred col) | ... [by ?k col ...] -- */
+    if (dl_is_aggregate(clause)) {
+        ray_t* op_str = ray_sym_str(ce[0]->i64);
+        if (!op_str) return ray_error("type", "aggregate: bad operator");
+        int op = dl_agg_op_from_name(ray_str_ptr(op_str));
+        if (op < 0) return ray_error("type", "aggregate: unknown operator");
+
+        if (!is_dl_var(ce[1]))
+            return ray_error("type", "aggregate: first argument must be ?variable");
+        int target_vi = dl_var_get_or_create(vars, ce[1]->i64);
+        if (target_vi < 0)
+            return ray_error("domain", "aggregate: too many variables");
+
+        if (ce[2]->type != -RAY_SYM)
+            return ray_error("type", "aggregate: predicate must be a symbol");
+        ray_t* pred_sym = ray_sym_str(ce[2]->i64);
+        if (!pred_sym)
+            return ray_error("type", "aggregate: cannot resolve predicate name");
+        const char* pred_name = ray_str_ptr(pred_sym);
+
+        int pred_arity = 1;
+        if (prog) {
+            int ri = dl_find_rel(prog, pred_name);
+            if (ri >= 0) pred_arity = prog->rels[ri].arity;
+        }
+
+        int i = 3;
+        bool has_value_col = false;
+        int value_col = 0;
+        int key_vars[DL_AGG_MAX_KEYS];
+        int key_cols[DL_AGG_MAX_KEYS];
+        int n_keys = 0;
+
+        while (i < clen) {
+            if (dl_sym_is_name(ce[i], "by")) {
+                i++;
+                while (i < clen) {
+                    if (!is_dl_var(ce[i]))
+                        return ray_error("type", "aggregate: group key must be ?variable");
+                    if (n_keys >= DL_AGG_MAX_KEYS)
+                        return ray_error("domain", "aggregate: too many group keys");
+                    key_vars[n_keys] = dl_var_get_or_create(vars, ce[i]->i64);
+                    i++;
+                    if (i >= clen || ce[i]->type != -RAY_I64)
+                        return ray_error("type", "aggregate: group key column must be integer");
+                    key_cols[n_keys] = (int)ce[i]->i64;
+                    i++;
+                    n_keys++;
+                }
+                break;
+            }
+            if (ce[i]->type == -RAY_I64) {
+                if (has_value_col)
+                    return ray_error("type", "aggregate: at most one value column index");
+                has_value_col = true;
+                value_col = (int)ce[i]->i64;
+                i++;
+                continue;
+            }
+            return ray_error("type", "aggregate: unexpected token in aggregate clause");
+        }
+
+        if (op == DL_AGG_COUNT) {
+            if (has_value_col)
+                return ray_error("type", "aggregate: count does not take a value column");
+        } else {
+            if (!has_value_col)
+                return ray_error("type", "aggregate: sum/min/max/avg require a value column index");
+        }
+
+        int bidx = dl_rule_add_agg(rule, op, target_vi, pred_name, pred_arity, has_value_col ? value_col : 0);
+        if (bidx < 0) return ray_error("domain", "rule: too many body literals");
+        if (n_keys > 0) {
+            if (dl_rule_agg_set_group(rule, bidx, key_vars, key_cols, n_keys) != 0)
+                return ray_error("domain", "aggregate: cannot attach group keys");
         }
         return NULL;
     }
@@ -2725,7 +2837,7 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
 /* Parse head + body clauses into out (shared by rule and query inline rules). */
 static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
                                                 ray_t** body_args, int64_t n_body,
-                                                dl_var_map_t* vars) {
+                                                dl_var_map_t* vars, dl_program_t* prog) {
     if (!is_list(head) || ray_len(head) < 1)
         return ray_error("type", "rule: head must be (name ?var ...)");
 
@@ -2760,7 +2872,7 @@ static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
     }
 
     for (int64_t i = 0; i < n_body; i++) {
-        ray_t* err = dl_parse_body_clause(out, body_args[i], vars);
+        ray_t* err = dl_parse_body_clause(out, body_args[i], vars, prog);
         if (err) return err;
     }
 
@@ -2769,7 +2881,7 @@ static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
 }
 
 /* One inline rule: ((head-name ?a ...) body1 body2 ...) */
-static ray_t* dl_parse_inline_rule(dl_rule_t* out, ray_t* rule_list) {
+static ray_t* dl_parse_inline_rule(dl_rule_t* out, ray_t* rule_list, dl_program_t* prog) {
     if (!is_list(rule_list) || ray_len(rule_list) < 1)
         return ray_error("type", "query: each (rules ...) entry must be a non-empty list");
 
@@ -2777,7 +2889,7 @@ static ray_t* dl_parse_inline_rule(dl_rule_t* out, ray_t* rule_list) {
     int64_t rlen = ray_len(rule_list);
     dl_var_map_t vars;
     memset(&vars, 0, sizeof(vars));
-    return dl_parse_rule_from_head_and_body(out, re[0], &re[1], rlen - 1, &vars);
+    return dl_parse_rule_from_head_and_body(out, re[0], &re[1], rlen - 1, &vars, prog);
 }
 
 /* (rule (head-name ?v1 ?v2 ...) clause1 clause2 ...)
@@ -2793,7 +2905,7 @@ ray_t* ray_rule_fn(ray_t** args, int64_t n) {
     dl_var_map_t vars;
     memset(&vars, 0, sizeof(vars));
     dl_rule_t rule;
-    ray_t* perr = dl_parse_rule_from_head_and_body(&rule, args[0], &args[1], n - 1, &vars);
+    ray_t* perr = dl_parse_rule_from_head_and_body(&rule, args[0], &args[1], n - 1, &vars, NULL);
     if (perr) return perr;
 
     memcpy(&g_dl_rules[g_dl_n_rules++], &rule, sizeof(dl_rule_t));
@@ -2903,7 +3015,7 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
 
     /* Parse body clauses into the query rule */
     for (int64_t i = 1; i < where_len; i++) {
-        ray_t* err = dl_parse_body_clause(&qrule, where_elems[i], &vars);
+        ray_t* err = dl_parse_body_clause(&qrule, where_elems[i], &vars, NULL);
         if (err) { ray_release(db); return err; }
     }
     qrule.n_vars = vars.n;
@@ -2945,7 +3057,7 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
         int64_t rlen = ray_len(rules_clause);
         for (int64_t i = 1; i < rlen; i++) {
             dl_rule_t irule;
-            ray_t* rerr = dl_parse_inline_rule(&irule, re[i]);
+            ray_t* rerr = dl_parse_inline_rule(&irule, re[i], prog);
             if (rerr) {
                 dl_program_free(prog);
                 ray_release(db);
