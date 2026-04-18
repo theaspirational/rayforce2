@@ -3169,6 +3169,57 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
     /* Add the synthetic query rule */
     dl_add_rule(prog, &qrule);
 
+    /* Auto-register env-bound EDB tables referenced from rule bodies.
+     *
+     * Rationale: the primary `db` argument becomes the `eav` EDB (above).
+     * User rules can also reference additional relations by name
+     * (e.g. `(facts_i64 ?e ?a ?v)`). Rather than force callers to pre-declare
+     * every EDB, scan the program's rule bodies for positive / negative atom
+     * predicates that are not yet known as a relation, look them up in the
+     * global ray env, and register them when they resolve to a RAY_TABLE of
+     * matching arity. SYM columns are converted to I64 (same treatment as
+     * the primary `eav` table).
+     *
+     * The built-in synthetic "__query" / "eav" names are skipped. */
+    for (int ri = 0; ri < prog->n_rules; ri++) {
+        dl_rule_t* rr = &prog->rules[ri];
+        for (int bi = 0; bi < rr->n_body; bi++) {
+            dl_body_t* bd = &rr->body[bi];
+            if (bd->type != DL_POS && bd->type != DL_NEG) continue;
+            if (bd->pred[0] == '\0') continue;
+            if (strcmp(bd->pred, "eav") == 0) continue;
+            if (dl_find_rel(prog, bd->pred) >= 0) continue;
+
+            int64_t env_sym = ray_sym_intern(bd->pred, strlen(bd->pred));
+            ray_t* env_val = ray_env_get(env_sym);
+            if (!env_val || env_val->type != RAY_TABLE) continue;
+            int64_t ncols = ray_table_ncols(env_val);
+            if (ncols != bd->arity) continue;
+
+            int64_t nrows_env = ray_table_nrows(env_val);
+            ray_t* clean = ray_table_new(bd->arity);
+            for (int c = 0; c < bd->arity; c++) {
+                ray_t* col = ray_table_get_col_idx(env_val, c);
+                if (!col) continue;
+                if (col->type == RAY_SYM) {
+                    ray_t* i64col = ray_vec_new(RAY_I64, nrows_env);
+                    if (i64col && !RAY_IS_ERR(i64col)) {
+                        i64col->len = nrows_env;
+                        int64_t* d = (int64_t*)ray_data(i64col);
+                        for (int64_t r = 0; r < nrows_env; r++)
+                            d[r] = ray_read_sym(ray_data(col), r, col->type, col->attrs);
+                        clean = ray_table_add_col(clean, ray_table_col_name(env_val, c), i64col);
+                        ray_release(i64col);
+                    }
+                } else {
+                    clean = ray_table_add_col(clean, ray_table_col_name(env_val, c), col);
+                }
+            }
+            dl_add_edb(prog, bd->pred, clean, bd->arity);
+            ray_release(clean);
+        }
+    }
+
     /* Stratify and evaluate */
     if (dl_stratify(prog) != 0) {
         dl_program_free(prog);
