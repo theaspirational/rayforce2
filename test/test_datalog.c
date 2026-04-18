@@ -175,9 +175,140 @@ static MunitResult test_source_prov_requires_flag(const void* params, void* fixt
     return MUNIT_OK;
 }
 
+/* Verify cmp body literal filters tuples: rule keeps only rows where col0 < 60.
+ *
+ * Program:
+ *   EDB: weight(50), weight(60), weight(75), weight(85)
+ *   Rule: small(W) :- weight(W), (< W 60)
+ *
+ * Expected: small has exactly 1 row = 50.
+ */
+static MunitResult test_cmp_const_filter(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t vals[] = {50, 60, 75, 85};
+    ray_t* col = ray_vec_from_raw(RAY_I64, vals, 4);
+    munit_assert_ptr_not_null(col);
+
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), col);
+    munit_assert_false(RAY_IS_ERR(weight));
+
+    dl_program_t* prog = dl_program_new();
+    munit_assert_ptr_not_null(prog);
+
+    int weight_idx = dl_add_edb(prog, "weight", weight, 1);
+    munit_assert_int(weight_idx, ==, 0);
+
+    /* small(W) :- weight(W), (< W 60) */
+    dl_rule_t rule;
+    dl_rule_init(&rule, "small", 1);
+    dl_rule_head_var(&rule, 0, 0);  /* head var idx 0 = W */
+
+    int body = dl_rule_add_atom(&rule, "weight", 1);
+    dl_body_set_var(&rule, body, 0, 0);  /* weight(W) */
+
+    int cmp = dl_rule_add_cmp_const(&rule, DL_CMP_LT, 0, 60);  /* W < 60 */
+    munit_assert_int(cmp, >=, 0);
+
+    rule.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &rule), ==, 0);
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* out = dl_query(prog, "small");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+
+    ray_t* out_col = ray_table_get_col_idx(out, 0);
+    munit_assert_ptr_not_null(out_col);
+    int64_t* od = (int64_t*)ray_data(out_col);
+    munit_assert_int((int)od[0], ==, 50);
+
+    dl_program_free(prog);
+    ray_release(weight);
+    ray_release(col);
+    return MUNIT_OK;
+}
+
+/* Verify arithmetic assignment derives a new variable from input columns.
+ *
+ * Program:
+ *   EDB: pair(2, 3), pair(5, 7), pair(10, 1)
+ *   Rule: sum_rel(A, B, S) :- pair(A, B), (= S (+ A B))
+ *
+ * Expected: sum_rel has 3 rows: (2,3,5), (5,7,12), (10,1,11).
+ */
+static MunitResult test_arith_assignment(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t a_vals[] = {2, 5, 10};
+    int64_t b_vals[] = {3, 7, 1};
+    ray_t* a_col = ray_vec_from_raw(RAY_I64, a_vals, 3);
+    ray_t* b_col = ray_vec_from_raw(RAY_I64, b_vals, 3);
+    munit_assert_ptr_not_null(a_col);
+    munit_assert_ptr_not_null(b_col);
+
+    ray_t* pair = ray_table_new(2);
+    pair = ray_table_add_col(pair, ray_sym_intern("pair__c0", 8), a_col);
+    munit_assert_false(RAY_IS_ERR(pair));
+    pair = ray_table_add_col(pair, ray_sym_intern("pair__c1", 8), b_col);
+    munit_assert_false(RAY_IS_ERR(pair));
+
+    dl_program_t* prog = dl_program_new();
+    munit_assert_ptr_not_null(prog);
+    munit_assert_int(dl_add_edb(prog, "pair", pair, 2), ==, 0);
+
+    /* sum_rel(A, B, S) :- pair(A, B), (= S (+ A B)) */
+    dl_rule_t rule;
+    dl_rule_init(&rule, "sum_rel", 3);
+    dl_rule_head_var(&rule, 0, 0);  /* A */
+    dl_rule_head_var(&rule, 1, 1);  /* B */
+    dl_rule_head_var(&rule, 2, 2);  /* S */
+
+    int body = dl_rule_add_atom(&rule, "pair", 2);
+    dl_body_set_var(&rule, body, 0, 0);  /* A */
+    dl_body_set_var(&rule, body, 1, 1);  /* B */
+
+    /* expr = (+ A B) */
+    dl_expr_t* expr = dl_expr_binop(OP_ADD, dl_expr_var(0), dl_expr_var(1));
+    munit_assert_ptr_not_null(expr);
+    int as = dl_rule_add_assign(&rule, 2, DL_OP_EQ, expr);  /* S = A + B */
+    munit_assert_int(as, >=, 0);
+
+    rule.n_vars = 3;
+    munit_assert_int(dl_add_rule(prog, &rule), ==, 0);
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* out = dl_query(prog, "sum_rel");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 3);
+
+    ray_t* s_col = ray_table_get_col_idx(out, 2);
+    munit_assert_ptr_not_null(s_col);
+    int64_t* sd = (int64_t*)ray_data(s_col);
+    /* Sums must include 5, 12, 11 (order may differ). */
+    int saw5 = 0, saw12 = 0, saw11 = 0;
+    for (int i = 0; i < 3; i++) {
+        if (sd[i] == 5)  saw5  = 1;
+        if (sd[i] == 12) saw12 = 1;
+        if (sd[i] == 11) saw11 = 1;
+    }
+    munit_assert_int(saw5,  ==, 1);
+    munit_assert_int(saw12, ==, 1);
+    munit_assert_int(saw11, ==, 1);
+
+    dl_program_free(prog);
+    ray_release(pair);
+    ray_release(a_col);
+    ray_release(b_col);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
+    { "/cmp_const_filter",          test_cmp_const_filter,          datalog_setup, datalog_teardown, 0, NULL },
+    { "/arith_assignment",          test_arith_assignment,          datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
