@@ -1031,6 +1031,15 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 ? ray_table_nrows(src_table)
                 : 0;
 
+            if (src_nrows == 0 && (body->agg_op == DL_AGG_MIN
+                     || body->agg_op == DL_AGG_MAX
+                     || body->agg_op == DL_AGG_AVG)) {
+                /* Empty-source: MIN/MAX/AVG emit no row (matches rayforce core's domain
+                 * error / typed-null semantics). COUNT and SUM keep their identities (0). */
+                ray_release(accum);
+                return NULL;
+            }
+
             int64_t result = 0;
             switch (body->agg_op) {
             case DL_AGG_COUNT:

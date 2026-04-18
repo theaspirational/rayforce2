@@ -512,6 +512,62 @@ static MunitResult test_agg_avg(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* MIN over empty source -> rule produces no row. */
+static MunitResult test_agg_min_empty(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t dummy = 0;
+    ray_t* empty_vec = ray_vec_from_raw(RAY_I64, &dummy, 0);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), empty_vec);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wmin", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_MIN, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wmin");
+    /* Either NULL (no rel) or a 0-row table is acceptable "no row" semantics. */
+    if (out) munit_assert_int((int)ray_table_nrows(out), ==, 0);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(empty_vec);
+    return MUNIT_OK;
+}
+
+/* COUNT over empty source -> 1 row with value 0 (well-defined). */
+static MunitResult test_agg_count_empty(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t dummy = 0;
+    ray_t* empty_vec = ray_vec_from_raw(RAY_I64, &dummy, 0);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), empty_vec);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wcnt", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_COUNT, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wcnt");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 0);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(empty_vec);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -524,6 +580,8 @@ static MunitTest datalog_tests[] = {
     { "/agg_min",                    test_agg_min,                    datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_max",                    test_agg_max,                    datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_avg",                    test_agg_avg,                    datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_min_empty",              test_agg_min_empty,              datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_count_empty",            test_agg_count_empty,            datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
