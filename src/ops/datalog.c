@@ -2835,6 +2835,25 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
         return NULL;
     }
 
+    /* -- Between sugar: (between ?x lo hi) -> (>= ?x lo) and (<= ?x hi) -- */
+    if (clen == 4 && ce[0]->type == -RAY_SYM) {
+        ray_t* nm = ray_sym_str(ce[0]->i64);
+        if (nm && strcmp(ray_str_ptr(nm), "between") == 0) {
+            if (!is_dl_var(ce[1]))
+                return ray_error("type", "between target must be a ?variable");
+            int vi = dl_var_get_or_create(vars, ce[1]->i64);
+            if (vi < 0)
+                return ray_error("domain", "between: too many variables");
+            if (ce[2]->type != -RAY_I64 || ce[3]->type != -RAY_I64)
+                return ray_error("type", "between bounds must be integer constants");
+            if (dl_rule_add_cmp_const(rule, DL_CMP_GE, vi, ce[2]->i64) < 0)
+                return ray_error("domain", "rule: too many body literals");
+            if (dl_rule_add_cmp_const(rule, DL_CMP_LE, vi, ce[3]->i64) < 0)
+                return ray_error("domain", "rule: too many body literals");
+            return NULL;
+        }
+    }
+
     /* -- Assignment: (= ?var expr) -- */
     if (dl_is_assignment(clause)) {
         int target_vi = dl_var_get_or_create(vars, ce[1]->i64);

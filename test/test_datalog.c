@@ -813,6 +813,43 @@ static MunitResult test_agg_parse_count_grouped(const void* params, void* fixtur
     return MUNIT_OK;
 }
 
+/* Surface syntax: (between ?w lo hi) -> two cmp literals; weight 50,60,75,85 -> mid: 60, 75 */
+static MunitResult test_between_sugar_parse(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    ray_t* ok = ray_eval_str(
+        "(rule (mid ?w) (weight ?w) (between ?w 60 80))");
+    munit_assert_ptr_not_null(ok);
+    munit_assert(!RAY_IS_ERR(ok));
+    ray_release(ok);
+
+    int64_t vals[] = {50, 60, 75, 85};
+    ray_t* col = ray_vec_from_raw(RAY_I64, vals, 4);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+    dl_append_global_rules(prog);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "mid");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 2);
+
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    int seen60 = 0, seen75 = 0;
+    for (int i = 0; i < 2; i++) {
+        if (od[i] == 60) seen60 = 1;
+        else if (od[i] == 75) seen75 = 1;
+    }
+    munit_assert_int(seen60 && seen75, ==, 1);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(col);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -833,6 +870,7 @@ static MunitTest datalog_tests[] = {
     { "/agg_parse_count_scalar",     test_agg_parse_count_scalar,     datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_parse_sum_scalar",       test_agg_parse_sum_scalar,       datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_parse_count_grouped",    test_agg_parse_count_grouped,    datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/between_sugar_parse",        test_between_sugar_parse,        datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
