@@ -387,6 +387,7 @@ int dl_rule_add_agg(dl_rule_t* rule, int op, int target_var,
     snprintf(b->agg_pred, sizeof(b->agg_pred), "%s", pred);
     b->agg_arity      = pred_arity;
     b->agg_value_col  = value_col;
+    if (target_var + 1 > rule->n_vars) rule->n_vars = target_var + 1;
     return idx;
 }
 

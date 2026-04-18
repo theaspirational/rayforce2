@@ -319,6 +319,18 @@ static MunitResult test_agg_builder(const void* params, void* fixture) {
     munit_assert_string_equal(rule.body[0].agg_pred, "weight");
     munit_assert_int(rule.body[0].agg_arity,      ==, 1);
     munit_assert_int(rule.body[0].agg_value_col,  ==, 0);
+    munit_assert_int(rule.n_vars, ==, 1);
+
+    dl_rule_t rule2;
+    dl_rule_init(&rule2, "sum_stats", 1);
+    dl_rule_head_var(&rule2, 0, 3);
+    int idx2 = dl_rule_add_agg(&rule2, DL_AGG_SUM, 3, "readings", 4, 2);
+    munit_assert_int(idx2, ==, 0);
+    munit_assert_int(rule2.body[0].agg_op,        ==, DL_AGG_SUM);
+    munit_assert_int(rule2.body[0].agg_target_var, ==, 3);
+    munit_assert_int(rule2.body[0].agg_arity,     ==, 4);
+    munit_assert_int(rule2.body[0].agg_value_col, ==, 2);
+    munit_assert_int(rule2.n_vars,                ==, 4);
     return MUNIT_OK;
 }
 
