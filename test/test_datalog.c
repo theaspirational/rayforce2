@@ -408,13 +408,13 @@ static ray_t* make_weight_edb(void) {
     ray_t* col = ray_vec_from_raw(RAY_I64, vals, 4);
     ray_t* weight = ray_table_new(1);
     weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), col);
+    ray_release(col);
     return weight;
 }
 
 static MunitResult test_agg_sum(const void* params, void* fixture) {
     (void)params; (void)fixture;
     ray_t* weight = make_weight_edb();
-    ray_t* col = ray_table_get_col_idx(weight, 0);
 
     dl_program_t* prog = dl_program_new();
     dl_add_edb(prog, "weight", weight, 1);
@@ -433,14 +433,13 @@ static MunitResult test_agg_sum(const void* params, void* fixture) {
     munit_assert_int((int)od[0], ==, 270);
 
     dl_program_free(prog);
-    ray_release(weight); ray_release(col);
+    ray_release(weight);
     return MUNIT_OK;
 }
 
 static MunitResult test_agg_min(const void* params, void* fixture) {
     (void)params; (void)fixture;
     ray_t* weight = make_weight_edb();
-    ray_t* col = ray_table_get_col_idx(weight, 0);
 
     dl_program_t* prog = dl_program_new();
     dl_add_edb(prog, "weight", weight, 1);
@@ -459,14 +458,13 @@ static MunitResult test_agg_min(const void* params, void* fixture) {
     munit_assert_int((int)od[0], ==, 50);
 
     dl_program_free(prog);
-    ray_release(weight); ray_release(col);
+    ray_release(weight);
     return MUNIT_OK;
 }
 
 static MunitResult test_agg_max(const void* params, void* fixture) {
     (void)params; (void)fixture;
     ray_t* weight = make_weight_edb();
-    ray_t* col = ray_table_get_col_idx(weight, 0);
 
     dl_program_t* prog = dl_program_new();
     dl_add_edb(prog, "weight", weight, 1);
@@ -485,14 +483,13 @@ static MunitResult test_agg_max(const void* params, void* fixture) {
     munit_assert_int((int)od[0], ==, 85);
 
     dl_program_free(prog);
-    ray_release(weight); ray_release(col);
+    ray_release(weight);
     return MUNIT_OK;
 }
 
 static MunitResult test_agg_avg(const void* params, void* fixture) {
     (void)params; (void)fixture;
     ray_t* weight = make_weight_edb();
-    ray_t* col = ray_table_get_col_idx(weight, 0);
 
     dl_program_t* prog = dl_program_new();
     dl_add_edb(prog, "weight", weight, 1);
@@ -511,7 +508,7 @@ static MunitResult test_agg_avg(const void* params, void* fixture) {
     munit_assert_int((int)od[0], ==, 67);
 
     dl_program_free(prog);
-    ray_release(weight); ray_release(col);
+    ray_release(weight);
     return MUNIT_OK;
 }
 

@@ -1045,7 +1045,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 } else {
                     ray_t* val_col =
                         ray_table_get_col_idx(src_table, body->agg_value_col);
-                    if (!val_col) {
+                    if (!val_col || val_col->type != RAY_I64) {
                         result = 0;
                     } else {
                         int64_t* vd = (int64_t*)ray_data(val_col);
