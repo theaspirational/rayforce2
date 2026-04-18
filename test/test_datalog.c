@@ -334,12 +334,53 @@ static MunitResult test_agg_builder(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* Aggregates over an IDB must be evaluated in a strictly higher stratum
+ * than the IDB itself. Program:
+ *   EDB: edge(1,2), edge(2,3)
+ *   Rule R0: path(X,Y) :- edge(X,Y)
+ *   Rule R1: path_count(N) :- (count ?N path)
+ * After stratification: R1.stratum > R0.stratum. */
+static MunitResult test_agg_stratifies_above_source(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t s_vals[] = {1, 2};
+    int64_t d_vals[] = {2, 3};
+    ray_t* sc = ray_vec_from_raw(RAY_I64, s_vals, 2);
+    ray_t* dc = ray_vec_from_raw(RAY_I64, d_vals, 2);
+    ray_t* edge = ray_table_new(2);
+    edge = ray_table_add_col(edge, ray_sym_intern("edge__c0", 8), sc);
+    edge = ray_table_add_col(edge, ray_sym_intern("edge__c1", 8), dc);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "edge", edge, 2);
+
+    dl_rule_t r0; dl_rule_init(&r0, "path", 2);
+    dl_rule_head_var(&r0, 0, 0); dl_rule_head_var(&r0, 1, 1);
+    int b = dl_rule_add_atom(&r0, "edge", 2);
+    dl_body_set_var(&r0, b, 0, 0); dl_body_set_var(&r0, b, 1, 1);
+    r0.n_vars = 2;
+    dl_add_rule(prog, &r0);
+
+    dl_rule_t r1; dl_rule_init(&r1, "path_count", 1);
+    dl_rule_head_var(&r1, 0, 0);
+    dl_rule_add_agg(&r1, DL_AGG_COUNT, 0, "path", 2, 0);
+    r1.n_vars = 1;
+    dl_add_rule(prog, &r1);
+
+    munit_assert_int(dl_stratify(prog), ==, 0);
+    munit_assert_int(prog->rules[1].stratum, >, prog->rules[0].stratum);
+
+    dl_program_free(prog);
+    ray_release(edge); ray_release(sc); ray_release(dc);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
     { "/cmp_const_filter",          test_cmp_const_filter,          datalog_setup, datalog_teardown, 0, NULL },
     { "/arith_assignment",          test_arith_assignment,          datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_builder",                test_agg_builder,                datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_stratifies_above_source", test_agg_stratifies_above_source, datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 

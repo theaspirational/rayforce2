@@ -412,6 +412,14 @@ int dl_stratify(dl_program_t* prog) {
 
         for (int b = 0; b < rule->n_body; b++) {
             dl_body_t* body = &rule->body[b];
+            if (body->type == DL_AGG) {
+                /* Aggregates are non-monotonic: head must live in a higher
+                 * stratum than the predicate being aggregated. */
+                int body_idx = dl_find_rel(prog, body->agg_pred);
+                if (body_idx < 0) continue;
+                dep[head_idx][body_idx] = 2;  /* negative (non-monotonic) dep */
+                continue;
+            }
             if (body->type != DL_POS && body->type != DL_NEG) continue;
             int body_idx = dl_find_rel(prog, body->pred);
             if (body_idx < 0) continue;
