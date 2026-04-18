@@ -625,6 +625,87 @@ static MunitResult test_agg_count_empty(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* MAX over empty source -> rule produces no row. */
+static MunitResult test_agg_max_empty(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t dummy = 0;
+    ray_t* empty_vec = ray_vec_from_raw(RAY_I64, &dummy, 0);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), empty_vec);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wmax", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_MAX, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wmax");
+    if (out) munit_assert_int((int)ray_table_nrows(out), ==, 0);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(empty_vec);
+    return MUNIT_OK;
+}
+
+/* SUM over empty source -> one row with value 0 (additive identity). */
+static MunitResult test_agg_sum_empty(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t dummy = 0;
+    ray_t* empty_vec = ray_vec_from_raw(RAY_I64, &dummy, 0);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), empty_vec);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wsum", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_SUM, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wsum");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    munit_assert_int((int)od[0], ==, 0);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(empty_vec);
+    return MUNIT_OK;
+}
+
+/* AVG over empty source -> rule produces no row. */
+static MunitResult test_agg_avg_empty(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t dummy = 0;
+    ray_t* empty_vec = ray_vec_from_raw(RAY_I64, &dummy, 0);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), empty_vec);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "wavg", 1);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_add_agg(&r, DL_AGG_AVG, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "wavg");
+    if (out) munit_assert_int((int)ray_table_nrows(out), ==, 0);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(empty_vec);
+    return MUNIT_OK;
+}
+
 /* weight_by_user(user_id, kg): (1,50), (1,60), (2,75), (2,85)
  * Rule: user_count(?u, ?n) :- count(?n, weight_by_user) by (?u, col 0)
  * Expected: (1,2), (2,2) */
@@ -850,6 +931,42 @@ static MunitResult test_between_sugar_parse(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* A5 aggregate parser rejects COUNT with explicit value column. */
+static MunitResult test_agg_parse_reject_count_with_col(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* r = ray_eval_str("(rule (w ?n) (count ?n weight 0))");
+    munit_assert_true(RAY_IS_ERR(r));
+    ray_release(r);
+    return MUNIT_OK;
+}
+
+/* A5 aggregate parser rejects SUM without value column index. */
+static MunitResult test_agg_parse_reject_sum_without_col(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* r = ray_eval_str("(rule (w ?s) (sum ?s weight))");
+    munit_assert_true(RAY_IS_ERR(r));
+    ray_release(r);
+    return MUNIT_OK;
+}
+
+/* A5 aggregate parser rejects incomplete `by` clause (missing column after key var). */
+static MunitResult test_agg_parse_reject_by_missing_col(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* r = ray_eval_str("(rule (w ?n) (count ?n weight by ?k))");
+    munit_assert_true(RAY_IS_ERR(r));
+    ray_release(r);
+    return MUNIT_OK;
+}
+
+/* A5 aggregate parser rejects non-variable aggregate target. */
+static MunitResult test_agg_parse_reject_non_var_target(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* r = ray_eval_str("(rule (w ?x) (count 5 weight))");
+    munit_assert_true(RAY_IS_ERR(r));
+    ray_release(r);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -864,12 +981,19 @@ static MunitTest datalog_tests[] = {
     { "/agg_max",                    test_agg_max,                    datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_avg",                    test_agg_avg,                    datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_min_empty",              test_agg_min_empty,              datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_max_empty",              test_agg_max_empty,              datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_sum_empty",              test_agg_sum_empty,              datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_avg_empty",              test_agg_avg_empty,              datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_count_empty",            test_agg_count_empty,            datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_count_grouped",          test_agg_count_grouped,          datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_sum_grouped",            test_agg_sum_grouped,            datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_parse_count_scalar",     test_agg_parse_count_scalar,     datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_parse_sum_scalar",       test_agg_parse_sum_scalar,       datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_parse_count_grouped",    test_agg_parse_count_grouped,    datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/agg_parse_reject_count_with_col", test_agg_parse_reject_count_with_col, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/agg_parse_reject_sum_without_col",  test_agg_parse_reject_sum_without_col,  datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/agg_parse_reject_by_missing_col",   test_agg_parse_reject_by_missing_col,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/agg_parse_reject_non_var_target",   test_agg_parse_reject_non_var_target,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/between_sugar_parse",        test_between_sugar_parse,        datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
