@@ -323,6 +323,41 @@ static MunitResult test_arith_assignment(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* Float arithmetic: (rule (fres ?x ?z) (trig ?x) (= ?z (+ 1.5 2.5))) -> z = 4.0 */
+static MunitResult test_arith_assign_f64(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t one[] = { 1 };
+    ray_t* col = ray_vec_from_raw(RAY_I64, one, 1);
+    ray_t* trig = ray_table_new(1);
+    trig = ray_table_add_col(trig, ray_sym_intern("trig__c0", 8), col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "trig", trig, 1);
+
+    dl_rule_t r; dl_rule_init(&r, "fres", 2);
+    dl_rule_head_var(&r, 0, 0); dl_rule_head_var(&r, 1, 1);
+    int b = dl_rule_add_atom(&r, "trig", 1);
+    dl_body_set_var(&r, b, 0, 0);
+
+    dl_expr_t* e = dl_expr_binop(OP_ADD, dl_expr_const_f64(1.5), dl_expr_const_f64(2.5));
+    dl_rule_add_assign(&r, 1, DL_OP_EQ, e);
+    r.n_vars = 2;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "fres");
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    ray_t* z_col = ray_table_get_col_idx(out, 1);
+    munit_assert_ptr_not_null(z_col);
+    munit_assert_int(z_col->type, ==, RAY_F64);
+    double* zd = (double*)ray_data(z_col);
+    munit_assert_double_equal(zd[0], 4.0, 4);
+
+    dl_program_free(prog);
+    ray_release(trig); ray_release(col);
+    return MUNIT_OK;
+}
+
 /* Verify dl_rule_add_agg populates body fields correctly. */
 static MunitResult test_agg_builder(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -523,8 +558,11 @@ static MunitResult test_agg_avg(const void* params, void* fixture) {
     ray_t* out = dl_query(prog, "wavg");
     munit_assert_ptr_not_null(out);
     munit_assert_int((int)ray_table_nrows(out), ==, 1);
-    int64_t* od = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
-    munit_assert_int((int)od[0], ==, 67);
+    ray_t* avg_col = ray_table_get_col_idx(out, 0);
+    munit_assert_ptr_not_null(avg_col);
+    munit_assert_int(avg_col->type, ==, RAY_F64);
+    double* od = (double*)ray_data(avg_col);
+    munit_assert_double_equal(od[0], 67.5, 4);
 
     dl_program_free(prog);
     ray_release(weight);
@@ -780,6 +818,7 @@ static MunitTest datalog_tests[] = {
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
     { "/cmp_const_filter",          test_cmp_const_filter,          datalog_setup, datalog_teardown, 0, NULL },
     { "/arith_assignment",          test_arith_assignment,          datalog_setup, datalog_teardown, 0, NULL },
+    { "/arith_assign_f64",           test_arith_assign_f64,           datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_builder",                test_agg_builder,                datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_stratifies_above_source", test_agg_stratifies_above_source, datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_count_edb",              test_agg_count_edb,              datalog_setup, datalog_teardown, 0, NULL },

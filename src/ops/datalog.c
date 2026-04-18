@@ -284,6 +284,14 @@ dl_expr_t* dl_expr_const(int64_t val) {
     return e;
 }
 
+dl_expr_t* dl_expr_const_f64(double val) {
+    dl_expr_t* e = dl_expr_alloc();
+    if (!e) return NULL;
+    e->kind = DL_EXPR_CONST_F64;
+    e->const_f64 = val;
+    return e;
+}
+
 dl_expr_t* dl_expr_var(int var_idx) {
     dl_expr_t* e = dl_expr_alloc();
     if (!e) return NULL;
@@ -513,8 +521,26 @@ int dl_stratify(dl_program_t* prog) {
  * Expression evaluation — compute column from expression tree
  * ======================================================================== */
 
+/* Helper: materialize a column of the given type/size as a copy or promotion
+ * of src. If target==RAY_F64 and src is RAY_I64, promote. Returns new owned column. */
+static ray_t* dl_col_as_f64(ray_t* src, int64_t nrows) {
+    ray_t* out = ray_vec_new(RAY_F64, nrows);
+    if (!out || RAY_IS_ERR(out)) return NULL;
+    out->len = nrows;
+    double* od = (double*)ray_data(out);
+    if (src->type == RAY_F64) {
+        memcpy(od, ray_data(src), (size_t)nrows * sizeof(double));
+    } else { /* RAY_I64 */
+        int64_t* sd = (int64_t*)ray_data(src);
+        for (int64_t r = 0; r < nrows; r++) od[r] = (double)sd[r];
+    }
+    return out;
+}
+
 /* Evaluate an expression tree against the accumulator table.
- * Returns a new owned I64 vector of length nrows. */
+ * Returns a new owned vector of length nrows. The element type is RAY_F64
+ * if the expression involves any float constant or any RAY_F64 source column,
+ * otherwise RAY_I64. */
 static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
                              int* var_col, int64_t nrows) {
     if (!expr) return NULL;
@@ -529,14 +555,25 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
             d[r] = expr->const_val;
         return col;
     }
+    case DL_EXPR_CONST_F64: {
+        ray_t* col = ray_vec_new(RAY_F64, nrows);
+        if (!col || RAY_IS_ERR(col)) return NULL;
+        col->len = nrows;
+        double* d = (double*)ray_data(col);
+        for (int64_t r = 0; r < nrows; r++)
+            d[r] = expr->const_f64;
+        return col;
+    }
     case DL_EXPR_VAR: {
         int ci = var_col[expr->var_idx];
         ray_t* src = ray_table_get_col_idx(accum, ci);
         if (!src) return NULL;
-        ray_t* dst = ray_vec_new(RAY_I64, nrows);
+        int8_t t = (src->type == RAY_F64) ? RAY_F64 : RAY_I64;
+        size_t elem = (t == RAY_F64) ? sizeof(double) : sizeof(int64_t);
+        ray_t* dst = ray_vec_new(t, nrows);
         if (!dst || RAY_IS_ERR(dst)) return NULL;
         dst->len = nrows;
-        memcpy(ray_data(dst), ray_data(src), (size_t)nrows * sizeof(int64_t));
+        memcpy(ray_data(dst), ray_data(src), (size_t)nrows * elem);
         return dst;
     }
     case DL_EXPR_BINOP: {
@@ -546,6 +583,36 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
             if (lv) ray_release(lv);
             if (rv) ray_release(rv);
             return NULL;
+        }
+        bool is_f64 = (lv->type == RAY_F64) || (rv->type == RAY_F64);
+        if (is_f64) {
+            ray_t* lf = dl_col_as_f64(lv, nrows);
+            ray_t* rf = dl_col_as_f64(rv, nrows);
+            ray_release(lv); ray_release(rv);
+            if (!lf || !rf) {
+                if (lf) ray_release(lf);
+                if (rf) ray_release(rf);
+                return NULL;
+            }
+            ray_t* out = ray_vec_new(RAY_F64, nrows);
+            if (!out || RAY_IS_ERR(out)) {
+                ray_release(lf); ray_release(rf); return NULL;
+            }
+            out->len = nrows;
+            double* ld = (double*)ray_data(lf);
+            double* rd = (double*)ray_data(rf);
+            double* od = (double*)ray_data(out);
+            for (int64_t r = 0; r < nrows; r++) {
+                switch (expr->binop) {
+                case OP_ADD: od[r] = ld[r] + rd[r]; break;
+                case OP_SUB: od[r] = ld[r] - rd[r]; break;
+                case OP_MUL: od[r] = ld[r] * rd[r]; break;
+                case OP_DIV: od[r] = rd[r] != 0.0 ? ld[r] / rd[r] : 0.0; break;
+                default:     od[r] = 0.0; break;
+                }
+            }
+            ray_release(lf); ray_release(rf);
+            return out;
         }
         ray_t* out = ray_vec_new(RAY_I64, nrows);
         if (!out || RAY_IS_ERR(out)) {
@@ -1152,6 +1219,8 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             }
 
             int64_t result = 0;
+            double  favg = 0.0;
+            bool    is_avg = (body->agg_op == DL_AGG_AVG);
             switch (body->agg_op) {
             case DL_AGG_COUNT:
                 result = src_nrows;
@@ -1189,7 +1258,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                             int64_t acc = 0;
                             for (int64_t i = 0; i < src_nrows; i++)
                                 acc += vd[i];
-                            result = acc / src_nrows;
+                            favg = (double)acc / (double)src_nrows;
                         }
                     }
                 }
@@ -1201,13 +1270,17 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             int64_t nrows = ray_table_nrows(accum);
             if (nrows == 0)
                 break;
-            ray_t* new_col = ray_vec_new(RAY_I64, nrows);
+            ray_t* new_col = ray_vec_new(is_avg ? RAY_F64 : RAY_I64, nrows);
             if (!new_col || RAY_IS_ERR(new_col))
                 break;
             new_col->len = nrows;
-            int64_t* nd = (int64_t*)ray_data(new_col);
-            for (int64_t r = 0; r < nrows; r++)
-                nd[r] = result;
+            if (is_avg) {
+                double* nd = (double*)ray_data(new_col);
+                for (int64_t r = 0; r < nrows; r++) nd[r] = favg;
+            } else {
+                int64_t* nd = (int64_t*)ray_data(new_col);
+                for (int64_t r = 0; r < nrows; r++) nd[r] = result;
+            }
 
             int new_col_idx = (int)ray_table_ncols(accum);
             char colname[32];
@@ -2461,6 +2534,8 @@ static dl_expr_t* dl_build_expr(ray_t* node, dl_var_map_t* vars) {
     if (!node) return NULL;
     if (node->type == -RAY_I64)
         return dl_expr_const(node->i64);
+    if (node->type == -RAY_F64)
+        return dl_expr_const_f64(node->f64);
     if (node->type == -RAY_SYM && is_dl_var(node)) {
         int vi = dl_var_get_or_create(vars, node->i64);
         return (vi >= 0) ? dl_expr_var(vi) : NULL;

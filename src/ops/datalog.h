@@ -71,14 +71,16 @@
 
 /* ===== Expression AST for assignments ===== */
 typedef enum {
-    DL_EXPR_CONST,    /* integer constant */
-    DL_EXPR_VAR,      /* bound variable reference */
-    DL_EXPR_BINOP,    /* binary op: +, -, *, / */
+    DL_EXPR_CONST,        /* integer constant (back-compat) */
+    DL_EXPR_CONST_F64,    /* float constant */
+    DL_EXPR_VAR,          /* bound variable reference */
+    DL_EXPR_BINOP,        /* binary op: +, -, *, / */
 } dl_expr_kind_t;
 
 typedef struct dl_expr {
     dl_expr_kind_t  kind;
     int64_t         const_val;   /* for DL_EXPR_CONST */
+    double          const_f64;   /* for DL_EXPR_CONST_F64 */
     int             var_idx;     /* for DL_EXPR_VAR */
     int             binop;       /* for DL_EXPR_BINOP: OP_ADD, OP_SUB, etc. */
     struct dl_expr *left;        /* for DL_EXPR_BINOP */
@@ -293,6 +295,9 @@ int dl_rule_agg_set_group(dl_rule_t* rule, int body_idx,
 
 /* Create a constant expression */
 dl_expr_t* dl_expr_const(int64_t val);
+
+/* Create a float constant expression */
+dl_expr_t* dl_expr_const_f64(double val);
 
 /* Create a variable reference expression */
 dl_expr_t* dl_expr_var(int var_idx);
