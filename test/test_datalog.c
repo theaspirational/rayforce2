@@ -304,11 +304,30 @@ static MunitResult test_arith_assignment(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* Verify dl_rule_add_agg populates body fields correctly. */
+static MunitResult test_agg_builder(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    dl_rule_t rule;
+    dl_rule_init(&rule, "stats", 1);
+    dl_rule_head_var(&rule, 0, 0);
+
+    int idx = dl_rule_add_agg(&rule, DL_AGG_COUNT, 0, "weight", 1, 0);
+    munit_assert_int(idx, ==, 0);
+    munit_assert_int(rule.body[0].type,           ==, DL_AGG);
+    munit_assert_int(rule.body[0].agg_op,         ==, DL_AGG_COUNT);
+    munit_assert_int(rule.body[0].agg_target_var, ==, 0);
+    munit_assert_string_equal(rule.body[0].agg_pred, "weight");
+    munit_assert_int(rule.body[0].agg_arity,      ==, 1);
+    munit_assert_int(rule.body[0].agg_value_col,  ==, 0);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
     { "/cmp_const_filter",          test_cmp_const_filter,          datalog_setup, datalog_teardown, 0, NULL },
     { "/arith_assignment",          test_arith_assignment,          datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_builder",                test_agg_builder,                datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 

@@ -375,6 +375,21 @@ int dl_rule_add_interval(dl_rule_t* rule, int fact_var, int start_var, int end_v
     return idx;
 }
 
+int dl_rule_add_agg(dl_rule_t* rule, int op, int target_var,
+                    const char* pred, int pred_arity, int value_col) {
+    if (rule->n_body >= DL_MAX_BODY) return -1;
+    int idx = rule->n_body++;
+    dl_body_t* b = &rule->body[idx];
+    memset(b, 0, sizeof(*b));
+    b->type           = DL_AGG;
+    b->agg_op         = op;
+    b->agg_target_var = target_var;
+    snprintf(b->agg_pred, sizeof(b->agg_pred), "%s", pred);
+    b->agg_arity      = pred_arity;
+    b->agg_value_col  = value_col;
+    return idx;
+}
+
 /* ========================================================================
  * Stratification — topological sort on negation dependency graph
  * ======================================================================== */
