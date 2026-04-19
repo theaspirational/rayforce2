@@ -1517,7 +1517,8 @@ ray_op_t* ray_euclidean_dist(ray_graph_t* g, ray_op_t* emb_col,
 }
 
 ray_op_t* ray_knn(ray_graph_t* g, ray_op_t* emb_col,
-                 const float* query_vec, int32_t dim, int64_t k) {
+                 const float* query_vec, int32_t dim, int64_t k,
+                 ray_hnsw_metric_t metric) {
     if (!g || !emb_col || !query_vec || dim <= 0 || k <= 0) return NULL;
 
     ray_op_ext_t* ext = graph_alloc_ext_node(g);
@@ -1533,6 +1534,7 @@ ray_op_t* ray_knn(ray_graph_t* g, ray_op_t* emb_col,
     ext->vector.query_vec = (float*)query_vec;
     ext->vector.dim       = dim;
     ext->vector.k         = k;
+    ext->vector.metric    = (int32_t)metric;
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];
@@ -1698,6 +1700,60 @@ ray_op_t* ray_hnsw_knn(ray_graph_t* g, ray_hnsw_t* idx,
     ext->hnsw.dim       = dim;
     ext->hnsw.k         = k;
     ext->hnsw.ef_search = ef_search > 0 ? ef_search : HNSW_DEFAULT_EF_S;
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
+ray_op_t* ray_ann_rerank(ray_graph_t* g, ray_op_t* src,
+                         ray_hnsw_t* idx, const float* query_vec,
+                         int32_t dim, int64_t k, int32_t ef_search) {
+    if (!g || !src || !idx || !query_vec || dim <= 0 || k <= 0) return NULL;
+
+    uint32_t src_id = src->id;
+    ray_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+    src = &g->nodes[src_id];
+
+    ext->base.opcode     = OP_ANN_RERANK;
+    ext->base.arity      = 1;
+    ext->base.inputs[0]  = src;
+    ext->base.out_type   = RAY_TABLE;
+    ext->base.est_rows   = (uint32_t)k;
+    ext->rerank.hnsw_idx  = idx;
+    ext->rerank.col_sym   = 0;
+    ext->rerank.query_vec = (float*)query_vec;
+    ext->rerank.dim       = dim;
+    ext->rerank.metric    = idx ? idx->metric : RAY_HNSW_COSINE;
+    ext->rerank.k         = k;
+    ext->rerank.ef_search = ef_search > 0 ? ef_search : HNSW_DEFAULT_EF_S;
+
+    g->nodes[ext->base.id] = ext->base;
+    return &g->nodes[ext->base.id];
+}
+
+ray_op_t* ray_knn_rerank(ray_graph_t* g, ray_op_t* src,
+                         int64_t col_sym, const float* query_vec,
+                         int32_t dim, int64_t k, ray_hnsw_metric_t metric) {
+    if (!g || !src || !query_vec || dim <= 0 || k <= 0 || col_sym <= 0) return NULL;
+
+    uint32_t src_id = src->id;
+    ray_op_ext_t* ext = graph_alloc_ext_node(g);
+    if (!ext) return NULL;
+    src = &g->nodes[src_id];
+
+    ext->base.opcode     = OP_KNN_RERANK;
+    ext->base.arity      = 1;
+    ext->base.inputs[0]  = src;
+    ext->base.out_type   = RAY_TABLE;
+    ext->base.est_rows   = (uint32_t)k;
+    ext->rerank.hnsw_idx  = NULL;
+    ext->rerank.col_sym   = col_sym;
+    ext->rerank.query_vec = (float*)query_vec;
+    ext->rerank.dim       = dim;
+    ext->rerank.metric    = (int32_t)metric;
+    ext->rerank.k         = k;
+    ext->rerank.ef_search = 0;
 
     g->nodes[ext->base.id] = ext->base;
     return &g->nodes[ext->base.id];

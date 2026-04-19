@@ -820,7 +820,7 @@ static inline bool op_is_heavy(uint16_t opc) {
            opc == OP_JOIN   || opc == OP_WINDOW_JOIN || opc == OP_SELECT ||
            opc == OP_HEAD   || opc == OP_TAIL || opc == OP_WINDOW ||
            opc == OP_PIVOT  ||
-           (opc >= OP_EXPAND && opc <= OP_HNSW_KNN);
+           (opc >= OP_EXPAND && opc <= OP_KNN_RERANK);
 }
 
 ray_t* exec_node(ray_graph_t* g, ray_op_t* op) {
@@ -1787,6 +1787,20 @@ static ray_t* exec_node_inner(ray_graph_t* g, ray_op_t* op) {
         }
         case OP_HNSW_KNN: {
             return exec_hnsw_knn(g, op);
+        }
+        case OP_ANN_RERANK: {
+            ray_t* src = exec_node(g, op->inputs[0]);
+            if (!src || RAY_IS_ERR(src)) return src;
+            ray_t* result = exec_ann_rerank(g, op, src);
+            ray_release(src);
+            return result;
+        }
+        case OP_KNN_RERANK: {
+            ray_t* src = exec_node(g, op->inputs[0]);
+            if (!src || RAY_IS_ERR(src)) return src;
+            ray_t* result = exec_knn_rerank(g, op, src);
+            ray_release(src);
+            return result;
         }
 
         default:

@@ -31,7 +31,17 @@
 #include <errno.h>
 
 /* --------------------------------------------------------------------------
- * Distance function (cosine distance = 1 - cosine_similarity)
+ * Distance dispatch — each metric maps to a scalar where lower = closer,
+ * as required by the HNSW beam search.
+ *
+ *   COSINE  → 1 - cos(a, b)          (pgvector <=>)
+ *   L2      → sqrt(Σ (a_i - b_i)^2)  (pgvector <->)
+ *   IP      → -dot(a, b)             (pgvector <#>, negated so lower=closer)
+ *
+ * Note on L2: we keep the sqrt to match pgvector's `<->` exactly, even
+ * though omitting it preserves ordering.  The sqrt cost is dominated by
+ * the inner loop on modern cores, and returning true distances avoids
+ * surprising callers who compare against thresholds.
  * -------------------------------------------------------------------------- */
 
 static double hnsw_cosine_dist(const float* a, const float* b, int32_t dim) {
@@ -43,6 +53,32 @@ static double hnsw_cosine_dist(const float* a, const float* b, int32_t dim) {
     }
     double denom = sqrt(na) * sqrt(nb);
     return (denom > 0.0) ? 1.0 - dot / denom : 1.0;
+}
+
+static double hnsw_l2_dist(const float* a, const float* b, int32_t dim) {
+    double s = 0.0;
+    for (int32_t i = 0; i < dim; i++) {
+        double d = (double)a[i] - (double)b[i];
+        s += d * d;
+    }
+    return sqrt(s);
+}
+
+static double hnsw_ip_dist(const float* a, const float* b, int32_t dim) {
+    double dot = 0.0;
+    for (int32_t i = 0; i < dim; i++) {
+        dot += (double)a[i] * (double)b[i];
+    }
+    return -dot;
+}
+
+static double hnsw_dist(const ray_hnsw_t* idx, const float* a, const float* b) {
+    switch ((ray_hnsw_metric_t)idx->metric) {
+        case RAY_HNSW_L2: return hnsw_l2_dist(a, b, idx->dim);
+        case RAY_HNSW_IP: return hnsw_ip_dist(a, b, idx->dim);
+        case RAY_HNSW_COSINE: /* fallthrough */
+        default: return hnsw_cosine_dist(a, b, idx->dim);
+    }
 }
 
 /* --------------------------------------------------------------------------
@@ -197,64 +233,80 @@ static bool add_neighbor(int64_t* nb, int64_t M_max, int64_t new_id) {
 }
 
 /* --------------------------------------------------------------------------
- * Search layer: beam search on a single layer
- * Returns candidates sorted by distance (ascending).
+ * Search layer: beam search on a single layer.
+ *
+ * When `accept` is non-NULL, behaves as a filtered iterative scan:
+ *   - Candidate-queue expansion still walks through rejected neighbours so
+ *     accepted descendants remain reachable (preserves graph connectivity).
+ *   - Only nodes passing `accept(node_id, ctx)` enter the result heap.
+ *   - Candidate capacity is widened to n_nodes so pathologically selective
+ *     filters don't silently drop unexplored regions.
+ *
+ * When `accept` is NULL, behaviour is identical to the original ef-bounded
+ * beam search.
  * -------------------------------------------------------------------------- */
 
+/* Return value convention: non-negative = number of results written.
+ * -1 = allocation failure (OOM) — callers must surface a distinct error
+ * rather than treat it as "no matches". */
 static int64_t hnsw_search_layer(
     const ray_hnsw_t* idx,
     const float* query,
     const int64_t* entry_points, int64_t n_entries,
     int32_t layer_idx,
     int32_t ef,
-    hnsw_cand_t* results /* pre-allocated, ef entries */)
+    hnsw_cand_t* results /* pre-allocated, ef entries */,
+    ray_hnsw_accept_fn accept, void* accept_ctx)
 {
     const ray_hnsw_layer_t* layer = &idx->layers[layer_idx];
 
-    /* Visited set */
     hnsw_visited_t vis = visited_new(idx->n_nodes);
-    if (!vis.bits) return 0;
+    if (!vis.bits) return -1;
 
-    /* Min-heap: candidates to explore (sorted by distance, smallest first) */
+    /* Candidate capacity.  Unfiltered: tight bound, standard HNSW.
+     * Filtered: worst case is a full-graph scan, so budget n_nodes.
+     * Memory: n_nodes * sizeof(hnsw_cand_t) = n_nodes * 16 bytes. */
     int64_t cand_cap = ef * 2 + n_entries + 1;
+    if (accept && idx->n_nodes > cand_cap) cand_cap = idx->n_nodes;
     hnsw_cand_t* candidates = (hnsw_cand_t*)ray_sys_alloc((size_t)cand_cap * sizeof(hnsw_cand_t));
-    if (!candidates) { visited_free(&vis); return 0; }
+    if (!candidates) { visited_free(&vis); return -1; }
     int64_t cand_sz = 0;
-
-    /* Result set (max-heap, largest distance on top — we keep at most ef) */
     int64_t res_sz = 0;
 
-    /* Initialize with entry points */
+    /* Initialize with entry points. */
     for (int64_t i = 0; i < n_entries; i++) {
         int64_t ep = entry_points[i];
         if (visited_test(&vis, ep)) continue;
         visited_set(&vis, ep);
 
-        double d = hnsw_cosine_dist(query, idx->vectors + ep * idx->dim, idx->dim);
+        double d = hnsw_dist(idx, query, idx->vectors + ep * idx->dim);
 
-        /* Add to candidates (min-heap) */
+        /* Always add to candidate queue. */
         candidates[cand_sz] = (hnsw_cand_t){ ep, d };
         heap_sift_up(candidates, cand_sz);
         cand_sz++;
 
-        /* Add to results (max-heap) */
-        results[res_sz] = (hnsw_cand_t){ ep, d };
-        maxheap_sift_up(results, res_sz);
-        res_sz++;
+        /* Add to results only if no filter, or filter accepts. */
+        if (!accept || accept(ep, accept_ctx)) {
+            results[res_sz] = (hnsw_cand_t){ ep, d };
+            maxheap_sift_up(results, res_sz);
+            res_sz++;
+        }
     }
 
-    /* Beam search */
+    /* Beam loop. */
     while (cand_sz > 0) {
-        /* Pop closest candidate */
         hnsw_cand_t closest = candidates[0];
         candidates[0] = candidates[cand_sz - 1];
         cand_sz--;
         if (cand_sz > 0) heap_sift_down(candidates, cand_sz, 0);
 
-        /* If closest is farther than the farthest result, stop */
+        /* Termination: closest unexpanded is worse than farthest accepted
+         * AND we already have ef accepted.  When filtering, `res_sz`
+         * counts only accepted nodes, so this naturally delays stopping
+         * until we've collected ef accepted results. */
         if (res_sz >= ef && closest.dist > results[0].dist) break;
 
-        /* Explore neighbors */
         int64_t M_max;
         int64_t* nb = layer_neighbors(layer, closest.id, &M_max);
         if (!nb) continue;
@@ -265,31 +317,30 @@ static int64_t hnsw_search_layer(
             if (visited_test(&vis, nid)) continue;
             visited_set(&vis, nid);
 
-            double d = hnsw_cosine_dist(query, idx->vectors + nid * idx->dim, idx->dim);
+            double d = hnsw_dist(idx, query, idx->vectors + nid * idx->dim);
 
-            /* Add to result if room or closer than farthest */
+            /* Candidate-queue gate.  Unfiltered: only push if the neighbour
+             * could improve the top-ef.  Filtered: always push so rejected
+             * nodes remain pathways to accepted descendants. */
+            bool should_explore = accept != NULL ||
+                                  res_sz < ef ||
+                                  d < results[0].dist;
+            if (should_explore && cand_sz < cand_cap) {
+                candidates[cand_sz] = (hnsw_cand_t){ nid, d };
+                heap_sift_up(candidates, cand_sz);
+                cand_sz++;
+            }
+
+            /* Result gate: only accepted nodes enter the top-K. */
+            if (accept && !accept(nid, accept_ctx)) continue;
+
             if (res_sz < ef) {
                 results[res_sz] = (hnsw_cand_t){ nid, d };
                 maxheap_sift_up(results, res_sz);
                 res_sz++;
-
-                /* Also add to candidates */
-                if (cand_sz < cand_cap) {
-                    candidates[cand_sz] = (hnsw_cand_t){ nid, d };
-                    heap_sift_up(candidates, cand_sz);
-                    cand_sz++;
-                }
             } else if (d < results[0].dist) {
-                /* Replace farthest result */
                 results[0] = (hnsw_cand_t){ nid, d };
                 maxheap_sift_down(results, res_sz, 0);
-
-                /* Also add to candidates */
-                if (cand_sz < cand_cap) {
-                    candidates[cand_sz] = (hnsw_cand_t){ nid, d };
-                    heap_sift_up(candidates, cand_sz);
-                    cand_sz++;
-                }
             }
         }
     }
@@ -318,7 +369,7 @@ static int64_t hnsw_search_layer(
 static int64_t hnsw_greedy_closest(const ray_hnsw_t* idx, const float* query,
                                      int64_t ep, int32_t layer_idx) {
     const ray_hnsw_layer_t* layer = &idx->layers[layer_idx];
-    double best_dist = hnsw_cosine_dist(query, idx->vectors + ep * idx->dim, idx->dim);
+    double best_dist = hnsw_dist(idx, query, idx->vectors + ep * idx->dim);
     bool changed = true;
 
     while (changed) {
@@ -330,7 +381,7 @@ static int64_t hnsw_greedy_closest(const ray_hnsw_t* idx, const float* query,
         for (int64_t i = 0; i < M_max; i++) {
             int64_t nid = nb[i];
             if (nid < 0) break;
-            double d = hnsw_cosine_dist(query, idx->vectors + nid * idx->dim, idx->dim);
+            double d = hnsw_dist(idx, query, idx->vectors + nid * idx->dim);
             if (d < best_dist) {
                 best_dist = d;
                 ep = nid;
@@ -358,7 +409,7 @@ static void prune_neighbors(const ray_hnsw_t* idx, int64_t node_id,
 
     for (int64_t i = 0; i < count; i++) {
         ranked[i].id = nb[i];
-        ranked[i].dist = hnsw_cosine_dist(vec, idx->vectors + nb[i] * idx->dim, idx->dim);
+        ranked[i].dist = hnsw_dist(idx, vec, idx->vectors + nb[i] * idx->dim);
     }
 
     /* Sort by distance ascending */
@@ -385,10 +436,12 @@ static void prune_neighbors(const ray_hnsw_t* idx, int64_t node_id,
  * -------------------------------------------------------------------------- */
 
 ray_hnsw_t* ray_hnsw_build(const float* vectors, int64_t n_nodes, int32_t dim,
+                           ray_hnsw_metric_t metric,
                            int32_t M, int32_t ef_construction) {
     if (!vectors || n_nodes <= 0 || dim <= 0) return NULL;
     if (M <= 0) M = HNSW_DEFAULT_M;
     if (ef_construction <= 0) ef_construction = HNSW_DEFAULT_EF_C;
+    if (metric < RAY_HNSW_COSINE || metric > RAY_HNSW_IP) metric = RAY_HNSW_COSINE;
 
     ray_hnsw_t* idx = (ray_hnsw_t*)ray_sys_alloc(sizeof(ray_hnsw_t));
     if (!idx) return NULL;
@@ -399,6 +452,7 @@ ray_hnsw_t* ray_hnsw_build(const float* vectors, int64_t n_nodes, int32_t dim,
     idx->M = M;
     idx->M_max0 = 2 * M;
     idx->ef_construction = ef_construction;
+    idx->metric = (int32_t)metric;
     idx->entry_point = 0;
     /* Copy vectors so the index owns its data — prevents use-after-free
      * if the caller frees the original buffer. */
@@ -479,7 +533,15 @@ ray_hnsw_t* ray_hnsw_build(const float* vectors, int64_t n_nodes, int32_t dim,
 
             /* Search for ef_construction nearest neighbors at this layer */
             int64_t n_found = hnsw_search_layer(idx, vec, &ep, 1, l,
-                                                  ef_construction, search_buf);
+                                                  ef_construction, search_buf,
+                                                  NULL, NULL);
+            if (n_found < 0) {
+                /* Allocation failed inside the beam — abort the build
+                 * rather than producing a half-connected index. */
+                ray_sys_free(search_buf);
+                ray_hnsw_free(idx);
+                return NULL;
+            }
 
             /* Connect node i to the M nearest found */
             int64_t local_i = layer_local_idx(layer, i);
@@ -534,6 +596,65 @@ void ray_hnsw_free(ray_hnsw_t* idx) {
     ray_sys_free(idx);
 }
 
+ray_hnsw_t* ray_hnsw_clone(const ray_hnsw_t* src) {
+    if (!src) return NULL;
+
+    ray_hnsw_t* dst = (ray_hnsw_t*)ray_sys_alloc(sizeof(ray_hnsw_t));
+    if (!dst) return NULL;
+    memset(dst, 0, sizeof(ray_hnsw_t));
+
+    /* Scalars — straight copy. */
+    dst->n_nodes         = src->n_nodes;
+    dst->dim             = src->dim;
+    dst->n_layers        = src->n_layers;
+    dst->M               = src->M;
+    dst->M_max0          = src->M_max0;
+    dst->ef_construction = src->ef_construction;
+    dst->metric          = src->metric;
+    dst->entry_point     = src->entry_point;
+    dst->owns_data       = true;
+
+    /* node_level */
+    if (src->n_nodes > 0 && src->node_level) {
+        size_t sz = (size_t)src->n_nodes * sizeof(int8_t);
+        dst->node_level = (int8_t*)ray_sys_alloc(sz);
+        if (!dst->node_level) { ray_hnsw_free(dst); return NULL; }
+        memcpy(dst->node_level, src->node_level, sz);
+    }
+
+    /* Vectors */
+    if (src->n_nodes > 0 && src->dim > 0 && src->vectors) {
+        size_t vec_bytes = (size_t)src->n_nodes * (size_t)src->dim * sizeof(float);
+        float* vcopy = (float*)ray_sys_alloc(vec_bytes);
+        if (!vcopy) { ray_hnsw_free(dst); return NULL; }
+        memcpy(vcopy, src->vectors, vec_bytes);
+        dst->vectors = vcopy;
+    }
+
+    /* Per-layer neighbor + node_id arrays */
+    for (int32_t l = 0; l < src->n_layers; l++) {
+        const ray_hnsw_layer_t* sl = &src->layers[l];
+        ray_hnsw_layer_t*       dl = &dst->layers[l];
+        dl->n_nodes = sl->n_nodes;
+        dl->M_max   = sl->M_max;
+
+        if (sl->n_nodes > 0 && sl->M_max > 0 && sl->neighbors) {
+            size_t nb = (size_t)sl->n_nodes * (size_t)sl->M_max * sizeof(int64_t);
+            dl->neighbors = (int64_t*)ray_sys_alloc(nb);
+            if (!dl->neighbors) { ray_hnsw_free(dst); return NULL; }
+            memcpy(dl->neighbors, sl->neighbors, nb);
+        }
+        if (sl->n_nodes > 0 && sl->node_ids) {
+            size_t sz = (size_t)sl->n_nodes * sizeof(int64_t);
+            dl->node_ids = (int64_t*)ray_sys_alloc(sz);
+            if (!dl->node_ids) { ray_hnsw_free(dst); return NULL; }
+            memcpy(dl->node_ids, sl->node_ids, sz);
+        }
+    }
+
+    return dst;
+}
+
 /* --------------------------------------------------------------------------
  * Search: find K approximate nearest neighbors
  * -------------------------------------------------------------------------- */
@@ -555,11 +676,68 @@ int64_t ray_hnsw_search(const ray_hnsw_t* idx,
     /* Phase 2: Beam search on layer 0 with ef_search width */
     hnsw_cand_t* results = (hnsw_cand_t*)ray_sys_alloc(
         (size_t)ef_search * sizeof(hnsw_cand_t));
-    if (!results) return 0;
+    if (!results) return -1;  /* OOM — caller must propagate error. */
 
-    int64_t n_found = hnsw_search_layer(idx, query, &ep, 1, 0, ef_search, results);
+    int64_t n_found = hnsw_search_layer(idx, query, &ep, 1, 0, ef_search, results,
+                                         NULL, NULL);
+    if (n_found < 0) {
+        ray_sys_free(results);
+        return -1;  /* OOM — caller must propagate error. */
+    }
 
     /* Extract top-K from results (already sorted by distance ascending) */
+    int64_t result_count = (n_found < k) ? n_found : k;
+    for (int64_t i = 0; i < result_count; i++) {
+        out_ids[i]   = results[i].id;
+        out_dists[i] = results[i].dist;
+    }
+
+    ray_sys_free(results);
+    return result_count;
+}
+
+/* --------------------------------------------------------------------------
+ * Filtered iterative-scan search: only returns nodes passing `accept(node_id, ctx)`.
+ *
+ * The beam search explores the graph normally (including through rejected
+ * nodes, preserving connectivity to accepted descendants); only accepted
+ * nodes enter the result heap.  Falls back to a full-graph walk for
+ * pathologically selective filters — bounded by n_nodes memory.
+ * -------------------------------------------------------------------------- */
+
+int64_t ray_hnsw_search_filter(const ray_hnsw_t* idx,
+                               const float* query, int32_t dim,
+                               int64_t k, int32_t ef_search,
+                               ray_hnsw_accept_fn accept, void* ctx,
+                               int64_t* out_ids, double* out_dists) {
+    if (!idx || !query || dim != idx->dim || k <= 0) return 0;
+    if (!accept) {
+        /* No predicate — fall through to the plain search so callers get
+         * zero overhead. */
+        return ray_hnsw_search(idx, query, dim, k, ef_search, out_ids, out_dists);
+    }
+    if (ef_search < k) ef_search = (int32_t)k;
+    if (idx->n_nodes == 0) return 0;
+
+    /* Descent through upper layers is filter-unaware — we only use those
+     * layers to pick the layer-0 entry point.  The filter applies on
+     * layer 0 where the result set is collected. */
+    int64_t ep = idx->entry_point;
+    for (int32_t l = idx->n_layers - 1; l >= 1; l--) {
+        ep = hnsw_greedy_closest(idx, query, ep, l);
+    }
+
+    hnsw_cand_t* results = (hnsw_cand_t*)ray_sys_alloc(
+        (size_t)ef_search * sizeof(hnsw_cand_t));
+    if (!results) return -1;  /* OOM */
+
+    int64_t n_found = hnsw_search_layer(idx, query, &ep, 1, 0, ef_search, results,
+                                         accept, ctx);
+    if (n_found < 0) {
+        ray_sys_free(results);
+        return -1;
+    }
+
     int64_t result_count = (n_found < k) ? n_found : k;
     for (int64_t i = 0; i < result_count; i++) {
         out_ids[i]   = results[i].id;
@@ -594,7 +772,7 @@ typedef struct {
     int32_t M;
     int32_t M_max0;
     int32_t ef_construction;
-    int32_t _pad;
+    int32_t metric;        /* ray_hnsw_metric_t (was _pad; old files saved 0 = COSINE) */
     int64_t entry_point;
 } hnsw_file_header_t;
 
@@ -617,7 +795,7 @@ ray_err_t ray_hnsw_save(const ray_hnsw_t* idx, const char* dir) {
         .M = idx->M,
         .M_max0 = idx->M_max0,
         .ef_construction = idx->ef_construction,
-        ._pad = 0,
+        .metric = idx->metric,
         .entry_point = idx->entry_point
     };
     if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) { fclose(f); return RAY_ERR_IO; }
@@ -708,6 +886,8 @@ static ray_hnsw_t* hnsw_load_impl(const char* dir, bool use_mmap) {
     idx->M = hdr.M;
     idx->M_max0 = hdr.M_max0;
     idx->ef_construction = hdr.ef_construction;
+    idx->metric = (hdr.metric >= RAY_HNSW_COSINE && hdr.metric <= RAY_HNSW_IP)
+                  ? hdr.metric : RAY_HNSW_COSINE;
     idx->entry_point = hdr.entry_point;
     idx->vectors = NULL;
     idx->owns_data = true;

@@ -31,6 +31,7 @@
 #include "ops/ops.h"
 #include "ops/internal.h"
 #include "table/sym.h"
+#include "mem/sys.h"
 
 #include <string.h>
 #include <math.h>
@@ -831,16 +832,18 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     ray_t* where_expr = dict_get(dict, "where");
     ray_t* by_expr = dict_get(dict, "by");
     ray_t* take_expr = dict_get(dict, "take");
+    ray_t* nearest_expr = dict_get(dict, "nearest");
 
     /* Collect output columns (keys that are not reserved) */
     int64_t dict_n = ray_len(dict);
     ray_t** dict_elems = (ray_t**)ray_data(dict);
-    int64_t from_id  = ray_sym_intern("from",  4);
-    int64_t where_id = ray_sym_intern("where", 5);
-    int64_t by_id    = ray_sym_intern("by",    2);
-    int64_t take_id  = ray_sym_intern("take",  4);
-    int64_t asc_id   = ray_sym_intern("asc",   3);
-    int64_t desc_id  = ray_sym_intern("desc",  4);
+    int64_t from_id    = ray_sym_intern("from",    4);
+    int64_t where_id   = ray_sym_intern("where",   5);
+    int64_t by_id      = ray_sym_intern("by",      2);
+    int64_t take_id    = ray_sym_intern("take",    4);
+    int64_t asc_id     = ray_sym_intern("asc",     3);
+    int64_t desc_id    = ray_sym_intern("desc",    4);
+    int64_t nearest_id = ray_sym_intern("nearest", 7);
 
     /* Check for asc/desc presence */
     bool has_sort = false;
@@ -849,17 +852,34 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         if (kid == asc_id || kid == desc_id) { has_sort = true; break; }
     }
 
+    /* `nearest` is mutually exclusive with `asc`/`desc`/`by` — ANN
+     * ordering is an index scan, not a column sort, and cannot be
+     * composed with group-by in this phase. */
+    if (nearest_expr) {
+        if (has_sort) {
+            ray_release(tbl);
+            return ray_error("domain",
+                "select: `nearest` cannot be combined with asc/desc");
+        }
+        if (by_expr) {
+            ray_release(tbl);
+            return ray_error("domain",
+                "select: `nearest` cannot be combined with `by`");
+        }
+    }
+
     /* Count output columns */
     int n_out = 0;
     for (int64_t i = 0; i + 1 < dict_n; i += 2) {
         int64_t kid = dict_elems[i]->i64;
         if (kid != from_id && kid != where_id && kid != by_id &&
-            kid != take_id && kid != asc_id && kid != desc_id)
+            kid != take_id && kid != asc_id && kid != desc_id &&
+            kid != nearest_id)
             n_out++;
     }
 
     /* Simple case: no clauses at all → return table as-is */
-    if (n_out == 0 && !where_expr && !by_expr && !take_expr && !has_sort)
+    if (n_out == 0 && !where_expr && !by_expr && !take_expr && !has_sort && !nearest_expr)
         return tbl;
 
     /* Dict-form by-clause pre-evaluation: MUST happen before we
@@ -1001,6 +1021,224 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 "or a sub-expression the compiler can't lower");
         }
         root = ray_filter(g, root, pred);
+    }
+
+    /* Apply NEAREST (ANN/KNN) re-ranking.  Mutually exclusive with
+     * asc/desc/by (already rejected above).  Runs after WHERE so the
+     * filter feeds the rerank executor directly.  `take k` becomes the
+     * target result count; the rerank executor handles the take internally
+     * so the bottom-of-function take block is skipped when nearest is set. */
+    float* nearest_query_owned = NULL;  /* freed after ray_execute below */
+    if (nearest_expr) {
+        if (nearest_expr->type != RAY_LIST || ray_len(nearest_expr) < 3) {
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain",
+                "nearest: expected (ann <handle> <query> [ef]) or (knn <col> <query> [metric])");
+        }
+        int64_t nlen = ray_len(nearest_expr);
+        ray_t** nlist = (ray_t**)ray_data(nearest_expr);
+        ray_t* head = nlist[0];
+        if (head->type != -RAY_SYM) {
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain",
+                "nearest: first element must be the symbol `ann` or `knn`");
+        }
+        int64_t ann_sym_id = ray_sym_intern("ann", 3);
+        int64_t knn_sym_id = ray_sym_intern("knn", 3);
+
+        /* Resolve k from take (default 10). */
+        int64_t k_req = 10;
+        if (take_expr) {
+            ray_t* tv = ray_eval(take_expr);
+            if (!tv || RAY_IS_ERR(tv)) {
+                ray_graph_free(g); ray_release(tbl);
+                return tv ? tv : ray_error("domain", NULL);
+            }
+            if (tv->type == -RAY_I64)      k_req = tv->i64;
+            else if (tv->type == -RAY_I32) k_req = tv->i32;
+            else {
+                ray_release(tv);
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("type", "nearest: take must be an integer atom");
+            }
+            ray_release(tv);
+            if (k_req <= 0) {
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("domain", "nearest: take must be positive");
+            }
+        }
+
+        /* Evaluate the query vector (arg index 2). */
+        ray_t* qvec = ray_eval(nlist[2]);
+        if (!qvec || RAY_IS_ERR(qvec)) {
+            ray_graph_free(g); ray_release(tbl);
+            return qvec ? qvec : ray_error("domain", NULL);
+        }
+        if (!ray_is_vec(qvec) ||
+            (qvec->type != RAY_F32 && qvec->type != RAY_F64 &&
+             qvec->type != RAY_I32 && qvec->type != RAY_I64)) {
+            ray_release(qvec);
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("type", "nearest: query must be a numeric vector");
+        }
+        int32_t dim = (int32_t)qvec->len;
+        if (dim <= 0) {
+            ray_release(qvec);
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("length", "nearest: query vector is empty");
+        }
+
+        /* Copy query into a fresh float[] that the DAG op borrows; freed
+         * after ray_execute completes. */
+        nearest_query_owned = (float*)ray_sys_alloc((size_t)dim * sizeof(float));
+        if (!nearest_query_owned) {
+            ray_release(qvec);
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("oom", NULL);
+        }
+        switch (qvec->type) {
+            case RAY_F32:
+                memcpy(nearest_query_owned, ray_data(qvec), (size_t)dim * sizeof(float));
+                break;
+            case RAY_F64: {
+                double* s = (double*)ray_data(qvec);
+                for (int32_t j = 0; j < dim; j++) nearest_query_owned[j] = (float)s[j];
+                break;
+            }
+            case RAY_I32: {
+                int32_t* s = (int32_t*)ray_data(qvec);
+                for (int32_t j = 0; j < dim; j++) nearest_query_owned[j] = (float)s[j];
+                break;
+            }
+            case RAY_I64: {
+                int64_t* s = (int64_t*)ray_data(qvec);
+                for (int32_t j = 0; j < dim; j++) nearest_query_owned[j] = (float)s[j];
+                break;
+            }
+        }
+        ray_release(qvec);
+
+        if (head->i64 == ann_sym_id) {
+            ray_t* hobj = ray_eval(nlist[1]);
+            if (!hobj || RAY_IS_ERR(hobj)) {
+                ray_sys_free(nearest_query_owned);
+                ray_graph_free(g); ray_release(tbl);
+                return hobj ? hobj : ray_error("domain", NULL);
+            }
+            if (hobj->type != -RAY_I64 || !(hobj->attrs & RAY_ATTR_HNSW)) {
+                ray_release(hobj); ray_sys_free(nearest_query_owned);
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("type",
+                    "nearest (ann): first arg must be an HNSW handle (from hnsw-build)");
+            }
+            ray_hnsw_t* idx = (ray_hnsw_t*)(uintptr_t)hobj->i64;
+            if (idx->dim != dim) {
+                ray_release(hobj); ray_sys_free(nearest_query_owned);
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("length",
+                    "nearest (ann): query dim does not match index dim");
+            }
+            int32_t ef = HNSW_DEFAULT_EF_S;
+            if (nlen >= 4) {
+                ray_t* ev = ray_eval(nlist[3]);
+                if (ev && !RAY_IS_ERR(ev)) {
+                    if (ev->type == -RAY_I64)      ef = (int32_t)ev->i64;
+                    else if (ev->type == -RAY_I32) ef = ev->i32;
+                    ray_release(ev);
+                }
+            }
+            if ((int64_t)ef < k_req) ef = (int32_t)k_req;
+            root = ray_ann_rerank(g, root, idx, nearest_query_owned, dim, k_req, ef);
+            ray_release(hobj);
+        } else if (head->i64 == knn_sym_id) {
+            ray_t* col_expr = nlist[1];
+            if (col_expr->type != -RAY_SYM) {
+                ray_sys_free(nearest_query_owned);
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("type",
+                    "nearest (knn): first arg must be an unquoted column name");
+            }
+            int64_t col_sym = col_expr->i64;
+            ray_hnsw_metric_t metric = RAY_HNSW_COSINE;
+            if (nlen >= 4) {
+                ray_t* mv = nlist[3];
+                if (mv && mv->type == -RAY_SYM) {
+                    int64_t mid = mv->i64;
+                    if (mid == ray_sym_find("l2", 2))          metric = RAY_HNSW_L2;
+                    else if (mid == ray_sym_find("ip", 2))     metric = RAY_HNSW_IP;
+                    else if (mid == ray_sym_find("cosine", 6)) metric = RAY_HNSW_COSINE;
+                    else {
+                        ray_sys_free(nearest_query_owned);
+                        ray_graph_free(g); ray_release(tbl);
+                        return ray_error("domain",
+                            "nearest (knn): metric must be 'cosine, 'l2, or 'ip");
+                    }
+                }
+            }
+            root = ray_knn_rerank(g, root, col_sym, nearest_query_owned, dim, k_req, metric);
+        } else {
+            ray_sys_free(nearest_query_owned);
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("domain",
+                "nearest: expected `ann` or `knn` as the first element");
+        }
+        if (!root) {
+            ray_sys_free(nearest_query_owned);
+            ray_graph_free(g); ray_release(tbl);
+            return ray_error("oom", NULL);
+        }
+
+        /* When the user didn't specify output columns, project only the
+         * source schema — NOT the rerank's synthetic `_dist`.  This keeps
+         * `(select {from: t nearest: ...})` shape-compatible with
+         * `(select {from: t})`; users who want `_dist` must name it
+         * explicitly (e.g. `{from: t d: _dist ...}`).
+         *
+         * Must handle arbitrarily wide tables (up to ray_select's uint8
+         * limit of 255 cols) — a silent 16-col cap would let `_dist`
+         * leak through for real-world tables. */
+        if (n_out == 0) {
+            int64_t src_ncols = ray_table_ncols(tbl);
+            if (src_ncols > 255) {
+                ray_sys_free(nearest_query_owned);
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("limit",
+                    "nearest: implicit projection exceeds 255 source columns — "
+                    "specify output columns explicitly");
+            }
+            if (src_ncols > 0) {
+                ray_op_t** col_ops = (ray_op_t**)ray_sys_alloc(
+                    (size_t)src_ncols * sizeof(ray_op_t*));
+                if (!col_ops) {
+                    ray_sys_free(nearest_query_owned);
+                    ray_graph_free(g); ray_release(tbl);
+                    return ray_error("oom", NULL);
+                }
+                int nc = 0;
+                bool scan_err = false;
+                for (int64_t c = 0; c < src_ncols; c++) {
+                    int64_t name_id = ray_table_col_name(tbl, c);
+                    ray_t* s = ray_sym_str(name_id);
+                    if (!s) continue;
+                    ray_op_t* scan_op = ray_scan(g, ray_str_ptr(s));
+                    if (!scan_op) { scan_err = true; break; }
+                    col_ops[nc++] = scan_op;
+                }
+                if (scan_err) {
+                    ray_sys_free(col_ops);
+                    ray_sys_free(nearest_query_owned);
+                    ray_graph_free(g); ray_release(tbl);
+                    return ray_error("oom", NULL);
+                }
+                root = ray_select(g, root, col_ops, (uint8_t)nc);
+                ray_sys_free(col_ops);
+                if (!root) {
+                    ray_sys_free(nearest_query_owned);
+                    ray_graph_free(g); ray_release(tbl);
+                    return ray_error("oom", NULL);
+                }
+            }
+        }
     }
 
     /* GROUP BY */
@@ -2006,7 +2244,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         uint8_t nc = 0;
         for (int64_t i = 0; i + 1 < dict_n; i += 2) {
             int64_t kid = dict_elems[i]->i64;
-            if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id) continue;
+            if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
             if (nc < 16) {
                 col_ops[nc] = compile_expr_dag(g, dict_elems[i + 1]);
                 if (!col_ops[nc]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
@@ -2056,10 +2294,10 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             root = ray_sort_op(g, root, sort_keys, sort_descs, NULL, n_sort);
     }
 
-    /* Take: add to DAG only when no group-by (same reason as sort above).
-     * Positive atom → head, negative → tail, [start count] → post-execution. */
+    /* Take: add to DAG only when no group-by and no nearest (rerank
+     * absorbs the take into its k parameter). */
     ray_t* take_range = NULL;
-    if (take_expr && !by_expr) {
+    if (take_expr && !by_expr && !nearest_expr) {
         ray_t* tv = ray_eval(take_expr);
         if (!tv || RAY_IS_ERR(tv)) { ray_graph_free(g); ray_release(tbl); return tv ? tv : ray_error("domain", NULL); }
         if (ray_is_atom(tv) && (tv->type == -RAY_I64 || tv->type == -RAY_I32)) {
@@ -2083,6 +2321,9 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     ray_t* result = ray_execute(g, root);
 
     ray_graph_free(g);
+    /* The nearest-query buffer was only referenced by ext->rerank.query_vec
+     * and is safe to free once the graph (and thus the op ext) is gone. */
+    if (nearest_query_owned) ray_sys_free(nearest_query_owned);
 
     /* Post-process: range take [start count] applied after execution */
     if (take_range && result && !RAY_IS_ERR(result)) {

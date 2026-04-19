@@ -70,6 +70,10 @@
 #define RAY_ATTR_HAS_NULLS    0x40
 #define RAY_ATTR_ARENA        0x80
 
+/* I64 atom carries an owning ray_hnsw_t* in its .i64 slot.
+ * Checked by HNSW builtins before dereferencing.  User must (hnsw-free h). */
+#define RAY_ATTR_HNSW         0x04
+
 /* ===== Internal Allocator Variants ===== */
 
 ray_t*    ray_alloc_copy(ray_t* v);
@@ -329,8 +333,14 @@ static inline void ray_scratch_arena_init(ray_scratch_arena_t* a) {
 }
 
 /* Retain all child/owned refs inside a compound block (STR/LIST/TABLE/etc.).
- * Used by ray_block_copy and ray_alloc_copy after shallow-copying a block. */
-void ray_retain_owned_refs(ray_t* v);
+ * Used by ray_block_copy and ray_alloc_copy after shallow-copying a block.
+ *
+ * Returns true on success, false if a deep-clone of a uniquely-owned
+ * resource (e.g. an HNSW index) failed.  On failure, any owned state that
+ * was memcpy'd into the copy has been neutralized (attr flags cleared,
+ * pointers zeroed) so the caller may safely ray_free(v) without leaks or
+ * double-frees. */
+bool ray_retain_owned_refs(ray_t* v);
 
 void* ray_scratch_arena_push(ray_scratch_arena_t* a, size_t nbytes);
 void  ray_scratch_arena_reset(ray_scratch_arena_t* a);

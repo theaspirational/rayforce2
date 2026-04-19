@@ -119,6 +119,8 @@ const char* ray_opcode_name(uint16_t op) {
         case OP_EUCLIDEAN_DIST:return "EUCLIDEAN_DIST";
         case OP_KNN:           return "KNN";
         case OP_HNSW_KNN:     return "HNSW_KNN";
+        case OP_ANN_RERANK:    return "ANN_RERANK";
+        case OP_KNN_RERANK:    return "KNN_RERANK";
         default:               return "UNKNOWN";
     }
 }

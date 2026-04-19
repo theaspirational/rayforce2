@@ -911,6 +911,8 @@ ray_t* exec_cosine_sim(ray_graph_t* g, ray_op_t* op, ray_t* emb_vec);
 ray_t* exec_euclidean_dist(ray_graph_t* g, ray_op_t* op, ray_t* emb_vec);
 ray_t* exec_knn(ray_graph_t* g, ray_op_t* op, ray_t* emb_vec);
 ray_t* exec_hnsw_knn(ray_graph_t* g, ray_op_t* op);
+ray_t* exec_ann_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src);
+ray_t* exec_knn_rerank(ray_graph_t* g, ray_op_t* op, ray_t* src);
 
 /* ── temporal_exec.c ── */
 ray_t* exec_extract(ray_graph_t* g, ray_op_t* op);

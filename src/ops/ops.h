@@ -25,6 +25,7 @@
 #define RAY_OPS_H
 
 #include <rayforce.h>
+#include "store/hnsw.h"  /* ray_hnsw_metric_t, ray_hnsw_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -220,6 +221,8 @@ void     ray_cancel(void);
 #define OP_EUCLIDEAN_DIST  89   /* euclidean distance between embeddings  */
 #define OP_KNN             90   /* brute-force K nearest neighbors        */
 #define OP_HNSW_KNN        91   /* HNSW approximate K nearest neighbors   */
+#define OP_ANN_RERANK     102   /* index-backed ANN over filtered source  */
+#define OP_KNN_RERANK     103   /* brute-force KNN over filtered source   */
 
 /* Opcodes — Misc */
 #define OP_ALIAS        70
@@ -334,10 +337,11 @@ typedef struct ray_op_ext {
             uint8_t   n_rels;
             uint8_t   n_vars;
         } wco;
-        struct {  /* OP_COSINE_SIM / OP_EUCLIDEAN_DIST / OP_KNN */
+        struct {  /* OP_COSINE_SIM / OP_EUCLIDEAN_DIST / OP_INNER_PRODUCT / OP_KNN */
             float*    query_vec;      /* query embedding (caller-owned, must outlive graph) */
             int32_t   dim;            /* embedding dimension */
             int64_t   k;              /* top-K for KNN */
+            int32_t   metric;         /* ray_hnsw_metric_t — used by OP_KNN only */
         } vector;
         struct {  /* OP_HNSW_KNN */
             void*     hnsw_idx;       /* ray_hnsw_t* (opaque, must outlive graph) */
@@ -346,6 +350,15 @@ typedef struct ray_op_ext {
             int64_t   k;
             int32_t   ef_search;
         } hnsw;
+        struct {  /* OP_ANN_RERANK / OP_KNN_RERANK */
+            void*     hnsw_idx;       /* ray_hnsw_t* for ANN; NULL for KNN */
+            int64_t   col_sym;        /* sym id of column for KNN; 0 for ANN */
+            float*    query_vec;      /* caller-owned */
+            int32_t   dim;
+            int32_t   metric;         /* ray_hnsw_metric_t — KNN variant only */
+            int64_t   k;              /* target result count from `take` */
+            int32_t   ef_search;      /* ANN only */
+        } rerank;
         struct {  /* OP_PIVOT */
             ray_op_t**  index_cols;   /* OP_SCAN nodes for index columns */
             ray_op_t*   pivot_col;    /* OP_SCAN node for pivot column */
@@ -642,12 +655,22 @@ ray_op_t* ray_cosine_sim(ray_graph_t* g, ray_op_t* emb_col,
 ray_op_t* ray_euclidean_dist(ray_graph_t* g, ray_op_t* emb_col,
                             const float* query_vec, int32_t dim);
 ray_op_t* ray_knn(ray_graph_t* g, ray_op_t* emb_col,
-                 const float* query_vec, int32_t dim, int64_t k);
+                 const float* query_vec, int32_t dim, int64_t k,
+                 ray_hnsw_metric_t metric);
 
 /* HNSW-accelerated KNN (uses pre-built index instead of brute-force) */
 ray_op_t* ray_hnsw_knn(ray_graph_t* g, ray_hnsw_t* idx,
                        const float* query_vec, int32_t dim,
                        int64_t k, int32_t ef_search);
+
+/* Rerank ops: consume a filtered source table and return top-K nearest rows
+ * (source columns + _dist appended).  Used by `select ... nearest ... take`. */
+ray_op_t* ray_ann_rerank(ray_graph_t* g, ray_op_t* src,
+                         ray_hnsw_t* idx, const float* query_vec,
+                         int32_t dim, int64_t k, int32_t ef_search);
+ray_op_t* ray_knn_rerank(ray_graph_t* g, ray_op_t* src,
+                         int64_t col_sym, const float* query_vec,
+                         int32_t dim, int64_t k, ray_hnsw_metric_t metric);
 
 /* CSR / Relationship API */
 ray_rel_t* ray_rel_build(ray_t* from_table, const char* fk_col,

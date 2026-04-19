@@ -897,6 +897,17 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
 
         ray_t** row_elems = (ray_t**)ray_data(col_src);
 
+        /* If the LIST contains non-atom values (e.g. nested vectors for an
+         * embedding column), store the LIST as the column directly rather
+         * than trying to build a typed vector from non-atomic elements. */
+        if (nrows > 0 && row_elems[0] && !ray_is_atom(row_elems[0])) {
+            ray_retain(col_src);
+            tbl = ray_table_add_col(tbl, name_id, col_src);
+            ray_release(col_src);
+            if (RAY_IS_ERR(tbl)) { if (_bxn) ray_release(_bxn); if (_bxc) ray_release(_bxc); return tbl; }
+            continue;
+        }
+
         /* Determine column type from elements (scan for mixed I64/F64 → F64) */
         int8_t col_type = RAY_I64;
         if (nrows > 0) {
@@ -2112,6 +2123,19 @@ static void ray_register_builtins(void) {
     register_unary("dl-eval",      RAY_FN_NONE, ray_dl_eval_fn);
     register_binary("dl-query",    RAY_FN_NONE, ray_dl_query_fn);
     register_binary("dl-provenance", RAY_FN_NONE, ray_dl_provenance_fn);
+
+    /* Vector similarity / embeddings / HNSW — pgvector-style names */
+    register_binary("cos-dist",    RAY_FN_NONE, ray_cos_dist_fn);
+    register_binary("inner-prod",  RAY_FN_NONE, ray_inner_prod_fn);
+    register_binary("l2-dist",     RAY_FN_NONE, ray_l2_dist_fn);
+    register_unary ("norm",        RAY_FN_NONE, ray_norm_fn);
+    register_vary  ("knn",         RAY_FN_NONE, ray_knn_fn);
+    register_vary  ("hnsw-build",  RAY_FN_NONE, ray_hnsw_build_fn);
+    register_vary  ("ann",         RAY_FN_NONE, ray_ann_fn);
+    register_unary ("hnsw-free",   RAY_FN_NONE, ray_hnsw_free_fn);
+    register_binary("hnsw-save",   RAY_FN_RESTRICTED, ray_hnsw_save_fn);
+    register_unary ("hnsw-load",   RAY_FN_RESTRICTED, ray_hnsw_load_fn);
+    register_unary ("hnsw-info",   RAY_FN_NONE, ray_hnsw_info_fn);
 }
 
 /* ══════════════════════════════════════════

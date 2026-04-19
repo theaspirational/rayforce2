@@ -27,6 +27,7 @@
 #include "core/platform.h"
 #include "table/sym.h"
 #include "lang/eval.h"
+#include "store/hnsw.h"
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -385,6 +386,16 @@ static void ray_release_owned_refs(ray_t* v) {
             }
             return;
         }
+        /* I64 atom tagged as an HNSW handle owns a ray_hnsw_t — free it
+         * when the atom's rc drops to zero so rebindings and scope-exit
+         * don't leak the (potentially large) index graph. */
+        if (v->type == -RAY_I64 && (v->attrs & RAY_ATTR_HNSW)) {
+            ray_hnsw_t* idx = (ray_hnsw_t*)(uintptr_t)v->i64;
+            if (idx) ray_hnsw_free(idx);
+            v->i64 = 0;
+            v->attrs &= (uint8_t)~RAY_ATTR_HNSW;
+            return;
+        }
         if (ray_atom_owns_obj(v) && v->obj && !RAY_IS_ERR(v->obj))
             ray_release(v->obj);
         return;
@@ -443,8 +454,8 @@ static void ray_release_owned_refs(ray_t* v) {
     }
 }
 
-void ray_retain_owned_refs(ray_t* v) {
-    if (!v || RAY_IS_ERR(v)) return;
+bool ray_retain_owned_refs(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return true;
 
     if (ray_is_atom(v)) {
         if (v->type == RAY_LAMBDA) {
@@ -455,19 +466,37 @@ void ray_retain_owned_refs(ray_t* v) {
             }
             if (LAMBDA_NFO(v)) ray_retain(LAMBDA_NFO(v));
             if (LAMBDA_DBG(v)) ray_retain(LAMBDA_DBG(v));
-            return;
+            return true;
         }
         /* Lazy handles own their graph uniquely — no retain on copy */
-        if (v->type == RAY_LAZY) return;
+        if (v->type == RAY_LAZY) return true;
+        /* HNSW handle owns its ray_hnsw_t uniquely.  Deep-clone the index
+         * so the copy is an independent owner with the same semantics as
+         * the source.  On clone-OOM, detach the copy (so caller can free
+         * it cleanly) and signal failure — the caller must not treat the
+         * copy as a valid handle. */
+        if (v->type == -RAY_I64 && (v->attrs & RAY_ATTR_HNSW)) {
+            ray_hnsw_t* src = (ray_hnsw_t*)(uintptr_t)v->i64;
+            if (src) {
+                ray_hnsw_t* dup = ray_hnsw_clone(src);
+                if (!dup) {
+                    v->i64 = 0;
+                    v->attrs &= (uint8_t)~RAY_ATTR_HNSW;
+                    return false;
+                }
+                v->i64 = (int64_t)(uintptr_t)dup;
+            }
+            return true;
+        }
         if (ray_atom_owns_obj(v) && v->obj && !RAY_IS_ERR(v->obj))
             ray_retain(v->obj);
-        return;
+        return true;
     }
 
     if (v->attrs & RAY_ATTR_SLICE) {
         if (v->slice_parent && !RAY_IS_ERR(v->slice_parent))
             ray_retain(v->slice_parent);
-        return;
+        return true;
     }
 
     if ((v->attrs & RAY_ATTR_NULLMAP_EXT) &&
@@ -484,14 +513,14 @@ void ray_retain_owned_refs(ray_t* v) {
             if (segs[i] && !RAY_IS_ERR(segs[i]))
                 ray_retain(segs[i]);
         }
-        return;
+        return true;
     }
 
     if (v->type == RAY_MAPCOMMON) {
         ray_t** ptrs = (ray_t**)ray_data(v);
         if (ptrs[0] && !RAY_IS_ERR(ptrs[0])) ray_retain(ptrs[0]);
         if (ptrs[1] && !RAY_IS_ERR(ptrs[1])) ray_retain(ptrs[1]);
-        return;
+        return true;
     }
 
     if (v->type == RAY_TABLE) {
@@ -504,7 +533,7 @@ void ray_retain_owned_refs(ray_t* v) {
             ray_t* col = cols[i];
             if (col && !RAY_IS_ERR(col)) ray_retain(col);
         }
-        return;
+        return true;
     }
 
     if (v->type == RAY_LIST) {
@@ -514,6 +543,7 @@ void ray_retain_owned_refs(ray_t* v) {
             if (child && !RAY_IS_ERR(child)) ray_retain(child);
         }
     }
+    return true;
 }
 
 static void ray_detach_owned_refs(ray_t* v) {
@@ -530,6 +560,13 @@ static void ray_detach_owned_refs(ray_t* v) {
         if (v->type == RAY_LAZY) {
             RAY_LAZY_GRAPH(v) = NULL;
             RAY_LAZY_OP(v)    = NULL;
+            return;
+        }
+        /* HNSW handle: ownership has been transferred elsewhere; stop the
+         * rc→0 cleanup hook from freeing the (now-foreign) index. */
+        if (v->type == -RAY_I64 && (v->attrs & RAY_ATTR_HNSW)) {
+            v->i64 = 0;
+            v->attrs &= (uint8_t)~RAY_ATTR_HNSW;
             return;
         }
         if (ray_atom_owns_obj(v)) v->obj = NULL;
@@ -803,7 +840,13 @@ ray_t* ray_alloc_copy(ray_t* v) {
         ray_atomic_store(&copy->rc, 1);
     else
         copy->rc = 1;
-    ray_retain_owned_refs(copy);
+    if (!ray_retain_owned_refs(copy)) {
+        /* Deep-clone of an owned resource failed (e.g. HNSW index OOM).
+         * The copy's owned state has already been neutralized, so a plain
+         * ray_free won't touch the source's resources. */
+        ray_free(copy);
+        return ray_error("oom", NULL);
+    }
     return copy;
 }
 

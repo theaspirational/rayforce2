@@ -74,6 +74,9 @@ ray_t* ray_block_copy(ray_t* src) {
     dst->mmod = new_mmod;
     dst->order = new_order;
     ray_atomic_store(&dst->rc, 1);
-    ray_retain_owned_refs(dst);
+    if (!ray_retain_owned_refs(dst)) {
+        ray_free(dst);
+        return ray_error("oom", NULL);
+    }
     return dst;
 }
