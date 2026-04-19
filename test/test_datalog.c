@@ -29,6 +29,7 @@
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/datalog.h"
+#include "table/sym.h"     /* ray_read_sym for SYM column inspection */
 #include "lang/eval.h"
 #include <string.h>
 
@@ -1002,6 +1003,163 @@ static MunitResult test_agg_parse_reject_non_var_target(const void* params, void
     return MUNIT_OK;
 }
 
+/* =====================================================================
+ * Head-constant rules (Phase B dep: rayforce2 rule heads may contain
+ * RAY_SYM / RAY_I64 / RAY_F64 literals alongside variables).  These
+ * tests exist to prevent regression of a previously-reverted attempt
+ * that corrupted memory across IDB boundaries.
+ * ===================================================================== */
+
+/* (rule (band_small W) (weight W) (< W 60)) — head slot 0 is a variable.
+ * Analogous to test_cmp_const_filter but uses dl_rule_head_const for a
+ * one-slot symbolic band label so the output table has a SYM column. */
+static MunitResult test_rule_head_const_single_rule(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t vals[] = { 50, 70, 90 };
+    ray_t* col = ray_vec_from_raw(RAY_I64, vals, 3);
+    munit_assert_ptr_not_null(col);
+
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), col);
+    munit_assert_false(RAY_IS_ERR(weight));
+
+    dl_program_t* prog = dl_program_new();
+    munit_assert_ptr_not_null(prog);
+    munit_assert_int(dl_add_edb(prog, "weight", weight, 1), ==, 0);
+
+    /* (rule (band "small")    (weight ?W)  (< ?W 60)) */
+    dl_rule_t rule;
+    dl_rule_init(&rule, "band", 1);
+    int64_t sym_small = ray_sym_intern("small", 5);
+    dl_rule_head_const(&rule, 0, sym_small, RAY_SYM);
+
+    int body = dl_rule_add_atom(&rule, "weight", 1);
+    dl_body_set_var(&rule, body, 0, 0);  /* binds ?W = col 0 */
+    int cmp = dl_rule_add_cmp_const(&rule, DL_CMP_LT, 0, 60);
+    munit_assert_int(cmp, >=, 0);
+
+    rule.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &rule), ==, 0);
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* out = dl_query(prog, "band");
+    munit_assert_ptr_not_null(out);
+    /* One row (50 < 60).  Duplicate elimination must leave a single
+     * ("small",) tuple because all surviving weights broadcast the
+     * same head constant. */
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    ray_t* oc = ray_table_get_col_idx(out, 0);
+    munit_assert_ptr_not_null(oc);
+    munit_assert_int(oc->type, ==, RAY_SYM);
+    int64_t got = ray_read_sym(ray_data(oc), 0, oc->type, oc->attrs);
+    munit_assert_int((int)got, ==, (int)sym_small);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(col);
+    return MUNIT_OK;
+}
+
+/* Head slot holds an I64 constant alongside a variable.
+ * (rule (ev X 1) (pair ?X ?_)) */
+static MunitResult test_rule_head_const_i64(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t a_vals[] = { 10, 20 };
+    int64_t b_vals[] = {  1,  2 };
+    ray_t* a = ray_vec_from_raw(RAY_I64, a_vals, 2);
+    ray_t* b = ray_vec_from_raw(RAY_I64, b_vals, 2);
+    ray_t* pair = ray_table_new(2);
+    pair = ray_table_add_col(pair, ray_sym_intern("pair__c0", 8), a);
+    pair = ray_table_add_col(pair, ray_sym_intern("pair__c1", 8), b);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "pair", pair, 2);
+
+    /* (rule (ev ?X 1) (pair ?X ?Y)) */
+    dl_rule_t r; dl_rule_init(&r, "ev", 2);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_head_const(&r, 1, 1, RAY_I64);
+    int bi = dl_rule_add_atom(&r, "pair", 2);
+    dl_body_set_var(&r, bi, 0, 0);
+    dl_body_set_var(&r, bi, 1, 1);
+    r.n_vars = 2;
+    munit_assert_int(dl_add_rule(prog, &r), ==, 0);
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* out = dl_query(prog, "ev");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 2);
+    ray_t* c1 = ray_table_get_col_idx(out, 1);
+    munit_assert_int(c1->type, ==, RAY_I64);
+    int64_t* d = (int64_t*)ray_data(c1);
+    munit_assert_int((int)d[0], ==, 1);
+    munit_assert_int((int)d[1], ==, 1);
+
+    dl_program_free(prog);
+    ray_release(pair); ray_release(a); ray_release(b);
+    return MUNIT_OK;
+}
+
+/* THE FAILURE CASE the previous attempt blew up on:
+ *   R1: (foo "small") :- (edge ?U ?V)        head = constant SYM
+ *   R2: (bar ?B)      :- (foo ?B)            reads R1's constant-head IDB
+ * Expected: bar contains one row "small".
+ * Previously: cross-IDB broadcast column dangled; crash or UB.
+ */
+static MunitResult test_rule_head_const_cross_idb(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t u_vals[] = { 1, 2 };
+    int64_t v_vals[] = { 2, 3 };
+    ray_t* u = ray_vec_from_raw(RAY_I64, u_vals, 2);
+    ray_t* v = ray_vec_from_raw(RAY_I64, v_vals, 2);
+    ray_t* edge = ray_table_new(2);
+    edge = ray_table_add_col(edge, ray_sym_intern("edge__c0", 8), u);
+    edge = ray_table_add_col(edge, ray_sym_intern("edge__c1", 8), v);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "edge", edge, 2);
+
+    int64_t sym_small = ray_sym_intern("small", 5);
+
+    /* R1: (foo "small") :- (edge ?U ?V) */
+    dl_rule_t r1; dl_rule_init(&r1, "foo", 1);
+    dl_rule_head_const(&r1, 0, sym_small, RAY_SYM);
+    int r1b = dl_rule_add_atom(&r1, "edge", 2);
+    dl_body_set_var(&r1, r1b, 0, 0);
+    dl_body_set_var(&r1, r1b, 1, 1);
+    r1.n_vars = 2;
+    munit_assert_int(dl_add_rule(prog, &r1), >=, 0);
+
+    /* R2: (bar ?B) :- (foo ?B) */
+    dl_rule_t r2; dl_rule_init(&r2, "bar", 1);
+    dl_rule_head_var(&r2, 0, 0);
+    int r2b = dl_rule_add_atom(&r2, "foo", 1);
+    dl_body_set_var(&r2, r2b, 0, 0);
+    r2.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &r2), >=, 0);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* foo = dl_query(prog, "foo");
+    munit_assert_ptr_not_null(foo);
+    munit_assert_int((int)ray_table_nrows(foo), ==, 1);
+
+    ray_t* bar = dl_query(prog, "bar");
+    munit_assert_ptr_not_null(bar);
+    munit_assert_int((int)ray_table_nrows(bar), ==, 1);
+    ray_t* bc = ray_table_get_col_idx(bar, 0);
+    munit_assert_ptr_not_null(bc);
+    munit_assert_int(bc->type, ==, RAY_SYM);
+    int64_t got = ray_read_sym(ray_data(bc), 0, bc->type, bc->attrs);
+    munit_assert_int((int)got, ==, (int)sym_small);
+
+    dl_program_free(prog);
+    ray_release(edge); ray_release(u); ray_release(v);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -1031,6 +1189,9 @@ static MunitTest datalog_tests[] = {
     { "/agg_parse_reject_by_missing_col",   test_agg_parse_reject_by_missing_col,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_parse_reject_non_var_target",   test_agg_parse_reject_non_var_target,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/between_sugar_parse",        test_between_sugar_parse,        datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/rule_head_const_single_rule", test_rule_head_const_single_rule, datalog_setup, datalog_teardown, 0, NULL },
+    { "/rule_head_const_i64",         test_rule_head_const_i64,         datalog_setup, datalog_teardown, 0, NULL },
+    { "/rule_head_const_cross_idb",   test_rule_head_const_cross_idb,   datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
