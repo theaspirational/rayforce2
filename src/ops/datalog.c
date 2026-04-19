@@ -157,6 +157,51 @@ int dl_ensure_idb(dl_program_t* prog, const char* name, int arity) {
  * Rule management
  * ======================================================================== */
 
+/* When a rule has a typed head constant at slot c, the IDB relation's
+ * column c must be of that type so ray_vec_concat (used by table_union)
+ * doesn't reject the merge.  Rebuilds matching columns on an *empty* IDB
+ * table in-place.  Safe because schema is established before evaluation. */
+static void dl_idb_align_head_const_types(dl_program_t* prog, const dl_rule_t* rule) {
+    int rel_idx = dl_find_rel(prog, rule->head_pred);
+    if (rel_idx < 0) return;
+    dl_rel_t* rel = &prog->rels[rel_idx];
+    if (!rel->is_idb) return;
+    if (!rel->table || RAY_IS_ERR(rel->table)) return;
+    if (ray_table_nrows(rel->table) != 0) return;  /* types already committed */
+
+    int ncols = (int)ray_table_ncols(rel->table);
+    if (ncols != rel->arity) return;
+
+    bool any_change = false;
+    int8_t desired[DL_MAX_ARITY];
+    for (int c = 0; c < rel->arity; c++) {
+        ray_t* col = ray_table_get_col_idx(rel->table, c);
+        int8_t cur = col ? col->type : RAY_I64;
+        int8_t want = rule->head_const_types[c];
+        if (want == 0) {
+            /* No constant hint for this slot — keep current type. */
+            desired[c] = cur;
+        } else {
+            desired[c] = want;
+            if (want != cur) any_change = true;
+        }
+    }
+    if (!any_change) return;
+
+    /* Rebuild the table with typed empty columns. */
+    ray_t* fresh = ray_table_new(rel->arity);
+    if (!fresh || RAY_IS_ERR(fresh)) return;
+    for (int c = 0; c < rel->arity; c++) {
+        ray_t* empty_col = ray_vec_new(desired[c], 0);
+        if (!empty_col || RAY_IS_ERR(empty_col)) { ray_release(fresh); return; }
+        fresh = ray_table_add_col(fresh, rel->col_names[c], empty_col);
+        ray_release(empty_col);
+        if (RAY_IS_ERR(fresh)) return;
+    }
+    ray_release(rel->table);
+    rel->table = fresh;
+}
+
 int dl_add_rule(dl_program_t* prog, const dl_rule_t* rule) {
     if (!prog || !rule || prog->n_rules >= DL_MAX_RULES)
         return -1;
@@ -166,6 +211,10 @@ int dl_add_rule(dl_program_t* prog, const dl_rule_t* rule) {
 
     /* Ensure IDB relation exists for the head predicate */
     dl_ensure_idb(prog, rule->head_pred, rule->head_arity);
+
+    /* Align IDB column types to any typed head constants in this rule.
+     * Must run before evaluation so table_union/concat see matching types. */
+    dl_idb_align_head_const_types(prog, rule);
 
     return idx;
 }
@@ -191,13 +240,25 @@ void dl_rule_init(dl_rule_t* rule, const char* head_pred, int head_arity) {
 void dl_rule_head_var(dl_rule_t* rule, int pos, int var_idx) {
     if (pos < 0 || pos >= rule->head_arity) return;
     rule->head_vars[pos] = var_idx;
+    rule->head_const_types[pos] = 0;
     if (var_idx + 1 > rule->n_vars) rule->n_vars = var_idx + 1;
 }
 
-void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val) {
+void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val, int8_t type) {
     if (pos < 0 || pos >= rule->head_arity) return;
+    /* Default to RAY_I64 if an unrecognized type sneaks through; keeps
+     * old-callers-with-no-type compat when writing to the slot. */
+    if (type != RAY_I64 && type != RAY_SYM && type != RAY_F64)
+        type = RAY_I64;
     rule->head_vars[pos] = DL_CONST;
     rule->head_consts[pos] = val;
+    rule->head_const_types[pos] = type;
+}
+
+void dl_rule_head_const_f64(dl_rule_t* rule, int pos, double val) {
+    int64_t bits;
+    memcpy(&bits, &val, sizeof(bits));
+    dl_rule_head_const(rule, pos, bits, RAY_F64);
 }
 
 int dl_rule_add_atom(dl_rule_t* rule, const char* pred, int arity) {
@@ -887,23 +948,81 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
     return out;
 }
 
-/* Helper: project table to selected columns, producing output with head relation naming */
+/* Helper: build a fully-owned broadcast column for a constant head slot.
+ *
+ * Returns a fresh ray_t* vec with refcount 1, caller-owned.  The caller is
+ * expected to hand the ref to a table via ray_table_add_col (which retains)
+ * and then ray_release our owning ref, leaving the table as sole owner.
+ *
+ * Correctness note: this must be a real, heap-allocated vec — not a view
+ * onto rule-local scratch — so that the IDB relation table can outlive the
+ * per-iteration scratch that built it.  Cross-IDB reads at subsequent
+ * strata borrow from this column via ray_table_get_col_idx. */
+static ray_t* dl_broadcast_const_col(int64_t nrows, int8_t type, int64_t val) {
+    if (type != RAY_I64 && type != RAY_SYM && type != RAY_F64) {
+        return ray_error("type", NULL);
+    }
+    ray_t* v = ray_vec_new(type, nrows);
+    if (!v || RAY_IS_ERR(v)) return v;
+    v->len = nrows;
+
+    if (type == RAY_SYM) {
+        /* Default sym width from ray_vec_new is W64 → 8-byte entries. */
+        uint8_t esz = ray_sym_elem_size(v->type, v->attrs);
+        (void)esz;
+        /* Use the generic writer so it handles any adaptive width. */
+        void* data = ray_data(v);
+        for (int64_t i = 0; i < nrows; i++) {
+            ray_write_sym(data, i, (uint64_t)val, v->type, v->attrs);
+        }
+    } else if (type == RAY_F64) {
+        double d;
+        memcpy(&d, &val, sizeof(d));
+        double* data = (double*)ray_data(v);
+        for (int64_t i = 0; i < nrows; i++) data[i] = d;
+    } else {  /* RAY_I64 */
+        int64_t* data = (int64_t*)ray_data(v);
+        for (int64_t i = 0; i < nrows; i++) data[i] = val;
+    }
+    return v;
+}
+
+/* Helper: project table to selected columns, producing output with head relation naming.
+ *
+ * For each output slot c:
+ *   - if col_indices[c] >= 0, copy that column from `tbl`
+ *   - else (constant slot), synthesize a broadcast column from head_consts[c]
+ *     with type head_const_types[c]. */
 static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
-                          dl_rel_t* head_rel) {
+                          dl_rel_t* head_rel, const int64_t* head_consts,
+                          const int8_t* head_const_types) {
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
     int64_t nrows = ray_table_nrows(tbl);
     ray_t* out = ray_table_new(n_out);
     for (int c = 0; c < n_out; c++) {
         int src_idx = col_indices[c];
-        if (src_idx < 0) continue;  /* constant — handled separately */
-        ray_t* src = ray_table_get_col_idx(tbl, src_idx);
-        if (!src) continue;
-        ray_t* dst = ray_vec_new(src->type, nrows);
-        if (!dst || RAY_IS_ERR(dst)) continue;
-        dst->len = nrows;
-        memcpy(ray_data(dst), ray_data(src), (size_t)nrows * sizeof(int64_t));
-        out = ray_table_add_col(out, head_rel->col_names[c], dst);
-        ray_release(dst);
+        if (src_idx >= 0) {
+            ray_t* src = ray_table_get_col_idx(tbl, src_idx);
+            if (!src) continue;
+            ray_t* dst = ray_vec_new(src->type, nrows);
+            if (!dst || RAY_IS_ERR(dst)) continue;
+            dst->len = nrows;
+            /* Use element size from the source vec so SYM with any width,
+             * I64, and F64 all copy correctly. */
+            uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
+            if (esz == 0) { ray_release(dst); continue; }
+            memcpy(ray_data(dst), ray_data(src), (size_t)nrows * (size_t)esz);
+            out = ray_table_add_col(out, head_rel->col_names[c], dst);
+            ray_release(dst);
+        } else {
+            /* Constant head slot: materialize an owned broadcast column. */
+            int8_t ctype = head_const_types ? head_const_types[c] : 0;
+            if (ctype == 0) continue;  /* legacy/unset */
+            ray_t* bcast = dl_broadcast_const_col(nrows, ctype, head_consts[c]);
+            if (!bcast || RAY_IS_ERR(bcast)) continue;
+            out = ray_table_add_col(out, head_rel->col_names[c], bcast);
+            ray_release(bcast);
+        }
     }
     return out;
 }
@@ -1462,7 +1581,8 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         }
     }
 
-    ray_t* projected = dl_project(accum, proj_cols, rule->head_arity, head_rel);
+    ray_t* projected = dl_project(accum, proj_cols, rule->head_arity, head_rel,
+                                   rule->head_consts, rule->head_const_types);
     ray_release(accum);
 
     /* Store result in the graph as a const_table so the caller can execute */
@@ -1938,10 +2058,15 @@ int dl_eval(dl_program_t* prog) {
             if (rel->is_idb) {
                 ray_retain(rel->table);
                 delta_tables[rel_idx] = rel->table;
-                /* prev = empty table with same schema as the relation */
+                /* prev = empty table with same schema as the relation.
+                 * Column types must match rel->table so later ray_vec_concat
+                 * calls don't reject the merge when the relation has
+                 * non-i64 columns (e.g. RAY_SYM from head-constant slots). */
                 prev_tables[rel_idx] = ray_table_new(rel->arity);
                 for (int c = 0; c < rel->arity && c < DL_MAX_ARITY; c++) {
-                    ray_t* empty_col = ray_vec_new(RAY_I64, 0);
+                    ray_t* src = ray_table_get_col_idx(rel->table, c);
+                    int8_t ctype = src ? src->type : RAY_I64;
+                    ray_t* empty_col = ray_vec_new(ctype, 0);
                     if (empty_col && !RAY_IS_ERR(empty_col)) {
                         prev_tables[rel_idx] = ray_table_add_col(
                             prev_tables[rel_idx], rel->col_names[c], empty_col);
@@ -2955,9 +3080,18 @@ static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
             int vi = dl_var_get_or_create(vars, harg->i64);
             dl_rule_head_var(out, i, vi);
         } else if (harg->type == -RAY_I64) {
-            dl_rule_head_const(out, i, harg->i64);
+            dl_rule_head_const(out, i, harg->i64, RAY_I64);
         } else if (harg->type == -RAY_SYM) {
-            dl_rule_head_const(out, i, harg->i64);
+            dl_rule_head_const(out, i, harg->i64, RAY_SYM);
+        } else if (harg->type == -RAY_F64) {
+            int64_t bits;
+            memcpy(&bits, &harg->f64, sizeof(bits));
+            dl_rule_head_const(out, i, bits, RAY_F64);
+        } else if (harg->type == -RAY_STR) {
+            /* Intern the string as a sym so it can be stored in a RAY_SYM
+             * column.  Matches the body-literal parser convention. */
+            int64_t sym = ray_sym_intern(ray_str_ptr(harg), ray_str_len(harg));
+            dl_rule_head_const(out, i, sym, RAY_SYM);
         } else {
             return ray_error("type", "rule: head arguments must be ?variables or constants");
         }

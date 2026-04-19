@@ -143,6 +143,9 @@ typedef struct {
     int     head_arity;
     int     head_vars[DL_MAX_ARITY]; /* variable indices in head */
     int64_t head_consts[DL_MAX_ARITY]; /* constants (when head_vars[i] == DL_CONST) */
+    int8_t  head_const_types[DL_MAX_ARITY]; /* ray type tag per head slot:
+                                             *   RAY_I64 / RAY_SYM / RAY_F64 when head_vars[i] == DL_CONST,
+                                             *   0 when head_vars[i] is a variable. */
     int     n_body;                 /* number of body literals */
     dl_body_t body[DL_MAX_BODY];
     int     n_vars;                 /* total distinct variable count in rule */
@@ -237,8 +240,14 @@ void dl_rule_init(dl_rule_t* rule, const char* head_pred, int head_arity);
 /* Set a head argument to a variable */
 void dl_rule_head_var(dl_rule_t* rule, int pos, int var_idx);
 
-/* Set a head argument to a constant */
-void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val);
+/* Set a head argument to a typed constant.
+ *   type must be RAY_I64, RAY_SYM, or RAY_F64.
+ *   For RAY_F64 callers should pass a double reinterpreted via memcpy/union
+ *   into val's int64 slot; dl_rule_head_const_f64 is the safe wrapper. */
+void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val, int8_t type);
+
+/* Convenience wrapper: set a head argument to a RAY_F64 constant. */
+void dl_rule_head_const_f64(dl_rule_t* rule, int pos, double val);
 
 /* Add a positive body atom. Returns body literal index. */
 int dl_rule_add_atom(dl_rule_t* rule, const char* pred, int arity);
