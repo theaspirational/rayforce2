@@ -635,6 +635,53 @@ static MunitResult test_select_nearest_empty_source(const void* p, void* f) {
     return MUNIT_OK;
 }
 
+/* Inline HNSW handle in `nearest (ann ...)`: the handle has rc=1 at eval
+ * time.  If the select parser releases it before ray_execute, the rc→0
+ * hook frees the underlying index and the DAG exec uses a dangling
+ * pointer — a use-after-free that ASan catches.  The handle must be kept
+ * alive through ray_execute. */
+static MunitResult test_select_nearest_ann_inline_handle(const void* p, void* f) {
+    (void)p; (void)f;
+    build_docs();
+    /* `(hnsw-build ...)` is evaluated inline and never bound to a var —
+     * its rc is 1 at the moment `select` sees it.  Previously this
+     * freed the index mid-DAG; the fix retains the handle through exec. */
+    ray_t* r = ray_eval_str(
+        "(select {id: id d: _dist from: __docs "
+        "         nearest: (ann (hnsw-build (at __docs 'emb) 'cosine) "
+        "                       [1.0 0.0 0.0]) "
+        "         take: 3})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    munit_assert_int(r->type, ==, RAY_TABLE);
+    munit_assert_int(ray_table_nrows(r), ==, 3);
+    /* Row 0 is the exact match for [1,0,0]. */
+    ray_t* id_col = ray_table_get_col(r, ray_sym_intern("id", 2));
+    munit_assert_ptr_not_null(id_col);
+    munit_assert_int(((int64_t*)ray_data(id_col))[0], ==, 0);
+    ray_release(r);
+    return MUNIT_OK;
+}
+
+/* Invalid handle payload: attr set but pointer zeroed (e.g. after
+ * hnsw-free).  Must return a clean type error rather than dereferencing
+ * NULL. */
+static MunitResult test_select_nearest_ann_freed_handle(const void* p, void* f) {
+    (void)p; (void)f;
+    build_docs();
+    ray_eval_str("(set __idx (hnsw-build (at __docs 'emb)))");
+    ray_eval_str("(hnsw-free __idx)");
+    /* __idx now has attr cleared AND i64=0.  The attr-cleared state is
+     * caught by the handle-type check; ensure a hypothetical attr-still-set
+     * but i64=0 state also errors cleanly.  We hit the same error path via
+     * the type check — just assert the query errors rather than crashes. */
+    ray_t* r = ray_eval_str(
+        "(select {from: __docs nearest: (ann __idx [1.0 0.0 0.0]) take: 1})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_true(RAY_IS_ERR(r));
+    return MUNIT_OK;
+}
+
 /* Filter-aware iterative scan: a modestly selective filter (~50% pass rate).
  *
  * The prior oversample+refilter path pulled K × oversample_factor candidates
@@ -799,6 +846,8 @@ static MunitTest embedding_tests[] = {
     { "/select_nearest_empty_source", test_select_nearest_empty_source, emb_setup, emb_teardown, 0, NULL },
     { "/select_nearest_str_col", test_select_nearest_str_col, emb_setup, emb_teardown, 0, NULL },
     { "/select_nearest_sym_col", test_select_nearest_sym_col, emb_setup, emb_teardown, 0, NULL },
+    { "/select_nearest_ann_inline_handle", test_select_nearest_ann_inline_handle, emb_setup, emb_teardown, 0, NULL },
+    { "/select_nearest_ann_freed_handle", test_select_nearest_ann_freed_handle, emb_setup, emb_teardown, 0, NULL },
     { "/select_nearest_iterative_selective", test_select_nearest_iterative_selective, emb_setup, emb_teardown, 0, NULL },
     { "/select_nearest_recall", test_select_nearest_recall, emb_setup, emb_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL }

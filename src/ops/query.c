@@ -1028,7 +1028,15 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
      * filter feeds the rerank executor directly.  `take k` becomes the
      * target result count; the rerank executor handles the take internally
      * so the bottom-of-function take block is skipped when nearest is set. */
-    float* nearest_query_owned = NULL;  /* freed after ray_execute below */
+    float* nearest_query_owned = NULL;   /* freed after ray_execute below */
+    ray_t* nearest_handle_owned = NULL;  /* HNSW handle kept alive for the
+                                          * DAG's lifetime; released after
+                                          * ray_execute.  Without this, an
+                                          * inline `(ann (hnsw-build ...) ...)`
+                                          * drops the handle's rc to 0 before
+                                          * exec runs — the rc→0 hook frees
+                                          * the index and the ext's stored
+                                          * pointer dangles. */
     if (nearest_expr) {
         if (nearest_expr->type != RAY_LIST || ray_len(nearest_expr) < 3) {
             ray_graph_free(g); ray_release(tbl);
@@ -1132,6 +1140,13 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     "nearest (ann): first arg must be an HNSW handle (from hnsw-build)");
             }
             ray_hnsw_t* idx = (ray_hnsw_t*)(uintptr_t)hobj->i64;
+            if (!idx) {
+                /* Defensive: attr set but pointer cleared — treat as invalid. */
+                ray_release(hobj); ray_sys_free(nearest_query_owned);
+                ray_graph_free(g); ray_release(tbl);
+                return ray_error("type",
+                    "nearest (ann): HNSW handle has been freed");
+            }
             if (idx->dim != dim) {
                 ray_release(hobj); ray_sys_free(nearest_query_owned);
                 ray_graph_free(g); ray_release(tbl);
@@ -1141,15 +1156,29 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             int32_t ef = HNSW_DEFAULT_EF_S;
             if (nlen >= 4) {
                 ray_t* ev = ray_eval(nlist[3]);
-                if (ev && !RAY_IS_ERR(ev)) {
-                    if (ev->type == -RAY_I64)      ef = (int32_t)ev->i64;
-                    else if (ev->type == -RAY_I32) ef = ev->i32;
-                    ray_release(ev);
+                if (!ev || RAY_IS_ERR(ev)) {
+                    ray_release(hobj); ray_sys_free(nearest_query_owned);
+                    ray_graph_free(g); ray_release(tbl);
+                    return ev ? ev : ray_error("domain",
+                        "nearest (ann): ef expression failed to evaluate");
                 }
+                if (ev->type == -RAY_I64)      ef = (int32_t)ev->i64;
+                else if (ev->type == -RAY_I32) ef = ev->i32;
+                else {
+                    ray_release(ev); ray_release(hobj);
+                    ray_sys_free(nearest_query_owned);
+                    ray_graph_free(g); ray_release(tbl);
+                    return ray_error("type",
+                        "nearest (ann): ef must be an integer atom");
+                }
+                ray_release(ev);
             }
             if ((int64_t)ef < k_req) ef = (int32_t)k_req;
             root = ray_ann_rerank(g, root, idx, nearest_query_owned, dim, k_req, ef);
-            ray_release(hobj);
+            /* Steal the retain from ray_eval — the ext now borrows `idx`
+             * through hobj.  Released in the common exit path after
+             * ray_execute has completed. */
+            nearest_handle_owned = hobj;
         } else if (head->i64 == knn_sym_id) {
             ray_t* col_expr = nlist[1];
             if (col_expr->type != -RAY_SYM) {
@@ -1183,6 +1212,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 "nearest: expected `ann` or `knn` as the first element");
         }
         if (!root) {
+            if (nearest_handle_owned) ray_release(nearest_handle_owned);
             ray_sys_free(nearest_query_owned);
             ray_graph_free(g); ray_release(tbl);
             return ray_error("oom", NULL);
@@ -1200,6 +1230,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
         if (n_out == 0) {
             int64_t src_ncols = ray_table_ncols(tbl);
             if (src_ncols > 255) {
+                if (nearest_handle_owned) ray_release(nearest_handle_owned);
                 ray_sys_free(nearest_query_owned);
                 ray_graph_free(g); ray_release(tbl);
                 return ray_error("limit",
@@ -1210,6 +1241,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 ray_op_t** col_ops = (ray_op_t**)ray_sys_alloc(
                     (size_t)src_ncols * sizeof(ray_op_t*));
                 if (!col_ops) {
+                    if (nearest_handle_owned) ray_release(nearest_handle_owned);
                     ray_sys_free(nearest_query_owned);
                     ray_graph_free(g); ray_release(tbl);
                     return ray_error("oom", NULL);
@@ -1226,6 +1258,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 }
                 if (scan_err) {
                     ray_sys_free(col_ops);
+                    if (nearest_handle_owned) ray_release(nearest_handle_owned);
                     ray_sys_free(nearest_query_owned);
                     ray_graph_free(g); ray_release(tbl);
                     return ray_error("oom", NULL);
@@ -1233,6 +1266,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 root = ray_select(g, root, col_ops, (uint8_t)nc);
                 ray_sys_free(col_ops);
                 if (!root) {
+                    if (nearest_handle_owned) ray_release(nearest_handle_owned);
                     ray_sys_free(nearest_query_owned);
                     ray_graph_free(g); ray_release(tbl);
                     return ray_error("oom", NULL);
@@ -2324,6 +2358,10 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     /* The nearest-query buffer was only referenced by ext->rerank.query_vec
      * and is safe to free once the graph (and thus the op ext) is gone. */
     if (nearest_query_owned) ray_sys_free(nearest_query_owned);
+    /* The HNSW handle was kept alive through ray_execute so the rerank
+     * ext's idx pointer stayed valid.  Safe to release now that the
+     * graph (and its ext nodes) has been freed. */
+    if (nearest_handle_owned) ray_release(nearest_handle_owned);
 
     /* Post-process: range take [start count] applied after execution */
     if (take_range && result && !RAY_IS_ERR(result)) {
