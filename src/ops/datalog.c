@@ -2796,6 +2796,14 @@ static ray_t* dl_set_body_pos(dl_rule_t* rule, int bidx, int pos,
         }
         return NULL;
     }
+    if (node->type == -RAY_STR) {
+        /* Quoted string literal in body: intern as sym so it compares
+         * equal to other sym-interned constants.  Mirrors the head
+         * parser convention. */
+        int64_t sym = ray_sym_intern(ray_str_ptr(node), ray_str_len(node));
+        dl_body_set_const(rule, bidx, pos, sym);
+        return NULL;
+    }
     /* For other forms (e.g., (quote x)), evaluate to get constant */
     ray_t* val = ray_eval(node);
     if (!val || RAY_IS_ERR(val))

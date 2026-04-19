@@ -1383,6 +1383,20 @@ static MunitResult test_rule_head_const_surface_syntax(const void* params, void*
     return MUNIT_OK;
 }
 
+/* Surface syntax also must accept string constants in BODY positions so
+ * that (not (mark "seen")) and (kind ?x "small") parse cleanly.  This
+ * mirrors the Phase B rule shape used by ray-exomem. */
+static MunitResult test_rule_body_const_surface_syntax(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    ray_t* r = ray_eval_str(
+        "(rule (q ?x) (kind ?x \"small\"))"
+    );
+    munit_assert_false(RAY_IS_ERR(r));
+    ray_release(r);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -1420,6 +1434,7 @@ static MunitTest datalog_tests[] = {
     { "/rule_head_const_with_negation",  test_rule_head_const_with_negation,  datalog_setup, datalog_teardown, 0, NULL },
     { "/rule_head_const_stratification", test_rule_head_const_stratification, datalog_setup, datalog_teardown, 0, NULL },
     { "/rule_head_const_surface_syntax", test_rule_head_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/rule_body_const_surface_syntax", test_rule_body_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
