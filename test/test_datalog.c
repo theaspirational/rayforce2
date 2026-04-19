@@ -1160,6 +1160,229 @@ static MunitResult test_rule_head_const_cross_idb(const void* params, void* fixt
     return MUNIT_OK;
 }
 
+/* Constant head slot holding an F64. */
+static MunitResult test_rule_head_const_f64(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t vals[] = { 1 };
+    ray_t* col = ray_vec_from_raw(RAY_I64, vals, 1);
+    ray_t* trig = ray_table_new(1);
+    trig = ray_table_add_col(trig, ray_sym_intern("trig__c0", 8), col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "trig", trig, 1);
+
+    /* (rule (pi 3.14) (trig ?X)) */
+    dl_rule_t r; dl_rule_init(&r, "pi", 1);
+    dl_rule_head_const_f64(&r, 0, 3.14);
+    int b = dl_rule_add_atom(&r, "trig", 1);
+    dl_body_set_var(&r, b, 0, 0);
+    r.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &r), >=, 0);
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* out = dl_query(prog, "pi");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    ray_t* oc = ray_table_get_col_idx(out, 0);
+    munit_assert_int(oc->type, ==, RAY_F64);
+    double* d = (double*)ray_data(oc);
+    munit_assert_double_equal(d[0], 3.14, 4);
+
+    dl_program_free(prog);
+    ray_release(trig); ray_release(col);
+    return MUNIT_OK;
+}
+
+/* Constant head combined with an aggregate body literal.
+ * (rule (stat "total" ?N) (count ?N weight))
+ * Expected: stat = [("total", 4)]. */
+static MunitResult test_rule_head_const_with_agg(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t wv[] = { 50, 60, 75, 85 };
+    ray_t* wc = ray_vec_from_raw(RAY_I64, wv, 4);
+    ray_t* weight = ray_table_new(1);
+    weight = ray_table_add_col(weight, ray_sym_intern("weight__c0", 10), wc);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "weight", weight, 1);
+
+    int64_t sym_total = ray_sym_intern("total", 5);
+
+    dl_rule_t r; dl_rule_init(&r, "stat", 2);
+    dl_rule_head_const(&r, 0, sym_total, RAY_SYM);
+    dl_rule_head_var(&r, 1, 0);  /* ?N */
+    dl_rule_add_agg(&r, DL_AGG_COUNT, 0, "weight", 1, 0);
+    r.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &r), >=, 0);
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* out = dl_query(prog, "stat");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    ray_t* label = ray_table_get_col_idx(out, 0);
+    munit_assert_int(label->type, ==, RAY_SYM);
+    int64_t lsym = ray_read_sym(ray_data(label), 0, label->type, label->attrs);
+    munit_assert_int((int)lsym, ==, (int)sym_total);
+
+    ray_t* nc = ray_table_get_col_idx(out, 1);
+    int64_t* nd = (int64_t*)ray_data(nc);
+    munit_assert_int((int)nd[0], ==, 4);
+
+    dl_program_free(prog);
+    ray_release(weight); ray_release(wc);
+    return MUNIT_OK;
+}
+
+/* Negation over a relation that is derived via a constant head.
+ * EDB: kind(1,'big'), kind(2,'big'), kind(3,'small')
+ * R1:  (small ?X) :- (kind ?X 'small')
+ * R2:  (big   ?X) :- (kind ?X ?K), not (small ?X)
+ *
+ * This exercises two cross-IDB head-const shapes at once:
+ *   (a) R1's head is a variable, but R2 reads a relation whose SCHEMA
+ *       came from a typed const EDB (kind's second col is SYM).
+ *   (b) stratification must place R2 after R1 since R2 negates (small).
+ *
+ * The point of this test is that the stratified negation path still
+ * works when sym-typed IDB columns are present — the broadcast-const
+ * machinery must not leak into other columns or break antijoin. */
+static MunitResult test_rule_head_const_with_negation(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t sym_big = ray_sym_intern("big", 3);
+    int64_t sym_small = ray_sym_intern("small", 5);
+    int64_t id_vals[] = { 1, 2, 3 };
+    int64_t k_vals [] = { sym_big, sym_big, sym_small };
+
+    ray_t* id_col = ray_vec_from_raw(RAY_I64, id_vals, 3);
+    /* Build a SYM vec for the kind column.  ray_vec_from_raw on RAY_SYM
+     * would need width-aware packing; simpler to use ray_vec_new + write. */
+    ray_t* k_col = ray_vec_new(RAY_SYM, 3);
+    k_col->len = 3;
+    for (int i = 0; i < 3; i++) {
+        ray_write_sym(ray_data(k_col), i, (uint64_t)k_vals[i],
+                      k_col->type, k_col->attrs);
+    }
+    ray_t* kind = ray_table_new(2);
+    kind = ray_table_add_col(kind, ray_sym_intern("kind__c0", 8), id_col);
+    kind = ray_table_add_col(kind, ray_sym_intern("kind__c1", 8), k_col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "kind", kind, 2);
+
+    /* R1: (small ?X) :- (kind ?X "small") */
+    dl_rule_t r1; dl_rule_init(&r1, "small", 1);
+    dl_rule_head_var(&r1, 0, 0);
+    int r1b = dl_rule_add_atom(&r1, "kind", 2);
+    dl_body_set_var(&r1, r1b, 0, 0);
+    dl_body_set_const(&r1, r1b, 1, sym_small);
+    r1.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &r1), >=, 0);
+
+    /* R2: (big ?X) :- (kind ?X ?K), not (small ?X) */
+    dl_rule_t r2; dl_rule_init(&r2, "big", 1);
+    dl_rule_head_var(&r2, 0, 0);
+    int r2b = dl_rule_add_atom(&r2, "kind", 2);
+    dl_body_set_var(&r2, r2b, 0, 0);
+    dl_body_set_var(&r2, r2b, 1, 1);  /* ?K */
+    int r2n = dl_rule_add_neg(&r2, "small", 1);
+    dl_body_set_var(&r2, r2n, 0, 0);
+    r2.n_vars = 2;
+    munit_assert_int(dl_add_rule(prog, &r2), >=, 0);
+
+    munit_assert_int(dl_stratify(prog), ==, 0);
+    munit_assert_int(prog->rules[1].stratum, >, prog->rules[0].stratum);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* big = dl_query(prog, "big");
+    munit_assert_ptr_not_null(big);
+    munit_assert_int((int)ray_table_nrows(big), ==, 2);
+
+    dl_program_free(prog);
+    ray_release(kind); ray_release(id_col); ray_release(k_col);
+    return MUNIT_OK;
+}
+
+/* Stratification: when a constant-head IDB is referenced (positively *or*
+ * through negation) by another rule, the dependency is preserved and the
+ * negating rule is placed in a strictly higher stratum.
+ *
+ * R1: (marker ?X "seen") :- (src ?X)
+ * R2: (unseen ?X)        :- (src ?X), not (marker ?X ?K)
+ *
+ * R1 emits one row per src, each with a broadcast SYM.  R2 negates on
+ * the bound var ?X, which the evaluator antijoin-drops.  Net result:
+ * unseen is empty and R2 must be in a higher stratum than R1. */
+static MunitResult test_rule_head_const_stratification(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    int64_t src_vals[] = { 1, 2 };
+    ray_t* sc = ray_vec_from_raw(RAY_I64, src_vals, 2);
+    ray_t* src = ray_table_new(1);
+    src = ray_table_add_col(src, ray_sym_intern("src__c0", 7), sc);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "src", src, 1);
+
+    int64_t sym_seen = ray_sym_intern("seen", 4);
+
+    dl_rule_t r1; dl_rule_init(&r1, "marker", 2);
+    dl_rule_head_var(&r1, 0, 0);
+    dl_rule_head_const(&r1, 1, sym_seen, RAY_SYM);
+    int r1b = dl_rule_add_atom(&r1, "src", 1);
+    dl_body_set_var(&r1, r1b, 0, 0);
+    r1.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &r1), >=, 0);
+
+    dl_rule_t r2; dl_rule_init(&r2, "unseen", 1);
+    dl_rule_head_var(&r2, 0, 0);
+    int r2b = dl_rule_add_atom(&r2, "src", 1);
+    dl_body_set_var(&r2, r2b, 0, 0);
+    int r2n = dl_rule_add_neg(&r2, "marker", 2);
+    dl_body_set_var(&r2, r2n, 0, 0);      /* ?X bound from body */
+    dl_body_set_var(&r2, r2n, 1, 1);      /* ?K body-only var */
+    r2.n_vars = 2;
+    munit_assert_int(dl_add_rule(prog, &r2), >=, 0);
+
+    munit_assert_int(dl_stratify(prog), ==, 0);
+    munit_assert_int(prog->rules[1].stratum, >, prog->rules[0].stratum);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    /* marker has 2 rows, each with its own x and broadcast SYM. */
+    ray_t* m = dl_query(prog, "marker");
+    munit_assert_ptr_not_null(m);
+    munit_assert_int((int)ray_table_nrows(m), ==, 2);
+    ray_t* msym = ray_table_get_col_idx(m, 1);
+    munit_assert_int(msym->type, ==, RAY_SYM);
+
+    /* Every src row has a marker, so unseen is empty. */
+    ray_t* un = dl_query(prog, "unseen");
+    munit_assert_ptr_not_null(un);
+    munit_assert_int((int)ray_table_nrows(un), ==, 0);
+
+    dl_program_free(prog);
+    ray_release(src); ray_release(sc);
+    return MUNIT_OK;
+}
+
+/* Surface syntax round-trip for head constants: (rule (foo "a" ?x) ...) */
+static MunitResult test_rule_head_const_surface_syntax(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Register a one-row EDB: src(1).  Then declare a global rule that
+     * writes (foo "a" ?x) :- (src ?x) and drive a query rule through
+     * ray_eval_str so the surface parser is exercised. */
+    ray_t* r = ray_eval_str(
+        "(rule (foo \"a\" ?x) (src ?x))"
+    );
+    munit_assert_false(RAY_IS_ERR(r));
+    ray_release(r);
+
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -1192,6 +1415,11 @@ static MunitTest datalog_tests[] = {
     { "/rule_head_const_single_rule", test_rule_head_const_single_rule, datalog_setup, datalog_teardown, 0, NULL },
     { "/rule_head_const_i64",         test_rule_head_const_i64,         datalog_setup, datalog_teardown, 0, NULL },
     { "/rule_head_const_cross_idb",   test_rule_head_const_cross_idb,   datalog_setup, datalog_teardown, 0, NULL },
+    { "/rule_head_const_f64",            test_rule_head_const_f64,            datalog_setup, datalog_teardown, 0, NULL },
+    { "/rule_head_const_with_agg",       test_rule_head_const_with_agg,       datalog_setup, datalog_teardown, 0, NULL },
+    { "/rule_head_const_with_negation",  test_rule_head_const_with_negation,  datalog_setup, datalog_teardown, 0, NULL },
+    { "/rule_head_const_stratification", test_rule_head_const_stratification, datalog_setup, datalog_teardown, 0, NULL },
+    { "/rule_head_const_surface_syntax", test_rule_head_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
