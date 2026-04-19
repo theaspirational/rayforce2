@@ -2281,7 +2281,15 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             if (kid == from_id || kid == where_id || kid == by_id || kid == take_id || kid == asc_id || kid == desc_id || kid == nearest_id) continue;
             if (nc < 16) {
                 col_ops[nc] = compile_expr_dag(g, dict_elems[i + 1]);
-                if (!col_ops[nc]) { ray_graph_free(g); ray_release(tbl); return ray_error("domain", NULL); }
+                if (!col_ops[nc]) {
+                    /* Nearest-path resources must be freed here too — the
+                     * rerank handle/query buffers are held across the whole
+                     * ray_select_fn body, not just inside the nearest block. */
+                    if (nearest_handle_owned) ray_release(nearest_handle_owned);
+                    if (nearest_query_owned)  ray_sys_free(nearest_query_owned);
+                    ray_graph_free(g); ray_release(tbl);
+                    return ray_error("domain", NULL);
+                }
                 nc++;
             }
         }

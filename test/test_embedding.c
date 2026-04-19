@@ -682,6 +682,32 @@ static MunitResult test_select_nearest_ann_freed_handle(const void* p, void* f) 
     return MUNIT_OK;
 }
 
+/* Projection compile failure must not leak the retained inline HNSW handle
+ * or the owned query buffer.  ASan catches leaks/UAF at runtime teardown. */
+static MunitResult test_select_nearest_ann_projection_error(const void* p, void* f) {
+    (void)p; (void)f;
+    build_docs();
+    /* `(hnsw-build (at __docs 'emb))` is inline and rc=1.  The projection
+     * uses an unknown function name that compile_expr_dag cannot lower —
+     * the error path must release the nearest handle and free the query
+     * buffer before returning. */
+    ray_t* r = ray_eval_str(
+        "(select {bad: (no-such-function id) "
+        "         from: __docs "
+        "         nearest: (ann (hnsw-build (at __docs 'emb) 'cosine) "
+        "                       [1.0 0.0 0.0]) "
+        "         take: 3})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_true(RAY_IS_ERR(r));
+    /* If we got here with no ASan complaint, the handle/query cleanup
+     * worked.  A subsequent ordinary query must still run fine. */
+    munit_assert_int(eval_i64(
+        "(at (at (select {id: id from: __docs "
+        "                 nearest: (knn emb [1.0 0.0 0.0]) take: 1}) 'id) 0)"),
+        ==, 0);
+    return MUNIT_OK;
+}
+
 /* Filter-aware iterative scan: a modestly selective filter (~50% pass rate).
  *
  * The prior oversample+refilter path pulled K × oversample_factor candidates
@@ -848,6 +874,7 @@ static MunitTest embedding_tests[] = {
     { "/select_nearest_sym_col", test_select_nearest_sym_col, emb_setup, emb_teardown, 0, NULL },
     { "/select_nearest_ann_inline_handle", test_select_nearest_ann_inline_handle, emb_setup, emb_teardown, 0, NULL },
     { "/select_nearest_ann_freed_handle", test_select_nearest_ann_freed_handle, emb_setup, emb_teardown, 0, NULL },
+    { "/select_nearest_ann_projection_error", test_select_nearest_ann_projection_error, emb_setup, emb_teardown, 0, NULL },
     { "/select_nearest_iterative_selective", test_select_nearest_iterative_selective, emb_setup, emb_teardown, 0, NULL },
     { "/select_nearest_recall", test_select_nearest_recall, emb_setup, emb_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL }
