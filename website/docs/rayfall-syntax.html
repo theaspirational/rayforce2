@@ -293,6 +293,41 @@
       <pre><code>(<span class="hl-kw">set</span> x <span class="hl-num">42</span>)        <span class="hl-comment">; global binding</span>
 (<span class="hl-kw">let</span> y (<span class="hl-fn">+</span> x <span class="hl-num">1</span>))   <span class="hl-comment">; local binding</span></code></pre>
 
+      <h3 id="dotted-namespaces">Dotted Namespaces</h3>
+      <p>A symbol whose name contains one or more <code>.</code> is a <em>dotted</em> symbol — it names a path through nested dictionaries rather than a single global binding. <code>set</code> auto-creates the intermediate dicts on write, and read/delete traverse them with copy-on-write semantics so other references to the enclosing dict see their old value.</p>
+      <pre><code><span class="hl-comment">; Write a nested namespace — intermediate dicts are created automatically</span>
+(<span class="hl-kw">set</span> math.pi <span class="hl-num">3.14159</span>)
+(<span class="hl-kw">set</span> math.e  <span class="hl-num">2.71828</span>)
+(<span class="hl-kw">set</span> cfg.db.host <span class="hl-str">"localhost"</span>)
+(<span class="hl-kw">set</span> cfg.db.port <span class="hl-num">5432</span>)
+
+<span class="hl-comment">; Read walks the path segment by segment</span>
+math.pi          <span class="hl-comment">; 3.14159</span>
+cfg.db.host      <span class="hl-comment">; "localhost"</span>
+
+<span class="hl-comment">; Deleting a leaf cascades: cfg.db becomes empty, then cfg.db is itself removed</span>
+(<span class="hl-fn">del</span> cfg.db.host)
+(<span class="hl-fn">del</span> cfg.db.port)
+cfg.db           <span class="hl-comment">; error — cleaned up after last leaf went away</span></code></pre>
+
+      <p>When a dotted path lands on a <strong>temporal</strong> value (DATE / TIME / TIMESTAMP atom or vector), the trailing segment dispatches through the temporal extraction API instead of looking for a dict key. This lets you reach calendar fields uniformly:</p>
+      <pre><code>(<span class="hl-kw">set</span> d <span class="hl-num">2024.03.15</span>)
+d.yyyy           <span class="hl-comment">; 2024</span>
+d.mm             <span class="hl-comment">; 3</span>
+d.dd             <span class="hl-comment">; 15</span>
+d.dow            <span class="hl-comment">; 5   (ISO: Mon=1..Sun=7)</span>
+
+<span class="hl-comment">; Vector of dates — the whole column is lifted</span>
+(<span class="hl-kw">set</span> ds [<span class="hl-num">2024.01.01</span> <span class="hl-num">2024.06.15</span> <span class="hl-num">2024.12.31</span>])
+ds.yyyy          <span class="hl-comment">; [2024 2024 2024]</span>
+ds.doy           <span class="hl-comment">; [1 167 366]</span>
+
+<span class="hl-comment">; Inside a table, col.yyyy resolves against the column vector</span>
+(<span class="hl-kw">select</span> {<span class="hl-sym">from:</span> trades <span class="hl-sym">by:</span> Ts.date})   <span class="hl-comment">; group by day</span>
+(<span class="hl-kw">select</span> {<span class="hl-sym">from:</span> trades <span class="hl-sym">by:</span> Ts.hh})     <span class="hl-comment">; group by hour of day</span></code></pre>
+
+      <p>Recognised temporal segments: <code>yyyy</code>, <code>mm</code>, <code>dd</code>, <code>hh</code>, <code>minute</code>, <code>ss</code>, <code>dow</code>, <code>doy</code>, plus the two truncations <code>date</code> (drop time-of-day) and <code>time</code> (drop date). Null input rows propagate to null output rows — the null sentinel bit pattern is not decoded as a bogus calendar value.</p>
+
       <h3>Error Handling: <code>try</code> / <code>raise</code></h3>
       <pre><code>(<span class="hl-kw">try</span>
   (<span class="hl-fn">raise</span> <span class="hl-str">"oops"</span>)     <span class="hl-comment">; throws an error</span>

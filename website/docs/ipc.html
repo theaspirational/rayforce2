@@ -139,6 +139,9 @@
 
       <p>The server runs in the same thread as the REPL. IPC connections are processed between REPL inputs. When piped input is exhausted, the server continues running until interrupted.</p>
 
+      <h2 id="handshake">Handshake</h2>
+      <p>Every IPC connection opens with a 2-byte exchange before any framed payload flows: <code>{ wire_version, auth_flag }</code>. The client sends its <code>RAY_SERDE_WIRE_VERSION</code> and a zero; the server replies with its own wire version and <code>0x01</code> if password auth is required, <code>0x00</code> otherwise. Either side will drop the connection if the peer's first byte doesn't match — this is what prevents a new peer from ever writing a newer-format payload to a peer that couldn't parse it.</p>
+
       <h2 id="authentication">Authentication</h2>
       <p>The <code>-u</code> and <code>-U</code> flags enable password authentication for IPC connections. Clients must provide valid credentials during the handshake or the connection is rejected.</p>
 
@@ -327,7 +330,7 @@
         </thead>
         <tbody>
           <tr><td>0</td><td>4 bytes</td><td><code>prefix</code></td><td>Magic bytes <code>0xcefadefa</code> &mdash; identifies Rayforce binary data</td></tr>
-          <tr><td>4</td><td>1 byte</td><td><code>version</code></td><td>Protocol version (<code>RAY_VERSION_MAJOR</code>)</td></tr>
+          <tr><td>4</td><td>1 byte</td><td><code>version</code></td><td>Wire-format version (<code>RAY_SERDE_WIRE_VERSION</code>, currently <code>3</code>). Decoupled from <code>RAY_VERSION_MAJOR</code>. A receiver that sees a different byte here rejects the payload with a <code>version</code> error instead of attempting to parse it.</td></tr>
           <tr><td>5</td><td>1 byte</td><td><code>flags</code></td><td>Bit 0: compressed (0 = no, 1 = yes)</td></tr>
           <tr><td>6</td><td>1 byte</td><td><code>endian</code></td><td>Endianness: <code>0</code> = little-endian</td></tr>
           <tr><td>7</td><td>1 byte</td><td><code>msgtype</code></td><td>Message type: <code>0</code> = async, <code>1</code> = sync, <code>2</code> = response</td></tr>
@@ -338,13 +341,20 @@
       <p>The corresponding C struct:</p>
       <pre><code><span class="hl-kw">typedef struct</span> ray_ipc_header_t {
     uint32_t prefix;     <span class="hl-comment">/* RAY_SERDE_PREFIX (0xcefadefa) */</span>
-    uint8_t  version;    <span class="hl-comment">/* RAY_VERSION_MAJOR */</span>
+    uint8_t  version;    <span class="hl-comment">/* RAY_SERDE_WIRE_VERSION (currently 3) */</span>
     uint8_t  flags;      <span class="hl-comment">/* 0 */</span>
     uint8_t  endian;     <span class="hl-comment">/* 0 = little-endian */</span>
     uint8_t  msgtype;    <span class="hl-comment">/* 0 = async, 1 = sync, 2 = response */</span>
     int64_t  size;       <span class="hl-comment">/* payload size in bytes */</span>
 } ray_ipc_header_t;</code></pre>
       <p>The header is exactly 16 bytes, enforced by a compile-time static assertion.</p>
+
+      <h3 id="wire-version-history">Wire-version history</h3>
+      <ul>
+        <li><strong>v2</strong> &mdash; atoms serialized as <code>type(1) + value-bytes</code>. Typed-null atoms (<code>0Nl</code>, <code>0Nf</code>, &hellip;) lost their null bit on round-trip.</li>
+        <li><strong>v3</strong> (current) &mdash; atoms serialized as <code>type(1) + flags(1) + value-bytes</code>. Bit 0 of <code>flags</code> carries the typed-null marker; <code>(de (ser 0Nl))</code> now returns <code>0Nl</code>. The <a href="#handshake">handshake byte</a> advertises the same version so peers speaking different wire versions are closed before any payload is exchanged.</li>
+      </ul>
+      <p>Because the version field is checked symmetrically on send and receive, a v3 peer will refuse to connect to a v2 peer (and vice versa) rather than silently mis-parsing.</p>
 
       <h2 id="compression">Compression</h2>
       <p>Payloads larger than 2,000 bytes are automatically compressed using delta + RLE encoding. This works especially well for sorted columnar data (long runs of identical delta bytes).</p>

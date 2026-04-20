@@ -397,6 +397,25 @@
         </tbody>
       </table>
 
+      <h3 id="temporal-extract">Calendar/Clock Field Extraction</h3>
+      <p>Unary functions that pull a single calendar or clock field out of a DATE / TIME / TIMESTAMP atom or vector. Null input rows propagate to null output rows (the null sentinel bit pattern is <em>not</em> decoded as a bogus year / second). The same set of fields is reachable via dotted access on a temporal value (e.g. <code>ts.yyyy</code> — see <a href="rayfall-syntax.html#dotted-namespaces">Dotted Namespaces</a>).</p>
+
+      <table>
+        <thead><tr><th>Function</th><th>Range</th><th>Example</th></tr></thead>
+        <tbody>
+          <tr><td><code>yyyy</code></td><td>year</td><td><code>(yyyy 2024.03.15)</code> &rarr; <code>2024</code></td></tr>
+          <tr><td><code>mm</code></td><td>1..12</td><td><code>(mm 2024.03.15)</code> &rarr; <code>3</code></td></tr>
+          <tr><td><code>dd</code></td><td>1..31</td><td><code>(dd 2024.03.15)</code> &rarr; <code>15</code></td></tr>
+          <tr><td><code>hh</code></td><td>0..23</td><td><code>(hh 12:34:56)</code> &rarr; <code>12</code></td></tr>
+          <tr><td><code>minute</code></td><td>0..59</td><td><code>(minute 12:34:56)</code> &rarr; <code>34</code></td></tr>
+          <tr><td><code>ss</code></td><td>0..59</td><td><code>(ss 12:34:56)</code> &rarr; <code>56</code></td></tr>
+          <tr><td><code>dow</code></td><td>1..7 (Mon=1)</td><td><code>(dow 2024.03.15)</code> &rarr; <code>5</code></td></tr>
+          <tr><td><code>doy</code></td><td>1..366</td><td><code>(doy 2024.03.15)</code> &rarr; <code>75</code></td></tr>
+        </tbody>
+      </table>
+
+      <p><code>mm</code> is unambiguously MONTH; the minute spelling stays long-form because a two-letter token can't serve both meanings in a uniform dotted walk. Two dotted-only truncations exist: <code>.date</code> drops the time-of-day component (keeps the day), and <code>.time</code> drops the date component (keeps the microseconds within the day).</p>
+
       <p>Cross-temporal comparisons are supported: dates, times, and timestamps are all converted to nanoseconds internally for comparison operations.</p>
 
       <!-- ════════════════════════════════════════ -->
