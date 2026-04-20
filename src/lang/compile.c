@@ -229,9 +229,21 @@ static void compile_list(compiler_t *c, ray_t *ast) {
             return;
         }
 
-        /* (let name value) — compile value, store in local slot */
+        /* (let name value) — compile value, store in local slot.
+         * Reserved names (`.sys.*`, `.os.*`, `.csv.*`, `.ipc.*`) are
+         * refused here so a compiled lambda can't shadow a builtin
+         * through its local-slot table — the same guard
+         * ray_env_set_local enforces on the tree-walking path.
+         * Setting c->error aborts bytecode emission; call_lambda
+         * then falls back to the tree-walking interpreter which
+         * raises the proper `reserve` error via ray_let_fn. */
         if (sym_id == sf_let && n == 3) {
             ray_t *name_obj = elems[1];
+            if (name_obj->type != -RAY_SYM ||
+                ray_sym_is_reserved(name_obj->i64)) {
+                c->error = true;
+                return;
+            }
             compile_expr(c, elems[2]);
             emit(c, OP_DUP);
             int32_t slot = find_local(c, name_obj->i64);

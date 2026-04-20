@@ -3359,6 +3359,16 @@ static MunitResult test_rf_reserved_namespace(const void* params, void* fixture)
     ASSERT_ER("(let .os.getenv \"bogus\")",    "reserve");
     ASSERT_ER("((fn [.sys.gc] .sys.gc) 7)",    "reserve");
     ASSERT_ER("(set _ (fn [.os.getenv] 1))",   "reserve");
+
+    /* `let` inside a compiled lambda body: the bytecode path stores a
+     * local into a slot table (OP_STOREENV) without going through
+     * ray_env_set_local, so the guard also lives in compile.c's let
+     * special-form handler. */
+    ray_eval_str("(set _compiled_let_shadow (fn [x] (let .sys.gc 99) .sys.gc))");
+    ASSERT_ER("(_compiled_let_shadow 1)",          "reserve");
+    ray_eval_str("(set _compiled_call_shadow (fn [x] (let .sys.gc 99) (.sys.gc 0)))");
+    ASSERT_ER("(_compiled_call_shadow 1)",         "reserve");
+
     /* Built-in still resolves after the blocked shadow attempts. */
     ASSERT_EQ("(.sys.gc 0)", "0");
 
