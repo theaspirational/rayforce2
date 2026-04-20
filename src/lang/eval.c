@@ -1908,7 +1908,7 @@ vm_error_cleanup: {
 static void register_binary(const char* name, uint8_t attrs, ray_binary_fn fn) {
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_binary(name, attrs, fn);
-    assert(ray_env_set(sym, obj) == RAY_OK);
+    assert(ray_env_bind(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
@@ -1917,14 +1917,14 @@ static void register_binary_op(const char* name, uint8_t attrs, ray_binary_fn fn
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_binary(name, attrs, fn);
     RAY_FN_SET_OPCODE(obj, opcode);
-    assert(ray_env_set(sym, obj) == RAY_OK);
+    assert(ray_env_bind(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
 static void register_unary(const char* name, uint8_t attrs, ray_unary_fn fn) {
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_unary(name, attrs, fn);
-    assert(ray_env_set(sym, obj) == RAY_OK);
+    assert(ray_env_bind(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
@@ -1932,14 +1932,14 @@ static void register_unary_op(const char* name, uint8_t attrs, ray_unary_fn fn, 
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_unary(name, attrs, fn);
     RAY_FN_SET_OPCODE(obj, opcode);
-    assert(ray_env_set(sym, obj) == RAY_OK);
+    assert(ray_env_bind(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
 static void register_vary(const char* name, uint8_t attrs, ray_vary_fn fn) {
     int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_vary(name, attrs, fn);
-    assert(ray_env_set(sym, obj) == RAY_OK);
+    assert(ray_env_bind(sym, obj) == RAY_OK);
     ray_release(obj);
 }
 
@@ -2050,8 +2050,8 @@ static void ray_register_builtins(void) {
     register_vary("println",    RAY_FN_NONE, ray_println_fn);
     register_vary("show",       RAY_FN_NONE, ray_show_fn);
     register_vary("format",     RAY_FN_NONE, ray_format_fn);
-    register_vary("read-csv",   RAY_FN_RESTRICTED, ray_read_csv_fn);
-    register_vary("write-csv",  RAY_FN_RESTRICTED, ray_write_csv_fn);
+    register_vary(".csv.read",  RAY_FN_RESTRICTED, ray_read_csv_fn);
+    register_vary(".csv.write", RAY_FN_RESTRICTED, ray_write_csv_fn);
     register_binary("as",       RAY_FN_NONE, ray_cast_fn);
     register_unary("type",      RAY_FN_NONE, ray_type_fn);
     register_unary("read",      RAY_FN_RESTRICTED, ray_read_file_fn);
@@ -2123,18 +2123,20 @@ static void ray_register_builtins(void) {
     register_vary("print",       RAY_FN_NONE, ray_print_fn);
     register_unary("meta",       RAY_FN_NONE, ray_meta_fn);
 
-    /* System builtins */
-    register_unary("gc",         RAY_FN_NONE, ray_gc_fn);
-    register_unary("system",     RAY_FN_RESTRICTED, ray_system_fn);
-    register_unary("getenv",     RAY_FN_RESTRICTED, ray_getenv_fn);
-    register_binary("setenv",    RAY_FN_RESTRICTED, ray_setenv_fn);
-    register_unary("os-get-var", RAY_FN_RESTRICTED, ray_getenv_fn);
-    register_binary("os-set-var", RAY_FN_RESTRICTED, ray_setenv_fn);
+    /* System builtins — bound under the reserved `.sys.*` namespace so
+     * user code can't shadow them and a glance at the name identifies
+     * the category. */
+    register_unary(".sys.gc",   RAY_FN_NONE,        ray_gc_fn);
+    register_unary(".sys.exec", RAY_FN_RESTRICTED,  ray_system_fn);
 
-    /* IPC builtins */
-    register_unary("hopen",     RAY_FN_RESTRICTED, ray_hopen_fn);
-    register_unary("hclose",    RAY_FN_RESTRICTED, ray_hclose_fn);
-    register_binary("hsend",    RAY_FN_RESTRICTED, ray_hsend_fn);
+    /* OS env / process interaction under `.os.*` */
+    register_unary( ".os.getenv", RAY_FN_RESTRICTED,  ray_getenv_fn);
+    register_binary(".os.setenv", RAY_FN_RESTRICTED,  ray_setenv_fn);
+
+    /* IPC client primitives under `.ipc.*` */
+    register_unary( ".ipc.open",  RAY_FN_RESTRICTED,  ray_hopen_fn);
+    register_unary( ".ipc.close", RAY_FN_RESTRICTED,  ray_hclose_fn);
+    register_binary(".ipc.send",  RAY_FN_RESTRICTED,  ray_hsend_fn);
 
     /* quote — special form (unevaluated argument) */
     register_vary("quote",       RAY_FN_SPECIAL_FORM, ray_quote_fn);
@@ -2172,13 +2174,14 @@ static void ray_register_builtins(void) {
     register_vary("scan-left",   RAY_FN_NONE, ray_scan_left_fn);
     register_vary("scan-right",  RAY_FN_NONE, ray_scan_right_fn);
 
-    /* del, internals, memstat, modify, pivot, sysinfo, unify, xrank */
+    /* del, modify, pivot remain top-level language primitives.
+     * Runtime/heap introspection moves under `.sys.*`. */
     register_vary("del",          RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_del_fn);
-    register_unary("internals",   RAY_FN_NONE, ray_internals_fn);
-    register_unary("memstat",     RAY_FN_NONE, ray_memstat_fn);
+    register_unary(".sys.build", RAY_FN_NONE, ray_internals_fn);
+    register_unary(".sys.mem",   RAY_FN_NONE, ray_memstat_fn);
     register_vary("modify",      RAY_FN_RESTRICTED, ray_modify_fn);
     register_vary("pivot",       RAY_FN_NONE, ray_pivot_fn);
-    register_unary("sysinfo",    RAY_FN_NONE, ray_sysinfo_fn);
+    register_unary(".sys.info",  RAY_FN_NONE, ray_sysinfo_fn);
     register_unary("sym-name",   RAY_FN_NONE, ray_sym_name_fn);
     register_binary("unify",     RAY_FN_NONE, ray_unify_fn);
     register_binary("xrank",     RAY_FN_NONE, ray_xrank_fn);

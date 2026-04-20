@@ -64,6 +64,9 @@ const char* ray_err_code_str(ray_err_t e) {
         [RAY_ERR_PARSE]   = "parse",
         [RAY_ERR_NAME]    = "name",
         [RAY_ERR_LIMIT]   = "limit",
+        /* "reserve" (not "reserved") because the err->sdata inline field
+         * is capped at 7 bytes — the past-tense form would truncate. */
+        [RAY_ERR_RESERVED] = "reserve",
     };
     if ((unsigned)e >= sizeof(codes)/sizeof(codes[0])) return "error";
     return codes[e];
@@ -81,6 +84,7 @@ ray_err_t ray_err_from_obj(ray_t* err) {
         {"schema",  6, RAY_ERR_SCHEMA},  {"corrupt", 7, RAY_ERR_CORRUPT},
         {"cancel",  6, RAY_ERR_CANCEL},  {"parse",   5, RAY_ERR_PARSE},
         {"name",    4, RAY_ERR_NAME},    {"limit",   5, RAY_ERR_LIMIT},
+        {"reserve", 7, RAY_ERR_RESERVED},
     };
     for (int i = 0; i < (int)(sizeof(map)/sizeof(map[0])); i++)
         if (n == map[i].len && memcmp(s, map[i].s, n) == 0) return map[i].e;

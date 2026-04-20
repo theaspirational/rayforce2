@@ -6,6 +6,6 @@
 
 ;; Start the client:
 ;; $ rayforce
-;; (set h (hopen "127.0.0.1:5101"))
+;; (set h (.ipc.open "127.0.0.1:5101"))
 ;; (write h (list 'f))
-;; (hclose h)
+;; (.ipc.close h)

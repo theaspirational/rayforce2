@@ -19,8 +19,8 @@ document.addEventListener('DOMContentLoaded', () => {
       {id: "sorting", title: "Sorting", text: "xasc ascending, xdesc descending sort"},
       {id: "joining", title: "Joining Tables", text: "Join tables on shared key columns, ij inner join, lj left join"},
       {id: "pivoting", title: "Pivoting", text: "Cross-tabulate data with pivot, row key, column key"},
-      {id: "loading-csv", title: "Loading CSV Files", text: "read-csv with type inference and parallel parsing"},
-      {id: "saving-csv", title: "Saving Results to CSV", text: "write-csv to save any table"}
+      {id: "loading-csv", title: "Loading CSV Files", text: ".csv.read with type inference and parallel parsing"},
+      {id: "saving-csv", title: "Saving Results to CSV", text: ".csv.write to save any table"}
     ]},
     {title: "Building a Knowledge Base with Datalog", url: "guide-datalog.html", sections: [
       {id: "", title: "Datalog Guide", text: "Model entities and relationships as triples, write rules, query"},
@@ -45,7 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ]},
     {title: "Data Persistence Guide", url: "guide-storage.html", sections: [
       {id: "", title: "Storage Guide", text: "Save and load data: CSV, columnar, splayed, partitioned, mmap"},
-      {id: "csv-io", title: "CSV I/O", text: "read-csv and write-csv for data exchange"},
+      {id: "csv-io", title: "CSV I/O", text: ".csv.read and .csv.write for data exchange"},
       {id: "symbol-table", title: "Symbol Table Persistence", text: "Global symbol intern table, ray_sym_save, ray_sym_load"},
       {id: "columnar-files", title: "Columnar Files", text: "ray_col_save, ray_col_load, ray_col_mmap, native binary"},
       {id: "splayed-tables", title: "Splayed Tables", text: "ray_splay_save, ray_splay_load, one file per column"},
@@ -90,9 +90,9 @@ document.addEventListener('DOMContentLoaded', () => {
       {id: "string-ops", title: "String Operations", text: "upper lower trim strlen substr replace concat like"},
       {id: "temporal", title: "Temporal", text: "date time timestamp year month day hour minute second"},
       {id: "type-ops", title: "Type Operations", text: "type cast null fills type-of"},
-      {id: "io", title: "I/O", text: "read-csv write-csv show print"},
+      {id: "io", title: "I/O", text: ".csv.read .csv.write show print"},
       {id: "control", title: "Control Flow", text: "if cond do while for def set"},
-      {id: "system", title: "System", text: "eval parse exit gc env"},
+      {id: "system", title: "System", text: "eval parse exit .sys.gc env"},
       {id: "serialization", title: "Serialization", text: "save load persist data"},
       {id: "eav", title: "EAV", text: "datoms assert-fact retract-fact query"},
       {id: "table-set-ops", title: "Table Set Operations", text: "union inter except set operations"},
@@ -180,7 +180,7 @@ document.addEventListener('DOMContentLoaded', () => {
       {id: "splayed-tables", title: "Splayed Tables", text: "Directory of column files, .d schema, one file per column"},
       {id: "partitioned-tables", title: "Date-Partitioned Tables", text: "Date directories, splayed tables per partition"},
       {id: "symbol-persistence", title: "Symbol Persistence", text: "ray_sym_save, ray_sym_load, intern table persistence"},
-      {id: "csv", title: "CSV Import/Export", text: "ray_csv_load, write-csv, parallel parse, type inference"},
+      {id: "csv", title: "CSV Import/Export", text: "ray_csv_load, .csv.write, parallel parse, type inference"},
       {id: "cross-platform", title: "Cross-Platform I/O", text: "File locking, fsync, atomic rename"}
     ]},
     {title: "IPC & Serialization", url: "ipc.html", sections: [

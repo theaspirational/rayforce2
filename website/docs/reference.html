@@ -568,8 +568,8 @@
           <tr><td><code>print</code></td><td>unary</td><td>&mdash;</td><td>Print value without newline</td><td><code>(print "hello")</code></td></tr>
           <tr><td><code>show</code></td><td>variadic</td><td>&mdash;</td><td>Pretty-print a value (tables formatted)</td><td><code>(show trades)</code></td></tr>
           <tr><td><code>format</code></td><td>variadic</td><td>&mdash;</td><td>Format value to string (% as placeholder)</td><td><code>(format "val=%" 42)</code> &rarr; <code>"val=42"</code></td></tr>
-          <tr><td><code>read-csv</code></td><td>variadic</td><td>restricted</td><td>Load CSV file into table (mmap, parallel parse)</td><td><code>(read-csv "data.csv")</code></td></tr>
-          <tr><td><code>write-csv</code></td><td>variadic</td><td>restricted</td><td>Write table to CSV file</td><td><code>(write-csv trades "out.csv")</code></td></tr>
+          <tr><td><code>.csv.read</code></td><td>variadic</td><td>restricted</td><td>Load CSV file into table (mmap, parallel parse)</td><td><code>(.csv.read "data.csv")</code></td></tr>
+          <tr><td><code>.csv.write</code></td><td>variadic</td><td>restricted</td><td>Write table to CSV file</td><td><code>(.csv.write trades "out.csv")</code></td></tr>
           <tr><td><code>read</code></td><td>unary</td><td>restricted</td><td>Read file contents as string</td><td><code>(read "file.txt")</code></td></tr>
           <tr><td><code>write</code></td><td>binary</td><td>restricted</td><td>Write string to file</td><td><code>(write "file.txt" "content")</code></td></tr>
           <tr><td><code>load</code></td><td>unary</td><td>restricted</td><td>Load and evaluate a Rayfall script file</td><td><code>(load "lib.rfl")</code></td></tr>
@@ -580,7 +580,7 @@
       </table>
 
       <pre><code><span class="hl-comment">; Load and query CSV data</span>
-(<span class="hl-kw">set</span> trades (<span class="hl-fn">read-csv</span> <span class="hl-str">"trades.csv"</span>))
+(<span class="hl-kw">set</span> trades (<span class="hl-fn">.csv.read</span> <span class="hl-str">"trades.csv"</span>))
 (<span class="hl-fn">show</span> trades)
 (<span class="hl-fn">println</span> (<span class="hl-fn">format</span> <span class="hl-str">"Loaded % rows"</span> (<span class="hl-fn">count</span> (<span class="hl-fn">value</span> (<span class="hl-fn">first</span> (<span class="hl-fn">value</span> trades))))))
 
@@ -596,8 +596,8 @@
         <tbody>
           <tr><td><code>eval</code></td><td>unary</td><td>&mdash;</td><td>Evaluate a parsed Rayfall expression</td><td><code>(eval (parse "(+ 1 2)"))</code> &rarr; <code>3</code></td></tr>
           <tr><td><code>parse</code></td><td>unary</td><td>&mdash;</td><td>Parse a string into a Rayfall expression tree</td><td><code>(parse "(+ 1 2)")</code></td></tr>
-          <tr><td><code>gc</code></td><td>unary</td><td>&mdash;</td><td>Trigger garbage collection / heap flush</td><td><code>(gc 0)</code></td></tr>
-          <tr><td><code>system</code></td><td>unary</td><td>restricted</td><td>Execute a shell command, return output as string</td><td><code>(system "ls -la")</code></td></tr>
+          <tr><td><code>.sys.gc</code></td><td>unary</td><td>&mdash;</td><td>Trigger garbage collection / heap flush</td><td><code>(.sys.gc 0)</code></td></tr>
+          <tr><td><code>.sys.exec</code></td><td>unary</td><td>restricted</td><td>Execute a shell command, return output as string</td><td><code>(.sys.exec "ls -la")</code></td></tr>
           <tr><td><code>getenv</code></td><td>unary</td><td>restricted</td><td>Get environment variable value</td><td><code>(getenv "HOME")</code></td></tr>
           <tr><td><code>setenv</code></td><td>binary</td><td>restricted</td><td>Set environment variable</td><td><code>(setenv "KEY" "value")</code></td></tr>
           <tr><td><code>os-get-var</code></td><td>unary</td><td>restricted</td><td>Alias for getenv</td><td><code>(os-get-var "PATH")</code></td></tr>
@@ -605,9 +605,9 @@
           <tr><td><code>args</code></td><td>unary</td><td>&mdash;</td><td>Get command-line arguments as vector</td><td><code>(args 0)</code></td></tr>
           <tr><td><code>env</code></td><td>unary</td><td>&mdash;</td><td>List all global environment bindings</td><td><code>(env 0)</code></td></tr>
           <tr><td><code>timer</code></td><td>unary</td><td>&mdash;</td><td>High-resolution monotonic nanosecond clock</td><td><code>(timer 0)</code></td></tr>
-          <tr><td><code>internals</code></td><td>unary</td><td>&mdash;</td><td>Show internal representation of an object (debug)</td><td><code>(internals [1 2 3])</code></td></tr>
-          <tr><td><code>memstat</code></td><td>unary</td><td>&mdash;</td><td>Memory allocator statistics (heap usage)</td><td><code>(memstat 0)</code></td></tr>
-          <tr><td><code>sysinfo</code></td><td>unary</td><td>&mdash;</td><td>System information (cores, page size, total memory)</td><td><code>(sysinfo 0)</code></td></tr>
+          <tr><td><code>.sys.build</code></td><td>unary</td><td>&mdash;</td><td>Show internal representation of an object (debug)</td><td><code>(.sys.build [1 2 3])</code></td></tr>
+          <tr><td><code>.sys.mem</code></td><td>unary</td><td>&mdash;</td><td>Memory allocator statistics (heap usage)</td><td><code>(.sys.mem 0)</code></td></tr>
+          <tr><td><code>.sys.info</code></td><td>unary</td><td>&mdash;</td><td>System information (cores, page size, total memory)</td><td><code>(.sys.info 0)</code></td></tr>
         </tbody>
       </table>
 
@@ -621,8 +621,8 @@
 (<span class="hl-fn">println</span> (<span class="hl-fn">format</span> <span class="hl-str">"%ns"</span> (<span class="hl-fn">-</span> (<span class="hl-fn">timer</span> <span class="hl-num">0</span>) t0)))
 
 <span class="hl-comment">; System diagnostics</span>
-(<span class="hl-fn">sysinfo</span> <span class="hl-num">0</span>)                  <span class="hl-comment">; OS, CPU cores, memory budget</span>
-(<span class="hl-fn">memstat</span> <span class="hl-num">0</span>)                  <span class="hl-comment">; heap usage statistics</span></code></pre>
+(<span class="hl-fn">.sys.info</span> <span class="hl-num">0</span>)                  <span class="hl-comment">; OS, CPU cores, memory budget</span>
+(<span class="hl-fn">.sys.mem</span> <span class="hl-num">0</span>)                  <span class="hl-comment">; heap usage statistics</span></code></pre>
 
       <!-- ════════════════════════════════════════ -->
       <h2 id="serialization">Serialization</h2>
@@ -673,17 +673,17 @@
       <table>
         <thead><tr><th>Function</th><th>Type</th><th>Flags</th><th>Description</th><th>Example</th></tr></thead>
         <tbody>
-          <tr><td><code>hopen</code></td><td>unary</td><td>restricted</td><td>Open TCP connection to host:port, returns handle</td><td><code>(hopen "localhost:5000")</code></td></tr>
-          <tr><td><code>hclose</code></td><td>unary</td><td>restricted</td><td>Close an IPC connection handle</td><td><code>(hclose h)</code></td></tr>
-          <tr><td><code>hsend</code></td><td>binary</td><td>restricted</td><td>Send a value over an IPC handle (sync request)</td><td><code>(hsend h "(sum (til 100))")</code></td></tr>
+          <tr><td><code>.ipc.open</code></td><td>unary</td><td>restricted</td><td>Open TCP connection to host:port, returns handle</td><td><code>(.ipc.open "localhost:5000")</code></td></tr>
+          <tr><td><code>.ipc.close</code></td><td>unary</td><td>restricted</td><td>Close an IPC connection handle</td><td><code>(.ipc.close h)</code></td></tr>
+          <tr><td><code>.ipc.send</code></td><td>binary</td><td>restricted</td><td>Send a value over an IPC handle (sync request)</td><td><code>(.ipc.send h "(sum (til 100))")</code></td></tr>
         </tbody>
       </table>
 
       <pre><code><span class="hl-comment">; Connect to a remote Rayforce instance</span>
-(<span class="hl-kw">set</span> h (<span class="hl-fn">hopen</span> <span class="hl-str">"localhost:5000"</span>))
-(<span class="hl-kw">set</span> result (<span class="hl-fn">hsend</span> h <span class="hl-str">"(select {from: trades where: (&gt; price 100)})"</span>))
+(<span class="hl-kw">set</span> h (<span class="hl-fn">.ipc.open</span> <span class="hl-str">"localhost:5000"</span>))
+(<span class="hl-kw">set</span> result (<span class="hl-fn">.ipc.send</span> h <span class="hl-str">"(select {from: trades where: (&gt; price 100)})"</span>))
 (<span class="hl-fn">show</span> result)
-(<span class="hl-fn">hclose</span> h)</code></pre>
+(<span class="hl-fn">.ipc.close</span> h)</code></pre>
 
       <!-- ════════════════════════════════════════ -->
       <h2 id="eav">EAV Triple Store</h2>

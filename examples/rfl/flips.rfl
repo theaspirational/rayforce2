@@ -10,7 +10,7 @@
 
 (println "Reading CSV file: %" csvpath)
 
-(set flips (except (read-csv 
+(set flips (except (.csv.read 
   [DATE I64 I64 SYMBOL I64 SYMBOL TIME F64 F64 I64 
    I64 I64 SYMBOL GUID SYMBOL C8 C8 I64 I64 F64 I64 SYMBOL 
    SYMBOL SYMBOL SYMBOL SYMBOL SYMBOL C8 SYMBOL SYMBOL F64 

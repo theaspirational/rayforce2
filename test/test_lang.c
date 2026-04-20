@@ -2821,8 +2821,8 @@ static MunitResult test_eval_read_write_csv(const void* params, void* fixture) {
     /* Create a table, write it to CSV, read it back */
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [1 2 3] [10 20 30]))) "
-        "(write-csv t \"/tmp/test_rayfall.csv\") "
-        "(set t2 (read-csv \"/tmp/test_rayfall.csv\")) "
+        "(.csv.write t \"/tmp/test_rayfall.csv\") "
+        "(set t2 (.csv.read \"/tmp/test_rayfall.csv\")) "
         "(count t2))");
     munit_assert_ptr_not_null(result);
     munit_assert_false(RAY_IS_ERR(result));
@@ -4013,6 +4013,7 @@ static MunitTest lang_tests[] = {
     { "/rf/update",                test_rf_update,        lang_setup, lang_teardown, 0, NULL },
     { "/rf/serde",                 test_rf_serde,         lang_setup, lang_teardown, 0, NULL },
     { "/rf/temporal_bare",         test_rf_temporal_bare, lang_setup, lang_teardown, 0, NULL },
+    { "/rf/reserved_namespace",    test_rf_reserved_namespace, lang_setup, lang_teardown, 0, NULL },
     { "/rf/literals",              test_rf_literals,      lang_setup, lang_teardown, 0, NULL },
     { "/rf/cmp",                   test_rf_cmp,           lang_setup, lang_teardown, 0, NULL },
     { "/rf/distinct",              test_rf_distinct,      lang_setup, lang_teardown, 0, NULL },

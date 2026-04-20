@@ -3307,6 +3307,56 @@ static MunitResult test_rf_update(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* ---- Reserved `.` namespace: user writes refused, system builtins
+ * resolve through the dotted path.  The leading dot marks the name as
+ * belonging to a built-in category (.sys, .os, .io, .ipc) that
+ * ray_env_set refuses to touch; registration goes through a separate
+ * ray_env_bind path. */
+static MunitResult test_rf_reserved_namespace(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Positive: each migrated utility builtin resolves to a callable
+     * and the call path works.  (Rayfall reports function `type` as
+     * `'?` regardless of arity — so we exercise by calling, which is
+     * what actually matters here.) */
+    /* .sys.gc returns 0 on success — doubles as a binding-exists probe. */
+    ASSERT_EQ("(.sys.gc 0)", "0");
+    /* OS env round-trip: set a key, read it back. */
+    ray_eval_str("(.os.setenv \"RAYF_NS_TEST\" \"hello\")");
+    ASSERT_EQ("(.os.getenv \"RAYF_NS_TEST\")", "\"hello\"");
+    /* The remaining builtins are harder to call without side effects;
+     * `nil?` proves the binding resolves to a non-null callable. */
+    ASSERT_EQ("(nil? .sys.exec)",  "false");
+    ASSERT_EQ("(nil? .sys.info)",  "false");
+    ASSERT_EQ("(nil? .sys.mem)",   "false");
+    ASSERT_EQ("(nil? .sys.build)", "false");
+    ASSERT_EQ("(nil? .ipc.open)",  "false");
+    ASSERT_EQ("(nil? .ipc.close)", "false");
+    ASSERT_EQ("(nil? .ipc.send)",  "false");
+    ASSERT_EQ("(nil? .csv.read)",  "false");
+    ASSERT_EQ("(nil? .csv.write)", "false");
+
+    /* Old names must NOT resolve — we committed to no backward compat. */
+    ASSERT_ER("gc",         "name");
+    ASSERT_ER("getenv",     "name");
+    ASSERT_ER("system",     "name");
+    ASSERT_ER("sysinfo",    "name");
+    ASSERT_ER("memstat",    "name");
+    ASSERT_ER("internals",  "name");
+    ASSERT_ER("read-csv",   "name");
+
+    /* Negative: writes to `.*` are refused with `reserve`. */
+    ASSERT_ER("(set .os.foo 1)",       "reserve");
+    ASSERT_ER("(set .sys.gc 0)",       "reserve");   /* can't even overwrite */
+    ASSERT_ER("(set .made.up.ns 42)",  "reserve");   /* arbitrary .* root */
+
+    /* User-level dotted writes under a non-`.` root still work. */
+    ray_eval_str("(set myns.x 1)");
+    ASSERT_EQ("myns.x", "1");
+
+    return MUNIT_OK;
+}
+
 /* ---- Temporal unary builtins (yyyy / mm / dd / hh / minute / ss / dow /
  * doy) must work as bare functions in addition to the dotted-access form
  * (`ts.yyyy` etc.).  The dotted path is already covered by the /dotted
@@ -5953,7 +6003,7 @@ static MunitResult test_rf_read_csv(const void* params, void* fixture) {
     fclose(f);
 
     ASSERT_EQ(
-        "(count (read-csv [I64 SYMBOL] \"rf_test_syms.csv\"))",
+        "(count (.csv.read [I64 SYMBOL] \"rf_test_syms.csv\"))",
         "20000");
 
     remove("rf_test_syms.csv");
@@ -5966,7 +6016,7 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     /* Round-trip: every column type, plus nulls, plus sliced/sorted
      * views.  Each case writes to a temp file, reads the raw bytes
      * back, and asserts on the exact content (commas / empty fields
-     * matter).  (read-csv foo) is exercised separately in the round-
+     * matter).  (.csv.read foo) is exercised separately in the round-
      * trip blocks where it adds type-recovery coverage. */
 
     /* --- 1. Primary types (no nulls) ---
@@ -5981,7 +6031,7 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
         "        (list \"hi\" \"bye\")"
         "        [true false]"
         "        (as 'DATE [7305 7306]))))"  /* 2020-01-01, 2020-01-02 */
-        "(write-csv tA \"rf_test_write_a.csv\")", "0");
+        "(.csv.write tA \"rf_test_write_a.csv\")", "0");
     /* Row 1: int, float, sym, guid (first of the two), str, bool, date.
      * split "\n" leaves a trailing empty field after the final newline,
      * so header + 2 data rows + "" = 4 entries. */
@@ -6007,7 +6057,7 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     ASSERT_EQ(
         "(set tB (table [i s]"
         "  (list [1 0Nl 3] [aa 0Ns cc])))"
-        "(write-csv tB \"rf_test_write_b.csv\")", "0");
+        "(.csv.write tB \"rf_test_write_b.csv\")", "0");
     ASSERT_EQ(
         "(set linesB (split (read \"rf_test_write_b.csv\") \"\\n\"))"
         "(count linesB)", "5");  /* header + 3 rows + trailing "" */
@@ -6023,7 +6073,7 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     ASSERT_EQ(
         "(set src (table [a b] (list [10 20 30 40 50] [aa bb cc dd ee])))"
         "(set v (xdesc src 'a))"
-        "(write-csv v \"rf_test_write_c.csv\")", "0");
+        "(.csv.write v \"rf_test_write_c.csv\")", "0");
     ASSERT_EQ(
         "(set linesC (split (read \"rf_test_write_c.csv\") \"\\n\"))"
         "(at linesC 0)", "\"a,b\"");
@@ -6040,23 +6090,23 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     ASSERT_EQ(
         "(set tD (table [k v]"
         "  (list [1 2] (list \"has,comma\" \"has\\\"quote\"))))"
-        "(write-csv tD \"rf_test_write_d.csv\")", "0");
+        "(.csv.write tD \"rf_test_write_d.csv\")", "0");
     /* Full-byte assertion. The whole file should be exactly this
      * byte sequence — any escape bug shows up immediately. */
     ASSERT_EQ(
         "(read \"rf_test_write_d.csv\")",
         "\"k,v\\n1,\\\"has,comma\\\"\\n2,\\\"has\\\"\\\"quote\\\"\\n\"");
 
-    /* --- 5. Round-trip via read-csv recovers numeric column values.
+    /* --- 5. Round-trip via .csv.read recovers numeric column values.
      * (SYMBOL columns are displayed correctly by `show` but extracting
      * them via `(at tbl 'col)` currently returns garbage intern IDs —
-     * that's a separate read-csv bug tracked outside this test.) */
+     * that's a separate .csv.read bug tracked outside this test.) */
     ASSERT_EQ(
         "(set tE (table [i f]"
         "  (list [1 2 3] (as 'F64 [1.25 2.5 3.75]))))"
-        "(write-csv tE \"rf_test_write_e.csv\")", "0");
+        "(.csv.write tE \"rf_test_write_e.csv\")", "0");
     ASSERT_EQ(
-        "(set rt (read-csv [I64 F64] \"rf_test_write_e.csv\"))"
+        "(set rt (.csv.read [I64 F64] \"rf_test_write_e.csv\"))"
         "(count rt)", "3");
     ASSERT_EQ("(at (at rt 'i) 0)", "1");
     ASSERT_EQ("(at (at rt 'i) 1)", "2");
@@ -6066,7 +6116,7 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     ASSERT_EQ("(at (at rt 'f) 2)", "3.75");
 
     /* --- 6. Empty path is rejected instead of creating "" or crashing. */
-    ASSERT_ER("(write-csv tE \"\")", "type");
+    ASSERT_ER("(.csv.write tE \"\")", "type");
 
     /* --- 6b. Null-row round-trip (gh#6 example 1).
      * Empty lines in the data section ARE null rows, including the line
@@ -6074,10 +6124,10 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
      * consumed a run of newlines and silently dropped the first null row,
      * reordering the data. */
     ASSERT_EQ(
-        "(write-csv (table [v] (list [0Nl 2 0Nl])) \"rf_test_write_nulls.csv\")",
+        "(.csv.write (table [v] (list [0Nl 2 0Nl])) \"rf_test_write_nulls.csv\")",
         "0");
     ASSERT_EQ(
-        "(set rtn (read-csv [I64] \"rf_test_write_nulls.csv\"))"
+        "(set rtn (.csv.read [I64] \"rf_test_write_nulls.csv\"))"
         "(count rtn)", "3");
     ASSERT_EQ("(at (at rtn 'v) 0)", "0Nl");
     ASSERT_EQ("(at (at rtn 'v) 1)", "2");
@@ -6089,9 +6139,9 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     ASSERT_EQ("(format \"%\" 0Nl)", "\"0Nl\"");
     ASSERT_EQ("(format \"%\" 0Ni)", "\"0Ni\"");
 
-    /* --- 7. Temporal round-trip via read-csv.
+    /* --- 7. Temporal round-trip via .csv.read.
      * RAY_TIMESTAMP is stored as nanoseconds since 2000-01-01, and the
-     * CSV emitter writes 9 fractional digits.  read-csv's fast_time_ns
+     * CSV emitter writes 9 fractional digits.  .csv.read's fast_time_ns
      * parser must match, otherwise a load-after-save silently rescales
      * timestamps by 1000x. */
     ASSERT_EQ(
@@ -6099,9 +6149,9 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
         "  (list (as 'DATE [7305])"
         "        (as 'TIME [3723000])"  /* 01:02:03.000 */
         "        (as 'TIMESTAMP [86400000000000]))))"  /* 1 day = 2000-01-02 */
-        "(write-csv tT \"rf_test_write_t.csv\")", "0");
+        "(.csv.write tT \"rf_test_write_t.csv\")", "0");
     ASSERT_EQ(
-        "(set rt (read-csv [DATE TIME TIMESTAMP] \"rf_test_write_t.csv\"))"
+        "(set rt (.csv.read [DATE TIME TIMESTAMP] \"rf_test_write_t.csv\"))"
         "(at (at rt 'd) 0)", "2020.01.01");
     ASSERT_EQ("(at (at rt 'tm) 0)", "01:02:03.000");
     /* Raw underlying ns value preserved: 86.4e12 ns = exactly 1 day. */
@@ -6109,9 +6159,9 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     /* Sub-second precision: 9 digits on write must round-trip. */
     ASSERT_EQ(
         "(set tT2 (table [ts] (list (as 'TIMESTAMP [123456789]))))"  /* 123456789 ns */
-        "(write-csv tT2 \"rf_test_write_t2.csv\")", "0");
+        "(.csv.write tT2 \"rf_test_write_t2.csv\")", "0");
     ASSERT_EQ(
-        "(set rt2 (read-csv [TIMESTAMP] \"rf_test_write_t2.csv\"))"
+        "(set rt2 (.csv.read [TIMESTAMP] \"rf_test_write_t2.csv\"))"
         "(as 'I64 (at (at rt2 'ts) 0))", "123456789");
 
     remove("rf_test_write_a.csv");

@@ -43,7 +43,17 @@ static inline const char* ray_fn_name(const ray_t* fn) {
 ray_err_t ray_env_init(void);
 void     ray_env_destroy(void);
 ray_t*    ray_env_get(int64_t sym_id);
+
+/* User-facing binder.  Refuses any name starting with `.` — that root is
+ * reserved for system namespaces (.sys, .os, .io, .ipc, …) populated by
+ * builtin registration.  Returns RAY_ERR_RESERVED in that case. */
 ray_err_t ray_env_set(int64_t sym_id, ray_t* val);
+
+/* Internal binder used by builtin registration.  Identical to ray_env_set
+ * but WITHOUT the reserved-namespace guard.  Do NOT call this from user-
+ * exposed paths; it is the intended way to populate `.sys` / `.os` etc.
+ * during ray_lang_init. */
+ray_err_t ray_env_bind(int64_t sym_id, ray_t* val);
 
 /* Resolve a name for a Rayfall expression (tree-walking eval or bytecode
  * op_resolve): returns an OWNED ref (rc >= 1) that the caller must

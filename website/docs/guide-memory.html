@@ -129,8 +129,8 @@
       <p>For a deep dive into the allocator internals, see <a href="architecture-memory.html">Memory Model</a>.</p>
 
       <!-- 2. memstat -->
-      <h2 id="memstat">2. The <code>memstat</code> Function</h2>
-      <p>Call <code>(memstat)</code> to get a snapshot of the current heap&rsquo;s allocation statistics. It returns a dictionary with the following fields:</p>
+      <h2 id="memstat">2. The <code>.sys.mem</code> Function</h2>
+      <p>Call <code>(.sys.mem 0)</code> to get a snapshot of the current heap&rsquo;s allocation statistics. It returns a dictionary with the following fields:</p>
 
       <table>
         <thead>
@@ -171,7 +171,7 @@
 
       <h3>Basic Usage</h3>
       <pre><code><span class="hl-comment">;; Check current memory stats</span>
-(<span class="hl-fn">memstat</span>)</code></pre>
+(<span class="hl-fn">.sys.mem</span>)</code></pre>
       <pre><code>alloc-count     | 14523
 bytes-allocated | 2621440
 peak-bytes      | 5242880
@@ -180,13 +180,13 @@ sys-current     | 8388608</code></pre>
 
       <h3>Checking Memory Before and After an Operation</h3>
       <pre><code><span class="hl-comment">;; Snapshot before</span>
-(<span class="hl-kw">set</span> before (<span class="hl-fn">memstat</span>))
+(<span class="hl-kw">set</span> before (<span class="hl-fn">.sys.mem</span>))
 
 <span class="hl-comment">;; Load a large CSV</span>
-(<span class="hl-kw">set</span> trades (<span class="hl-fn">read-csv</span> <span class="hl-str">"trades-10M.csv"</span>))
+(<span class="hl-kw">set</span> trades (<span class="hl-fn">.csv.read</span> <span class="hl-str">"trades-10M.csv"</span>))
 
 <span class="hl-comment">;; Snapshot after</span>
-(<span class="hl-kw">set</span> after (<span class="hl-fn">memstat</span>))
+(<span class="hl-kw">set</span> after (<span class="hl-fn">.sys.mem</span>))
 
 <span class="hl-comment">;; See how much memory the load consumed</span>
 (<span class="hl-fn">-</span> (after <span class="hl-sym">'bytes-allocated</span>) (before <span class="hl-sym">'bytes-allocated</span>))</code></pre>
@@ -194,19 +194,19 @@ sys-current     | 8388608</code></pre>
       <p>In this example, loading 10 million rows consumed roughly 800 MB of heap memory.</p>
 
       <!-- 3. gc -->
-      <h2 id="gc">3. The <code>gc</code> Function</h2>
-      <p>Call <code>(gc)</code> to signal that the runtime should reclaim unused memory. Currently this is a lightweight hook that returns <code>0</code> &mdash; Rayforce uses deterministic ref counting and eager page release via <code>madvise</code> during buddy coalescing, so most memory is reclaimed automatically when references are dropped.</p>
+      <h2 id="gc">3. The <code>.sys.gc</code> Function</h2>
+      <p>Call <code>(.sys.gc 0)</code> to signal that the runtime should reclaim unused memory. Currently this is a lightweight hook that returns <code>0</code> &mdash; Rayforce uses deterministic ref counting and eager page release via <code>madvise</code> during buddy coalescing, so most memory is reclaimed automatically when references are dropped.</p>
 
-      <pre><code>(<span class="hl-fn">gc</span>)  <span class="hl-comment">; 0</span></code></pre>
+      <pre><code>(<span class="hl-fn">.sys.gc</span>)  <span class="hl-comment">; 0</span></code></pre>
 
       <div class="info-box">
-        <strong>Note:</strong> Because Rayforce uses deterministic ref counting (not tracing GC), memory is freed immediately when the last reference is released. The buddy allocator coalesces blocks and releases pages back to the OS automatically. <code>(gc)</code> exists as a hook for future use.
+        <strong>Note:</strong> Because Rayforce uses deterministic ref counting (not tracing GC), memory is freed immediately when the last reference is released. The buddy allocator coalesces blocks and releases pages back to the OS automatically. <code>(.sys.gc 0)</code> exists as a hook for future use.
       </div>
 
       <!-- 4. sysinfo -->
-      <h2 id="sysinfo">4. The <code>sysinfo</code> Function</h2>
-      <p>Call <code>(sysinfo)</code> to see system-level information about the Rayforce runtime:</p>
-      <pre><code>(<span class="hl-fn">sysinfo</span>)</code></pre>
+      <h2 id="sysinfo">4. The <code>.sys.info</code> Function</h2>
+      <p>Call <code>(.sys.info 0)</code> to see system-level information about the Rayforce runtime:</p>
+      <pre><code>(<span class="hl-fn">.sys.info</span>)</code></pre>
       <pre><code>cores     | 16
 page-size | 4096
 total-mem | 16777216000</code></pre>
@@ -302,7 +302,7 @@ total-mem | 16777216000</code></pre>
       <pre><code><span class="hl-comment">;; Toggle profiling off</span>
 :t</code></pre>
       <pre><code>. Timeit is off.</code></pre>
-      <p>This is the fastest way to identify slow expressions in an interactive session. Combine it with <code>memstat</code> snapshots to see both time and memory costs.</p>
+      <p>This is the fastest way to identify slow expressions in an interactive session. Combine it with <code>.sys.mem</code> snapshots to see both time and memory costs.</p>
 
       <!-- 8. Memory Budget and Pressure -->
       <h2 id="memory-budget">8. Memory Budget and Pressure</h2>
@@ -310,7 +310,7 @@ total-mem | 16777216000</code></pre>
 
       <h3>Checking the Budget</h3>
       <pre><code><span class="hl-comment">;; The total-mem field shows total physical RAM</span>
-(<span class="hl-fn">sysinfo</span>)</code></pre>
+(<span class="hl-fn">.sys.info</span>)</code></pre>
       <pre><code>cores     | 16
 page-size | 4096
 total-mem | 16777216000</code></pre>
@@ -323,10 +323,10 @@ total-mem | 16777216000</code></pre>
         <li>Block offloading can spill cold data to disk (see <a href="architecture-offloading.html">Block Offloading</a>)</li>
         <li>The progress bar shows current memory relative to the budget so you can see pressure building</li>
       </ul>
-      <p>You can monitor pressure by comparing <code>bytes-allocated</code> from <code>(memstat)</code> against <code>total-mem</code> from <code>(sysinfo)</code>:</p>
+      <p>You can monitor pressure by comparing <code>bytes-allocated</code> from <code>(.sys.mem 0)</code> against <code>total-mem</code> from <code>(.sys.info 0)</code>:</p>
       <pre><code><span class="hl-comment">;; Calculate memory pressure as a percentage</span>
-(<span class="hl-kw">set</span> stats (<span class="hl-fn">memstat</span>))
-(<span class="hl-kw">set</span> info (<span class="hl-fn">sysinfo</span>))
+(<span class="hl-kw">set</span> stats (<span class="hl-fn">.sys.mem</span>))
+(<span class="hl-kw">set</span> info (<span class="hl-fn">.sys.info</span>))
 (<span class="hl-fn">*</span> <span class="hl-num">100.0</span> (<span class="hl-fn">/</span> (stats <span class="hl-sym">bytes-allocated</span>) (info <span class="hl-sym">total-mem</span>)))</code></pre>
       <pre><code>29.4</code></pre>
       <p>This shows 29.4% of the budget is in use &mdash; plenty of headroom.</p>
@@ -336,13 +336,13 @@ total-mem | 16777216000</code></pre>
 
       <h3>Pattern 1: Monitor Memory During CSV Loading</h3>
       <pre><code><span class="hl-comment">;; Check baseline</span>
-(<span class="hl-kw">set</span> m0 (<span class="hl-fn">memstat</span>))
+(<span class="hl-kw">set</span> m0 (<span class="hl-fn">.sys.mem</span>))
 
 <span class="hl-comment">;; Load data</span>
-(<span class="hl-kw">set</span> trades (<span class="hl-fn">read-csv</span> <span class="hl-str">"trades-50M.csv"</span>))
+(<span class="hl-kw">set</span> trades (<span class="hl-fn">.csv.read</span> <span class="hl-str">"trades-50M.csv"</span>))
 
 <span class="hl-comment">;; Check cost</span>
-(<span class="hl-kw">set</span> m1 (<span class="hl-fn">memstat</span>))
+(<span class="hl-kw">set</span> m1 (<span class="hl-fn">.sys.mem</span>))
 (<span class="hl-fn">println</span> (<span class="hl-fn">format</span> <span class="hl-str">"Loaded: {} bytes, peak: {} bytes"</span>
   (<span class="hl-fn">-</span> (m1 <span class="hl-sym">bytes-allocated</span>) (m0 <span class="hl-sym">bytes-allocated</span>))
   (m1 <span class="hl-sym">peak-bytes</span>)))</code></pre>
@@ -353,11 +353,11 @@ total-mem | 16777216000</code></pre>
 (<span class="hl-kw">set</span> result1 (<span class="hl-fn">select</span> {<span class="hl-sym">from</span>: trades
                        <span class="hl-sym">by</span>: {<span class="hl-sym">date</span>: date}
                        <span class="hl-sym">cols</span>: {<span class="hl-sym">vol</span>: (<span class="hl-fn">sum</span> qty)}})
-(<span class="hl-fn">write-csv</span> result1 <span class="hl-str">"daily-volume.csv"</span>)
+(<span class="hl-fn">.csv.write</span> result1 <span class="hl-str">"daily-volume.csv"</span>)
 (<span class="hl-kw">set</span> result1 <span class="hl-num">0</span>)
 
 <span class="hl-comment">;; Free intermediates before the next heavy query</span>
-(<span class="hl-fn">gc</span>)
+(<span class="hl-fn">.sys.gc</span>)
 
 <span class="hl-comment">;; Second analysis pass with maximum headroom</span>
 (<span class="hl-kw">set</span> result2 (<span class="hl-fn">select</span> {<span class="hl-sym">from</span>: trades
@@ -383,14 +383,14 @@ total-mem | 16777216000</code></pre>
 
       <h3>Pattern 4: Check Peak Memory After a Join</h3>
       <pre><code><span class="hl-comment">;; Reset peak tracking with gc</span>
-(<span class="hl-fn">gc</span>)
-(<span class="hl-kw">set</span> before-peak ((memstat) <span class="hl-sym">peak-bytes</span>))
+(<span class="hl-fn">.sys.gc</span>)
+(<span class="hl-kw">set</span> before-peak ((.sys.mem 0) <span class="hl-sym">peak-bytes</span>))
 
 <span class="hl-comment">;; Run a memory-intensive join</span>
 (<span class="hl-kw">set</span> joined (<span class="hl-fn">select</span> {<span class="hl-sym">from</span>: trades <span class="hl-sym">join</span>: quotes <span class="hl-sym">on</span>: [<span class="hl-sym">sym</span> <span class="hl-sym">time</span>]}))
 
 <span class="hl-comment">;; Check the peak</span>
-(<span class="hl-kw">set</span> after-peak ((memstat) <span class="hl-sym">peak-bytes</span>))
+(<span class="hl-kw">set</span> after-peak ((.sys.mem 0) <span class="hl-sym">peak-bytes</span>))
 (<span class="hl-fn">println</span> (<span class="hl-fn">format</span> <span class="hl-str">"Join peak overhead: {} bytes"</span>
   (<span class="hl-fn">-</span> after-peak before-peak)))</code></pre>
       <pre><code>Join peak overhead: 1073741824 bytes</code></pre>
@@ -407,17 +407,17 @@ total-mem | 16777216000</code></pre>
         </thead>
         <tbody>
           <tr>
-            <td><code>(memstat)</code></td>
+            <td><code>(.sys.mem 0)</code></td>
             <td>Returns heap allocation statistics</td>
             <td>Monitor memory usage, detect leaks</td>
           </tr>
           <tr>
-            <td><code>(gc)</code></td>
+            <td><code>(.sys.gc 0)</code></td>
             <td>Flushes caches, releases pages</td>
             <td>Between heavy queries, before benchmarks</td>
           </tr>
           <tr>
-            <td><code>(sysinfo)</code></td>
+            <td><code>(.sys.info 0)</code></td>
             <td>Shows system and runtime info</td>
             <td>Check budget, CPU count, OS details</td>
           </tr>

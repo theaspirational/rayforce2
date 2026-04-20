@@ -441,11 +441,28 @@ static ray_t* lookup_top_frame(int64_t sym_id) {
     return NULL;
 }
 
-ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
+/* A sym belongs to the reserved system namespace if its name starts with
+ * a dot (e.g. `.sys.gc`, `.os.getenv`).  The leading segment is the
+ * category tag; builtin registration populates these via ray_env_bind
+ * and user code is blocked at ray_env_set. */
+static bool sym_is_reserved(int64_t sym_id) {
+    ray_t* s = ray_sym_str(sym_id);
+    if (!s) return false;
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    return n > 0 && p && p[0] == '.';
+}
+
+ray_err_t ray_env_bind(int64_t sym_id, ray_t* val) {
     if (ray_sym_is_dotted(sym_id)) {
         return env_set_dotted(sym_id, val, lookup_global, env_bind_global);
     }
     return env_bind_global(sym_id, val);
+}
+
+ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
+    if (sym_is_reserved(sym_id)) return RAY_ERR_RESERVED;
+    return ray_env_bind(sym_id, val);
 }
 
 ray_err_t ray_env_push_scope(void) {

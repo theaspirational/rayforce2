@@ -2060,8 +2060,9 @@ static MunitResult test_ipc_restricted(const void* params, void* fixture) {
     munit_assert_true(RAY_IS_ERR(r2));
     ray_release(r2);
 
-    /* system should be restricted */
-    ray_t* msg3 = ray_str("(system \"echo hi\")", 18);
+    /* .sys.exec (formerly `system`) should be restricted */
+    const char* q_sys = "(.sys.exec \"echo hi\")";
+    ray_t* msg3 = ray_str(q_sys, strlen(q_sys));
     ray_t* r3 = ray_ipc_send(h, msg3);
     ray_release(msg3);
     munit_assert_ptr_not_null(r3);
@@ -2069,7 +2070,8 @@ static MunitResult test_ipc_restricted(const void* params, void* fixture) {
     ray_release(r3);
 
     /* restricted builtins via higher-order functions (map bypass) */
-    ray_t* msg4 = ray_str("(map system [\"echo pwned\"])", 27);
+    const char* q_map = "(map .sys.exec [\"echo pwned\"])";
+    ray_t* msg4 = ray_str(q_map, strlen(q_map));
     ray_t* r4 = ray_ipc_send(h, msg4);
     ray_release(msg4);
     munit_assert_ptr_not_null(r4);

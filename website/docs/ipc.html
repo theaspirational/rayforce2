@@ -150,8 +150,8 @@
 ./rayforce -p 5000 -u secret123
 
 <span class="hl-comment"># Client: connect with credentials</span>
-(<span class="hl-kw">set</span> h (<span class="hl-fn">hopen</span> <span class="hl-str">"127.0.0.1:5000:admin:secret123"</span>))
-(<span class="hl-fn">hsend</span> h <span class="hl-str">"(+ 1 2)"</span>)
+(<span class="hl-kw">set</span> h (<span class="hl-fn">.ipc.open</span> <span class="hl-str">"127.0.0.1:5000:admin:secret123"</span>))
+(<span class="hl-fn">.ipc.send</span> h <span class="hl-str">"(+ 1 2)"</span>)
 <span class="hl-comment">;; =&gt; 3</span></code></pre>
 
       <p>All clients must authenticate. The username field is transmitted but not validated &mdash; only the password is checked. This matches kdb+ behavior.</p>
@@ -168,10 +168,10 @@
         </thead>
         <tbody>
           <tr><td>Mutation</td><td><code>set</code>, <code>del</code>, <code>update</code>, <code>insert</code>, <code>upsert</code>, <code>modify</code></td></tr>
-          <tr><td>File writes</td><td><code>write</code>, <code>write-csv</code>, <code>load</code>, <code>set-splayed</code></td></tr>
-          <tr><td>File reads</td><td><code>read</code>, <code>read-csv</code></td></tr>
-          <tr><td>System</td><td><code>system</code>, <code>getenv</code>, <code>setenv</code>, <code>os-get-var</code>, <code>os-set-var</code>, <code>exit</code></td></tr>
-          <tr><td>IPC chaining</td><td><code>hopen</code>, <code>hclose</code>, <code>hsend</code></td></tr>
+          <tr><td>File writes</td><td><code>write</code>, <code>.csv.write</code>, <code>load</code>, <code>set-splayed</code></td></tr>
+          <tr><td>File reads</td><td><code>read</code>, <code>.csv.read</code></td></tr>
+          <tr><td>System</td><td><code>.sys.exec</code>, <code>getenv</code>, <code>setenv</code>, <code>os-get-var</code>, <code>os-set-var</code>, <code>exit</code></td></tr>
+          <tr><td>IPC chaining</td><td><code>.ipc.open</code>, <code>.ipc.close</code>, <code>.ipc.send</code></td></tr>
         </tbody>
       </table>
 
@@ -181,10 +181,10 @@
 
       <p>Attempting a restricted operation returns an <code>"access"</code> error:</p>
       <pre><code><span class="hl-comment">;; On a -U server:</span>
-(<span class="hl-fn">hsend</span> h <span class="hl-str">"(set x 42)"</span>)
+(<span class="hl-fn">.ipc.send</span> h <span class="hl-str">"(set x 42)"</span>)
 <span class="hl-comment">;; =&gt; error: access — restricted</span>
 
-(<span class="hl-fn">hsend</span> h <span class="hl-str">"(+ 1 2)"</span>)
+(<span class="hl-fn">.ipc.send</span> h <span class="hl-str">"(+ 1 2)"</span>)
 <span class="hl-comment">;; =&gt; 3  (queries still work)</span></code></pre>
 
       <div class="info-box">
@@ -196,16 +196,16 @@
 
       <h3>hopen</h3>
       <pre><code><span class="hl-comment">;; Connect to a server (no auth)</span>
-(<span class="hl-kw">set</span> h (<span class="hl-fn">hopen</span> <span class="hl-str">"127.0.0.1:5000"</span>))
+(<span class="hl-kw">set</span> h (<span class="hl-fn">.ipc.open</span> <span class="hl-str">"127.0.0.1:5000"</span>))
 <span class="hl-comment">;; =&gt; 0  (connection handle)</span>
 
 <span class="hl-comment">;; Connect with credentials (when server uses -u or -U)</span>
-(<span class="hl-kw">set</span> h (<span class="hl-fn">hopen</span> <span class="hl-str">"127.0.0.1:5000:admin:secret123"</span>))
+(<span class="hl-kw">set</span> h (<span class="hl-fn">.ipc.open</span> <span class="hl-str">"127.0.0.1:5000:admin:secret123"</span>))
 <span class="hl-comment">;; =&gt; 0  (connection handle)</span></code></pre>
-      <p>The format is <code>"host:port"</code> for unauthenticated connections, or <code>"host:port:user:password"</code> when the server requires authentication. If the server requires auth and no credentials are provided, <code>hopen</code> returns an <code>"access"</code> error.</p>
+      <p>The format is <code>"host:port"</code> for unauthenticated connections, or <code>"host:port:user:password"</code> when the server requires authentication. If the server requires auth and no credentials are provided, <code>.ipc.open</code> returns an <code>"access"</code> error.</p>
 
       <h3>hsend</h3>
-      <p><code>hsend</code> sends any serializable value to the server and returns the result. The server&rsquo;s behavior depends on the payload type:</p>
+      <p><code>.ipc.send</code> sends any serializable value to the server and returns the result. The server&rsquo;s behavior depends on the payload type:</p>
 
       <table>
         <thead>
@@ -219,50 +219,50 @@
 
       <h4>String queries</h4>
       <pre><code><span class="hl-comment">;; Arithmetic — server parses and evaluates the string</span>
-(<span class="hl-fn">hsend</span> h <span class="hl-str">"(+ 1 2)"</span>)
+(<span class="hl-fn">.ipc.send</span> h <span class="hl-str">"(+ 1 2)"</span>)
 <span class="hl-comment">;; =&gt; 3</span>
 
 <span class="hl-comment">;; Look up a server-side variable</span>
-(<span class="hl-fn">hsend</span> h <span class="hl-str">"trades"</span>)
+(<span class="hl-fn">.ipc.send</span> h <span class="hl-str">"trades"</span>)
 <span class="hl-comment">;; =&gt; &lt;table&gt;</span>
 
 <span class="hl-comment">;; Remote select with filter, sort, limit</span>
-(<span class="hl-fn">hsend</span> h <span class="hl-str">"(select {from: trades where: (&gt; price 100) desc: 'price take: 10})"</span>)
+(<span class="hl-fn">.ipc.send</span> h <span class="hl-str">"(select {from: trades where: (&gt; price 100) desc: 'price take: 10})"</span>)
 <span class="hl-comment">;; =&gt; top 10 most expensive trades</span>
 
 <span class="hl-comment">;; Aggregation by group</span>
-(<span class="hl-fn">hsend</span> h <span class="hl-str">"(select {from: trades by: sym total: (sum qty) avg_px: (avg price)})"</span>)
+(<span class="hl-fn">.ipc.send</span> h <span class="hl-str">"(select {from: trades by: sym total: (sum qty) avg_px: (avg price)})"</span>)
 <span class="hl-comment">;; =&gt; per-symbol totals</span></code></pre>
 
       <h4>Expression payloads</h4>
       <p>Non-string values are evaluated directly on the server via <code>ray_eval</code>. Construct executable expressions as lists with builtin function objects as heads. Dict literals are self-evaluating, so column references and expressions inside them are preserved unevaluated until the server processes them:</p>
 
       <pre><code><span class="hl-comment">;; Arithmetic</span>
-(<span class="hl-fn">hsend</span> h (<span class="hl-fn">list</span> + <span class="hl-num">1</span> <span class="hl-num">2</span>))
+(<span class="hl-fn">.ipc.send</span> h (<span class="hl-fn">list</span> + <span class="hl-num">1</span> <span class="hl-num">2</span>))
 <span class="hl-comment">;; =&gt; 3</span>
 
 <span class="hl-comment">;; Select with filter — dict stays unevaluated, select resolves columns</span>
-(<span class="hl-fn">hsend</span> h (<span class="hl-fn">list</span> select {<span class="hl-sym">from:</span> trades <span class="hl-sym">where:</span> (&gt; price <span class="hl-num">200</span>)}))
+(<span class="hl-fn">.ipc.send</span> h (<span class="hl-fn">list</span> select {<span class="hl-sym">from:</span> trades <span class="hl-sym">where:</span> (&gt; price <span class="hl-num">200</span>)}))
 <span class="hl-comment">;; =&gt; filtered trades table</span>
 
 <span class="hl-comment">;; Aggregation by group</span>
-(<span class="hl-fn">hsend</span> h (<span class="hl-fn">list</span> select {<span class="hl-sym">from:</span> trades <span class="hl-sym">by:</span> sym <span class="hl-sym">total:</span> (sum qty)}))
+(<span class="hl-fn">.ipc.send</span> h (<span class="hl-fn">list</span> select {<span class="hl-sym">from:</span> trades <span class="hl-sym">by:</span> sym <span class="hl-sym">total:</span> (sum qty)}))
 
 <span class="hl-comment">;; Map a lambda over server-side data</span>
-(<span class="hl-fn">hsend</span> h (<span class="hl-fn">list</span> map (<span class="hl-kw">fn</span> [x] (* x <span class="hl-num">2</span>)) (<span class="hl-fn">list</span> til <span class="hl-num">10</span>)))
+(<span class="hl-fn">.ipc.send</span> h (<span class="hl-fn">list</span> map (<span class="hl-kw">fn</span> [x] (* x <span class="hl-num">2</span>)) (<span class="hl-fn">list</span> til <span class="hl-num">10</span>)))
 <span class="hl-comment">;; =&gt; [0 2 4 6 8 10 12 14 16 18]</span></code></pre>
 
       <p>For dynamic queries, substitute values into the dict at construction time:</p>
       <pre><code>(<span class="hl-kw">set</span> threshold <span class="hl-num">200</span>)
-(<span class="hl-fn">hsend</span> h (<span class="hl-fn">list</span> select {<span class="hl-sym">from:</span> trades <span class="hl-sym">where:</span> (<span class="hl-fn">list</span> &gt; (quote price) threshold)}))
+(<span class="hl-fn">.ipc.send</span> h (<span class="hl-fn">list</span> select {<span class="hl-sym">from:</span> trades <span class="hl-sym">where:</span> (<span class="hl-fn">list</span> &gt; (quote price) threshold)}))
 <span class="hl-comment">;; =&gt; trades where price &gt; 200</span></code></pre>
 
       <h3>hclose</h3>
       <pre><code><span class="hl-comment">;; Close the connection</span>
-(<span class="hl-fn">hclose</span> h)</code></pre>
+(<span class="hl-fn">.ipc.close</span> h)</code></pre>
 
       <div class="info-box">
-        <strong>Message types.</strong> <code>hsend</code> uses synchronous messaging &mdash; it blocks until the server returns a result. Asynchronous (fire-and-forget) messaging is available via the C API (<code>ray_ipc_send_async</code>).
+        <strong>Message types.</strong> <code>.ipc.send</code> uses synchronous messaging &mdash; it blocks until the server returns a result. Asynchronous (fire-and-forget) messaging is available via the C API (<code>ray_ipc_send_async</code>).
       </div>
 
       <h2>Serialization with <code>ser</code></h2>

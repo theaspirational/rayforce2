@@ -123,7 +123,7 @@
       <p>The simplest way to persist and exchange data. Available directly from Rayfall.</p>
 
       <h3>Reading CSV</h3>
-      <pre><code>(<span class="hl-kw">set</span> data (<span class="hl-fn">read-csv</span> <span class="hl-str">"path/to/data.csv"</span>))</code></pre>
+      <pre><code>(<span class="hl-kw">set</span> data (<span class="hl-fn">.csv.read</span> <span class="hl-str">"path/to/data.csv"</span>))</code></pre>
       <p>The reader:</p>
       <ul>
         <li>Treats the first row as column headers</li>
@@ -133,7 +133,7 @@
       </ul>
 
       <h3>Writing CSV</h3>
-      <pre><code>(<span class="hl-fn">write-csv</span> table <span class="hl-str">"path/to/output.csv"</span>)</code></pre>
+      <pre><code>(<span class="hl-fn">.csv.write</span> table <span class="hl-str">"path/to/output.csv"</span>)</code></pre>
 
       <h3>Example: Round-Trip</h3>
       <pre><code>(<span class="hl-kw">set</span> data (<span class="hl-fn">table</span> [<span class="hl-sym">Name</span> <span class="hl-sym">Score</span> <span class="hl-sym">Grade</span>]
@@ -141,8 +141,8 @@
         [<span class="hl-num">95</span> <span class="hl-num">87</span> <span class="hl-num">92</span>]
         [<span class="hl-sym">A</span> <span class="hl-sym">B</span> <span class="hl-sym">A</span>])))
 
-(<span class="hl-fn">write-csv</span> data <span class="hl-str">"/tmp/grades.csv"</span>)
-(<span class="hl-fn">read-csv</span> <span class="hl-str">"/tmp/grades.csv"</span>)</code></pre>
+(<span class="hl-fn">.csv.write</span> data <span class="hl-str">"/tmp/grades.csv"</span>)
+(<span class="hl-fn">.csv.read</span> <span class="hl-str">"/tmp/grades.csv"</span>)</code></pre>
       <pre><code>┌─────────┬───────┬───────────────────┐
 │  Name   │ Score │       Grade       │
 │   sym   │  i64  │        sym        │

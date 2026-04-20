@@ -442,8 +442,8 @@
           <tr><td><code>print</code></td><td>unary</td><td>Print value without newline</td><td><code>(print "hello")</code></td></tr>
           <tr><td><code>show</code></td><td>variadic</td><td>Pretty-print a value (tables formatted)</td><td><code>(show trades)</code></td></tr>
           <tr><td><code>format</code></td><td>variadic</td><td>Format value to string (% is placeholder)</td><td><code>(format "val=%" 42)</code> &rarr; <code>"val=42"</code></td></tr>
-          <tr><td><code>read-csv</code></td><td>variadic</td><td>Load CSV file into table</td><td><code>(read-csv "data.csv")</code></td></tr>
-          <tr><td><code>write-csv</code></td><td>variadic</td><td>Write table to CSV file</td><td><code>(write-csv trades "out.csv")</code></td></tr>
+          <tr><td><code>.csv.read</code></td><td>variadic</td><td>Load CSV file into table</td><td><code>(.csv.read "data.csv")</code></td></tr>
+          <tr><td><code>.csv.write</code></td><td>variadic</td><td>Write table to CSV file</td><td><code>(.csv.write trades "out.csv")</code></td></tr>
           <tr><td><code>read</code></td><td>unary</td><td>Read file contents as string</td><td><code>(read "file.txt")</code></td></tr>
           <tr><td><code>write</code></td><td>binary</td><td>Write string to file</td><td><code>(write "file.txt" "content")</code></td></tr>
           <tr><td><code>load</code></td><td>unary</td><td>Load and evaluate a Rayfall script</td><td><code>(load "lib.rfl")</code></td></tr>
@@ -477,8 +477,8 @@
         <tbody>
           <tr><td><code>eval</code></td><td>unary</td><td>Evaluate a parsed expression</td><td><code>(eval (parse "(+ 1 2)"))</code> &rarr; <code>3</code></td></tr>
           <tr><td><code>parse</code></td><td>unary</td><td>Parse string into Rayfall expression</td><td><code>(parse "(+ 1 2)")</code></td></tr>
-          <tr><td><code>gc</code></td><td>unary</td><td>Trigger garbage collection</td><td><code>(gc 0)</code></td></tr>
-          <tr><td><code>system</code></td><td>unary</td><td>Execute shell command</td><td><code>(system "ls -la")</code></td></tr>
+          <tr><td><code>.sys.gc</code></td><td>unary</td><td>Trigger garbage collection</td><td><code>(.sys.gc 0)</code></td></tr>
+          <tr><td><code>.sys.exec</code></td><td>unary</td><td>Execute shell command</td><td><code>(.sys.exec "ls -la")</code></td></tr>
           <tr><td><code>getenv</code></td><td>unary</td><td>Get environment variable</td><td><code>(getenv "HOME")</code></td></tr>
           <tr><td><code>setenv</code></td><td>binary</td><td>Set environment variable</td><td><code>(setenv "KEY" "value")</code></td></tr>
           <tr><td><code>os-get-var</code></td><td>unary</td><td>Alias for getenv</td><td><code>(os-get-var "PATH")</code></td></tr>
@@ -488,9 +488,9 @@
           <tr><td><code>timer</code></td><td>unary</td><td>High-resolution monotonic nanosecond clock</td><td><code>(timer 0)</code></td></tr>
           <tr><td><code>args</code></td><td>unary</td><td>Command-line arguments</td><td><code>(args 0)</code></td></tr>
           <tr><td><code>env</code></td><td>unary</td><td>List all global environment bindings</td><td><code>(env 0)</code></td></tr>
-          <tr><td><code>internals</code></td><td>unary</td><td>Show internal representation of object</td><td><code>(internals [1 2 3])</code></td></tr>
-          <tr><td><code>memstat</code></td><td>unary</td><td>Memory allocator statistics</td><td><code>(memstat 0)</code></td></tr>
-          <tr><td><code>sysinfo</code></td><td>unary</td><td>System information (OS, CPU, memory)</td><td><code>(sysinfo 0)</code></td></tr>
+          <tr><td><code>.sys.build</code></td><td>unary</td><td>Show internal representation of object</td><td><code>(.sys.build [1 2 3])</code></td></tr>
+          <tr><td><code>.sys.mem</code></td><td>unary</td><td>Memory allocator statistics</td><td><code>(.sys.mem 0)</code></td></tr>
+          <tr><td><code>.sys.info</code></td><td>unary</td><td>System information (OS, CPU, memory)</td><td><code>(.sys.info 0)</code></td></tr>
         </tbody>
       </table>
 
