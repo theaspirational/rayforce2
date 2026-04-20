@@ -1774,6 +1774,146 @@ static MunitResult test_exec_asof_empty(const void* params, void* data) {
     return MUNIT_OK;
 }
 
+/* ---- ASOF NULL-KEY HANDLING ---- */
+static MunitResult test_exec_asof_null_keys(const void* params, void* data) {
+    (void)params; (void)data;
+    ray_heap_init();
+    (void)ray_sym_init();
+
+    /* Left: time and sym eq key, with a null on row 1 (sym) and row 2 (time) */
+    int64_t ltime[] = {100, 200, 300};  /* row 2 will be marked null */
+    int64_t lsym[]  = {1, 1, 1};         /* row 1 will be marked null on sym */
+    double  lval[]  = {10.0, 20.0, 30.0};
+    ray_t* lt_v = ray_vec_from_raw(RAY_I64, ltime, 3);
+    ray_t* ls_v = ray_vec_from_raw(RAY_I64, lsym, 3);
+    ray_t* lv_v = ray_vec_from_raw(RAY_F64, lval, 3);
+    ray_vec_set_null(ls_v, 1, true);     /* left row 1: null sym */
+    ray_vec_set_null(lt_v, 2, true);     /* left row 2: null time */
+
+    int64_t n_time  = ray_sym_intern("time", 4);
+    int64_t n_sym   = ray_sym_intern("sym", 3);
+    int64_t n_val   = ray_sym_intern("val", 3);
+    ray_t* left = ray_table_new(3);
+    left = ray_table_add_col(left, n_time, lt_v);
+    left = ray_table_add_col(left, n_sym, ls_v);
+    left = ray_table_add_col(left, n_val, lv_v);
+    ray_release(lt_v); ray_release(ls_v); ray_release(lv_v);
+
+    /* Right: includes a row with null time and a row with null sym — both
+     * must be excluded from asof matching. */
+    int64_t rtime[] = {50, 150, 250};   /* row 1 will be marked null */
+    int64_t rsym[]  = {1, 1, 1};        /* row 0 will be marked null on sym */
+    double  rbid[]  = {0.5, 1.5, 2.5};
+    ray_t* rt_v = ray_vec_from_raw(RAY_I64, rtime, 3);
+    ray_t* rs_v = ray_vec_from_raw(RAY_I64, rsym, 3);
+    ray_t* rb_v = ray_vec_from_raw(RAY_F64, rbid, 3);
+    ray_vec_set_null(rs_v, 0, true);    /* right row 0: null sym */
+    ray_vec_set_null(rt_v, 1, true);    /* right row 1: null time */
+
+    int64_t n_bid = ray_sym_intern("bid", 3);
+    ray_t* right = ray_table_new(3);
+    right = ray_table_add_col(right, n_time, rt_v);
+    right = ray_table_add_col(right, n_sym, rs_v);
+    right = ray_table_add_col(right, n_bid, rb_v);
+    ray_release(rt_v); ray_release(rs_v); ray_release(rb_v);
+
+    ray_graph_t* g = ray_graph_new(left);
+    ray_op_t* left_op  = ray_const_table(g, left);
+    ray_op_t* right_op = ray_const_table(g, right);
+    ray_op_t* tkey = ray_scan(g, "time");
+    ray_op_t* skey = ray_scan(g, "sym");
+    ray_op_t* eq_keys[] = { skey };
+
+    /* LEFT OUTER so null-keyed left rows still appear with null right cols */
+    ray_op_t* aj = ray_asof_join(g, left_op, right_op, tkey, eq_keys, 1, 1);
+    ray_t* result = ray_execute(g, aj);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 3);
+
+    ray_t* bid_col = ray_table_get_col(result, n_bid);
+    munit_assert_ptr_not_null(bid_col);
+    munit_assert_true((bid_col->attrs & RAY_ATTR_HAS_NULLS) != 0);
+    /* Left row 0: non-null keys (t=100, s=1) → match right row 2 (t=250 ... no, 250>100)
+     * Actually: rt[0]=50 s=null (excluded), rt[1]=150 t=null (excluded), rt[2]=250 s=1
+     * Best right.time <= 100 where sym=1 is rt[0], but rt[0] is excluded (null sym).
+     * No match → bid[0] = null. */
+    munit_assert_true(ray_vec_is_null(bid_col, 0));
+    /* Left row 1: null sym key → no match → bid[1] = null */
+    munit_assert_true(ray_vec_is_null(bid_col, 1));
+    /* Left row 2: null time key → no match → bid[2] = null */
+    munit_assert_true(ray_vec_is_null(bid_col, 2));
+
+    ray_release(result);
+    ray_graph_free(g);
+    ray_release(left);
+    ray_release(right);
+    ray_sym_destroy();
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
+/* Follow-up: match exists only through non-null right rows. */
+static MunitResult test_exec_asof_null_keys_match(const void* params, void* data) {
+    (void)params; (void)data;
+    ray_heap_init();
+    (void)ray_sym_init();
+
+    int64_t ltime[] = {100};
+    int64_t lsym[]  = {1};
+    double  lval[]  = {10.0};
+    ray_t* lt_v = ray_vec_from_raw(RAY_I64, ltime, 1);
+    ray_t* ls_v = ray_vec_from_raw(RAY_I64, lsym, 1);
+    ray_t* lv_v = ray_vec_from_raw(RAY_F64, lval, 1);
+    int64_t n_time = ray_sym_intern("time", 4);
+    int64_t n_sym  = ray_sym_intern("sym", 3);
+    int64_t n_val  = ray_sym_intern("val", 3);
+    ray_t* left = ray_table_new(3);
+    left = ray_table_add_col(left, n_time, lt_v);
+    left = ray_table_add_col(left, n_sym, ls_v);
+    left = ray_table_add_col(left, n_val, lv_v);
+    ray_release(lt_v); ray_release(ls_v); ray_release(lv_v);
+
+    /* Right has two valid candidates (rt=50 s=1, rt=80 s=1) and one null
+     * row in between — asof must pick the latest valid one (rt=80). */
+    int64_t rtime[] = {50, 200, 80};  /* row 1 will be null time */
+    int64_t rsym[]  = {1, 1, 1};
+    double  rbid[]  = {5.0, 20.0, 8.0};
+    ray_t* rt_v = ray_vec_from_raw(RAY_I64, rtime, 3);
+    ray_t* rs_v = ray_vec_from_raw(RAY_I64, rsym, 3);
+    ray_t* rb_v = ray_vec_from_raw(RAY_F64, rbid, 3);
+    ray_vec_set_null(rt_v, 1, true);
+    int64_t n_bid = ray_sym_intern("bid", 3);
+    ray_t* right = ray_table_new(3);
+    right = ray_table_add_col(right, n_time, rt_v);
+    right = ray_table_add_col(right, n_sym, rs_v);
+    right = ray_table_add_col(right, n_bid, rb_v);
+    ray_release(rt_v); ray_release(rs_v); ray_release(rb_v);
+
+    ray_graph_t* g = ray_graph_new(left);
+    ray_op_t* left_op  = ray_const_table(g, left);
+    ray_op_t* right_op = ray_const_table(g, right);
+    ray_op_t* tkey = ray_scan(g, "time");
+    ray_op_t* skey = ray_scan(g, "sym");
+    ray_op_t* eq_keys[] = { skey };
+    ray_op_t* aj = ray_asof_join(g, left_op, right_op, tkey, eq_keys, 1, 0);
+    ray_t* result = ray_execute(g, aj);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(ray_table_nrows(result), ==, 1);
+
+    ray_t* bid_col = ray_table_get_col(result, n_bid);
+    double* bid_data = (double*)ray_data(bid_col);
+    munit_assert_double(bid_data[0], ==, 8.0);  /* rt=80, not rt=50 (later valid) */
+    munit_assert_false(ray_vec_is_null(bid_col, 0));
+
+    ray_release(result);
+    ray_graph_free(g);
+    ray_release(left);
+    ray_release(right);
+    ray_sym_destroy();
+    ray_heap_destroy();
+    return MUNIT_OK;
+}
+
 /* ---- STRING HELPER ---- */
 static ray_t* make_sym_table(void) {
     (void)ray_sym_init();
@@ -3466,6 +3606,8 @@ static MunitTest exec_tests[] = {
     { "/asof_join",      test_exec_asof_join,      NULL, NULL, 0, NULL },
     { "/asof_left_join", test_exec_asof_left_join,  NULL, NULL, 0, NULL },
     { "/asof_empty",     test_exec_asof_empty,      NULL, NULL, 0, NULL },
+    { "/asof_null_keys", test_exec_asof_null_keys,  NULL, NULL, 0, NULL },
+    { "/asof_null_keys_match", test_exec_asof_null_keys_match, NULL, NULL, 0, NULL },
     { "/upper",          test_exec_upper,             NULL, NULL, 0, NULL },
     { "/lower",          test_exec_lower,             NULL, NULL, 0, NULL },
     { "/strlen",         test_exec_strlen,            NULL, NULL, 0, NULL },

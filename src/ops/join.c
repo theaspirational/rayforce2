@@ -1611,18 +1611,64 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     for (uint8_t k = 0; k < n_eq; k++) {
         ray_t* lv = ray_table_get_col(left_table, eq_syms[k]);
         ray_t* rv = ray_table_get_col(right_table, eq_syms[k]);
-        if (!lv || !rv) return ray_error("schema", NULL);
+        if (!lv || !rv) {
+            if (lt_time_hdr) scratch_free(lt_time_hdr);
+            if (rt_time_hdr) scratch_free(rt_time_hdr);
+            return ray_error("schema", NULL);
+        }
         lt_eq[k] = lv;
         rt_eq[k] = rv;
     }
 
-    /* Sort both tables by (eq_keys, time_key) using index arrays */
+    /* Precompute per-row "any key is null" bitsets.  Null-keyed rows must
+     * not match — left rows fall through to the left-outer null fill,
+     * right rows are skipped entirely during the merge walk.  SQL-style
+     * NULLs-never-match semantics (matches DuckDB asof-join on NULL keys). */
+    ray_t* lt_null_hdr = NULL, *rt_null_hdr = NULL;
+    uint8_t* lt_null = left_n > 0
+        ? (uint8_t*)scratch_alloc(&lt_null_hdr, (size_t)left_n)
+        : NULL;
+    uint8_t* rt_null = right_n > 0
+        ? (uint8_t*)scratch_alloc(&rt_null_hdr, (size_t)right_n)
+        : NULL;
+    if ((!lt_null && left_n > 0) || (!rt_null && right_n > 0)) {
+        if (lt_null_hdr) scratch_free(lt_null_hdr);
+        if (rt_null_hdr) scratch_free(rt_null_hdr);
+        if (lt_time_hdr) scratch_free(lt_time_hdr);
+        if (rt_time_hdr) scratch_free(rt_time_hdr);
+        return ray_error("oom", NULL);
+    }
+    if (left_n > 0) memset(lt_null, 0, (size_t)left_n);
+    if (right_n > 0) memset(rt_null, 0, (size_t)right_n);
+    if (lt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
+        for (int64_t i = 0; i < left_n; i++)
+            if (ray_vec_is_null(lt_time_vec, i)) lt_null[i] = 1;
+    if (rt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
+        for (int64_t i = 0; i < right_n; i++)
+            if (ray_vec_is_null(rt_time_vec, i)) rt_null[i] = 1;
+    for (uint8_t k = 0; k < n_eq; k++) {
+        if (lt_eq[k]->attrs & RAY_ATTR_HAS_NULLS)
+            for (int64_t i = 0; i < left_n; i++)
+                if (ray_vec_is_null(lt_eq[k], i)) lt_null[i] = 1;
+        if (rt_eq[k]->attrs & RAY_ATTR_HAS_NULLS)
+            for (int64_t i = 0; i < right_n; i++)
+                if (ray_vec_is_null(rt_eq[k], i)) rt_null[i] = 1;
+    }
+
+    /* Sort both tables by (eq_keys, time_key) using index arrays.  Rows
+     * with any null key sort LAST (NULLS LAST) so the merge walk reaches
+     * them once all real candidates are consumed and can skip them
+     * cheaply. */
     ray_t* li_hdr = NULL, *ri_hdr = NULL;
     int64_t* li_idx = (int64_t*)scratch_alloc(&li_hdr, (size_t)left_n * sizeof(int64_t));
     int64_t* ri_idx = (int64_t*)scratch_alloc(&ri_hdr, (size_t)right_n * sizeof(int64_t));
     if ((!li_idx && left_n > 0) || (!ri_idx && right_n > 0)) {
         if (li_hdr) scratch_free(li_hdr);
         if (ri_hdr) scratch_free(ri_hdr);
+        if (lt_null_hdr) scratch_free(lt_null_hdr);
+        if (rt_null_hdr) scratch_free(rt_null_hdr);
+        if (lt_time_hdr) scratch_free(lt_time_hdr);
+        if (rt_time_hdr) scratch_free(rt_time_hdr);
         return ray_error("oom", NULL);
     }
     for (int64_t i = 0; i < left_n; i++) li_idx[i] = i;
@@ -1637,10 +1683,14 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             : NULL;
         if (!tmp && max_n > 0) {
             scratch_free(li_hdr); scratch_free(ri_hdr);
+            if (lt_null_hdr) scratch_free(lt_null_hdr);
+            if (rt_null_hdr) scratch_free(rt_null_hdr);
+            if (lt_time_hdr) scratch_free(lt_time_hdr);
+            if (rt_time_hdr) scratch_free(rt_time_hdr);
             return ray_error("oom", NULL);
         }
 
-        /* Sort left indices by (eq_keys, time) */
+        /* Sort left indices by (nulls-last, eq_keys, time) */
         for (int64_t width = 1; width < left_n; width *= 2) {
             for (int64_t lo = 0; lo < left_n; lo += 2 * width) {
                 int64_t mid = lo + width;
@@ -1651,6 +1701,8 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                 while (a < mid && b < hi) {
                     int64_t ai = li_idx[a], bi = li_idx[b];
                     int cmp = 0;
+                    if (lt_null[ai] != lt_null[bi])
+                        cmp = lt_null[ai] - lt_null[bi]; /* 1 > 0 → nulls last */
                     for (uint8_t k2 = 0; k2 < n_eq && cmp == 0; k2++) {
                         int64_t va = read_col_i64(ray_data(lt_eq[k2]), ai, lt_eq[k2]->type, lt_eq[k2]->attrs);
                         int64_t vb = read_col_i64(ray_data(lt_eq[k2]), bi, lt_eq[k2]->type, lt_eq[k2]->attrs);
@@ -1669,7 +1721,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             }
         }
 
-        /* Sort right indices by (eq_keys, time) */
+        /* Sort right indices by (nulls-last, eq_keys, time) */
         for (int64_t width = 1; width < right_n; width *= 2) {
             for (int64_t lo = 0; lo < right_n; lo += 2 * width) {
                 int64_t mid = lo + width;
@@ -1680,6 +1732,8 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                 while (a < mid && b < hi) {
                     int64_t ai = ri_idx[a], bi = ri_idx[b];
                     int cmp = 0;
+                    if (rt_null[ai] != rt_null[bi])
+                        cmp = rt_null[ai] - rt_null[bi];
                     for (uint8_t k2 = 0; k2 < n_eq && cmp == 0; k2++) {
                         int64_t va = read_col_i64(ray_data(rt_eq[k2]), ai, rt_eq[k2]->type, rt_eq[k2]->attrs);
                         int64_t vb = read_col_i64(ray_data(rt_eq[k2]), bi, rt_eq[k2]->type, rt_eq[k2]->attrs);
@@ -1706,22 +1760,38 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     int64_t* match = (int64_t*)scratch_alloc(&match_hdr, (size_t)left_n * sizeof(int64_t));
     if (!match && left_n > 0) {
         scratch_free(li_hdr); scratch_free(ri_hdr);
+        if (lt_null_hdr) scratch_free(lt_null_hdr);
+        if (rt_null_hdr) scratch_free(rt_null_hdr);
+        if (lt_time_hdr) scratch_free(lt_time_hdr);
+        if (rt_time_hdr) scratch_free(rt_time_hdr);
         return ray_error("oom", NULL);
     }
 
-    /* Two-pointer merge with best-match carry-forward */
+    /* Two-pointer merge with best-match carry-forward.  Because the sort
+     * pins null-keyed rows to the end, skipping them is just an early
+     * "no match" for left and a plain `rp++` for right. */
     int64_t rp = 0;        /* right pointer (only advances) */
     int64_t best_ri = -1;  /* best right match in current partition */
+    /* Track the previous *non-null* left row for partition-change detection
+     * so a null-keyed left row doesn't force an incorrect partition reset
+     * (and so its own null keys aren't read through read_col_i64). */
+    int64_t prev_non_null_li = -1;
     for (int64_t lp = 0; lp < left_n; lp++) {
         int64_t li = li_idx[lp];
 
+        if (lt_null[li]) {
+            /* Null-keyed left row cannot match; in left-outer mode it
+             * still appears in the result with all right cols null. */
+            match[lp] = -1;
+            continue;
+        }
+
         /* Detect partition change — reset best match and rewind rp */
-        if (lp > 0) {
-            int64_t prev_li = li_idx[lp - 1];
+        if (prev_non_null_li >= 0) {
             int changed = 0;
             for (uint8_t k = 0; k < n_eq; k++) {
                 int64_t cv = read_col_i64(ray_data(lt_eq[k]), li, lt_eq[k]->type, lt_eq[k]->attrs);
-                int64_t pv = read_col_i64(ray_data(lt_eq[k]), prev_li, lt_eq[k]->type, lt_eq[k]->attrs);
+                int64_t pv = read_col_i64(ray_data(lt_eq[k]), prev_non_null_li, lt_eq[k]->type, lt_eq[k]->attrs);
                 if (cv != pv) { changed = 1; break; }
             }
             if (changed) {
@@ -1729,6 +1799,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                 /* Rewind rp to find start of new partition in right table */
                 while (rp > 0) {
                     int64_t ri_prev = ri_idx[rp - 1];
+                    if (rt_null[ri_prev]) break;
                     int eq_match = 1;
                     for (uint8_t k = 0; k < n_eq; k++) {
                         int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri_prev, rt_eq[k]->type, rt_eq[k]->attrs);
@@ -1744,6 +1815,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         /* Advance right pointer, accumulating best match */
         while (rp < right_n) {
             int64_t ri = ri_idx[rp];
+            if (rt_null[ri]) { rp++; continue; }  /* null keys never match */
             int eq_cmp = 0;
             for (uint8_t k = 0; k < n_eq && eq_cmp == 0; k++) {
                 int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri, rt_eq[k]->type, rt_eq[k]->attrs);
@@ -1761,6 +1833,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             rp++;
         }
         match[lp] = best_ri;
+        prev_non_null_li = li;
     }
 
     /* Remap match[] from sorted order to original left-row order.
@@ -1802,7 +1875,40 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
 
     ray_t* out = ray_table_new(left_ncols + right_out_count);
 
-    /* Gather left columns — iterate in original row order */
+    /* Build index arrays for gather so col_propagate_nulls_gather can
+     * copy the null bitmap correctly (null bit in source → null bit in
+     * output, plus explicit null for match_orig == -1 on the right side). */
+    ray_t* lidx_hdr = NULL, *ridx_hdr = NULL;
+    int64_t* lidx = out_n > 0
+        ? (int64_t*)scratch_alloc(&lidx_hdr, (size_t)out_n * sizeof(int64_t))
+        : NULL;
+    int64_t* ridx = out_n > 0
+        ? (int64_t*)scratch_alloc(&ridx_hdr, (size_t)out_n * sizeof(int64_t))
+        : NULL;
+    if (out_n > 0 && (!lidx || !ridx)) {
+        if (lidx_hdr) scratch_free(lidx_hdr);
+        if (ridx_hdr) scratch_free(ridx_hdr);
+        scratch_free(mo_hdr);
+        scratch_free(match_hdr);
+        scratch_free(li_hdr);
+        scratch_free(ri_hdr);
+        if (lt_null_hdr) scratch_free(lt_null_hdr);
+        if (rt_null_hdr) scratch_free(rt_null_hdr);
+        if (lt_time_hdr) scratch_free(lt_time_hdr);
+        if (rt_time_hdr) scratch_free(rt_time_hdr);
+        return ray_error("oom", NULL);
+    }
+    {
+        int64_t wi = 0;
+        for (int64_t li = 0; li < left_n; li++) {
+            if (join_type == 0 && match_orig[li] < 0) continue;
+            lidx[wi] = li;
+            ridx[wi] = match_orig[li];
+            wi++;
+        }
+    }
+
+    /* Gather left columns — iterate in original row order, preserve nulls */
     for (int64_t c = 0; c < left_ncols; c++) {
         int64_t col_name = ray_table_col_name(left_table, c);
         ray_t* src_col = ray_table_get_col_idx(left_table, c);
@@ -1812,19 +1918,20 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         uint8_t esz = ray_type_sizes[ctype];
         char* src = (char*)ray_data(src_col);
         char* dst = (char*)ray_data(dst_col);
-        int64_t wi = 0;
-        for (int64_t li = 0; li < left_n; li++) {
-            if (join_type == 0 && match_orig[li] < 0) continue;
-            memcpy(dst + wi * esz, src + li * esz, esz);
-            wi++;
-        }
+        for (int64_t wi = 0; wi < out_n; wi++)
+            memcpy(dst + wi * esz, src + lidx[wi] * esz, esz);
         dst_col->len = out_n;
         col_propagate_str_pool(dst_col, src_col);
+        col_propagate_nulls_gather(dst_col, src_col, lidx, out_n);
         out = ray_table_add_col(out, col_name, dst_col);
         ray_release(dst_col);
     }
 
-    /* Gather right columns (excluding key duplicates) — original left-row order */
+    /* Gather right columns (excluding key duplicates) — original left-row order.
+     * For unmatched rows (ridx[wi] == -1) we memset 0 for the value and
+     * rely on col_propagate_nulls_gather to set the null bit; the zero
+     * bytes keep the vector well-formed when consumers ignore the null
+     * bit. */
     for (int64_t rc = 0; rc < right_out_count; rc++) {
         int64_t cidx = right_out_idx[rc];
         int64_t col_name = ray_table_col_name(right_table, cidx);
@@ -1835,26 +1942,26 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         uint8_t esz = ray_type_sizes[ctype];
         char* src = (char*)ray_data(src_col);
         char* dst = (char*)ray_data(dst_col);
-        int64_t wi = 0;
-        for (int64_t li = 0; li < left_n; li++) {
-            if (join_type == 0 && match_orig[li] < 0) continue;
-            if (match_orig[li] >= 0) {
-                memcpy(dst + wi * esz, src + match_orig[li] * esz, esz);
-            } else {
-                memset(dst + wi * esz, 0, esz);  /* NULL fill for left outer */
-            }
-            wi++;
+        for (int64_t wi = 0; wi < out_n; wi++) {
+            int64_t ri = ridx[wi];
+            if (ri >= 0) memcpy(dst + wi * esz, src + ri * esz, esz);
+            else         memset(dst + wi * esz, 0, esz);
         }
         dst_col->len = out_n;
         col_propagate_str_pool(dst_col, src_col);
+        col_propagate_nulls_gather(dst_col, src_col, ridx, out_n);
         out = ray_table_add_col(out, col_name, dst_col);
         ray_release(dst_col);
     }
 
+    if (lidx_hdr) scratch_free(lidx_hdr);
+    if (ridx_hdr) scratch_free(ridx_hdr);
     scratch_free(mo_hdr);
     scratch_free(match_hdr);
     scratch_free(li_hdr);
     scratch_free(ri_hdr);
+    if (lt_null_hdr) scratch_free(lt_null_hdr);
+    if (rt_null_hdr) scratch_free(rt_null_hdr);
     if (lt_time_hdr) scratch_free(lt_time_hdr);
     if (rt_time_hdr) scratch_free(rt_time_hdr);
     return out;
