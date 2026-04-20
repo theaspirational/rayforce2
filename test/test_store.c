@@ -36,6 +36,7 @@
 #include "store/part.h"
 #include "store/serde.h"
 #include "core/ipc.h"
+#include "core/sock.h"
 #include "core/platform.h"
 #include "core/runtime.h"
 #include "mem/sys.h"
@@ -2085,6 +2086,68 @@ static MunitResult test_ipc_restricted(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* ---- IPC handshake rejects wrong wire version -------------------------- */
+
+static MunitResult test_ipc_handshake_version_mismatch(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* A client sending any wire-version byte other than
+     * RAY_SERDE_WIRE_VERSION must be refused before the server commits
+     * to any framed payload.  This is the defense-in-depth layer that
+     * protects an old peer from ever seeing a new-format message. */
+    ray_runtime_t* rt = ray_runtime_create(0, NULL);
+    munit_assert_ptr_not_null(rt);
+
+    ray_ipc_server_t srv;
+    ray_err_t err = ray_ipc_server_init(&srv, 0);
+    munit_assert_int(err, ==, RAY_OK);
+    uint16_t port = get_listen_port(srv.listen_fd);
+    munit_assert_int(port, >, 0);
+
+    ray_vm_t* srv_vm = (ray_vm_t*)ray_sys_alloc(sizeof(ray_vm_t));
+    munit_assert_ptr_not_null(srv_vm);
+    memset(srv_vm, 0, sizeof(ray_vm_t));
+    srv_vm->id = 1;
+
+    ipc_thread_ctx_t ctx = { .srv = &srv, .vm = srv_vm };
+    ray_thread_t tid;
+    ray_thread_create(&tid, server_thread_fn, &ctx);
+
+    /* Connect raw socket and send a version-byte that doesn't match. */
+    ray_sock_t s = ray_sock_connect("127.0.0.1", port, 2000);
+    munit_assert_true(s != RAY_INVALID_SOCK);
+    uint8_t bad_hs[2] = { (uint8_t)(RAY_SERDE_WIRE_VERSION + 1), 0x00 };
+    munit_assert_int((int)ray_sock_send(s, bad_hs, 2), >=, 0);
+
+    /* Server should refuse — EOF on recv indicates the connection was
+     * closed before any payload bytes reached us.  If the check is
+     * missing, the server would write its own handshake response here
+     * and the test would observe 2 bytes instead. */
+    uint8_t resp[2] = { 0xff, 0xff };
+    int64_t got = 0;
+    /* Give the server thread a small number of polling cycles to react. */
+    for (int attempt = 0; attempt < 100 && got < 2; attempt++) {
+        int64_t n = ray_sock_recv(s, resp + got, (size_t)(2 - got));
+        if (n <= 0) break;
+        got += n;
+    }
+    munit_assert_int((int)got, <, 2);  /* never got a full response */
+    ray_sock_close(s);
+
+    /* A subsequent well-behaved client must still succeed, proving the
+     * server is still running and only the bad handshake was rejected. */
+    int64_t h = ray_ipc_connect("127.0.0.1", port, NULL, NULL);
+    munit_assert_int(h, >=, 0);
+    ray_ipc_close(h);
+
+    srv.running = false;
+    ray_thread_join(tid);
+    ray_ipc_server_destroy(&srv);
+    ray_sys_free(srv_vm);
+    ray_runtime_destroy(rt);
+    return MUNIT_OK;
+}
+
 static MunitTest store_tests[] = {
     { "/col_mmap_i64",         test_col_mmap_i64,         store_setup, store_teardown, 0, NULL },
     { "/col_mmap_f64",         test_col_mmap_f64,         store_setup, store_teardown, 0, NULL },
@@ -2128,6 +2191,7 @@ static MunitTest store_tests[] = {
     { "/ipc/auth_reject",        test_ipc_auth_reject,         NULL, NULL, 0, NULL },
     { "/ipc/auth_no_creds",      test_ipc_auth_no_creds,       NULL, NULL, 0, NULL },
     { "/ipc/restricted",         test_ipc_restricted,          NULL, NULL, 0, NULL },
+    { "/ipc/handshake_version_mismatch", test_ipc_handshake_version_mismatch, NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 

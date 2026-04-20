@@ -354,8 +354,17 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
     if (!sel->rx.buf || sel->rx.buf->offset < 2) return NULL;
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
 
+    /* Refuse peers speaking a different wire version BEFORE we commit to
+     * exchanging any serialized payloads.  Without this check a new
+     * server would happily send v3-layout values to a v2 client, which
+     * would misparse every atom after the version-bump byte. */
+    if (sel->rx.buf->data[0] != RAY_SERDE_WIRE_VERSION) {
+        ray_poll_deregister(poll, sel->id);
+        return NULL;
+    }
+
     /* Send handshake response: version + auth_required flag */
-    uint8_t resp[2] = { RAY_VERSION_MAJOR, cd->auth_required ? 0x01 : 0x00 };
+    uint8_t resp[2] = { RAY_SERDE_WIRE_VERSION, cd->auth_required ? 0x01 : 0x00 };
     ray_sock_send((ray_sock_t)sel->fd, resp, 2);
 
     if (cd->auth_required) {
@@ -521,8 +530,15 @@ static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 
 static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 {
+    /* Refuse peers speaking a different wire version up front — see the
+     * matching check in ipc_read_handshake. */
+    if (!c->rx_buf || c->rx_buf[0] != RAY_SERDE_WIRE_VERSION) {
+        conn_close(srv, c);
+        return;
+    }
+
     bool auth_req = (srv->auth_secret[0] != '\0');
-    uint8_t resp[2] = { RAY_VERSION_MAJOR, auth_req ? 0x01 : 0x00 };
+    uint8_t resp[2] = { RAY_SERDE_WIRE_VERSION, auth_req ? 0x01 : 0x00 };
     ray_sock_send(c->fd, resp, 2);
 
     ray_sys_free(c->rx_buf);
@@ -911,7 +927,7 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     ray_sock_t fd = ray_sock_connect(host, port, 5000);
     if (fd == RAY_INVALID_SOCK) return -1;
 
-    uint8_t hs[2] = { RAY_VERSION_MAJOR, 0x00 };
+    uint8_t hs[2] = { RAY_SERDE_WIRE_VERSION, 0x00 };
     if (ray_sock_send(fd, hs, 2) < 0) {
         ray_sock_close(fd);
         return -1;
@@ -921,6 +937,15 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     if (recv_full(fd, resp, 2) < 0) {
         ray_sock_close(fd);
         return -1;
+    }
+
+    /* Refuse a peer that speaks a different wire version.  This gives
+     * the new client an explicit error at connect time rather than
+     * silently sending a v3 payload to a server that would misparse
+     * every atom. */
+    if (resp[0] != RAY_SERDE_WIRE_VERSION) {
+        ray_sock_close(fd);
+        return -4; /* wire version mismatch */
     }
 
     /* Auth required? */
