@@ -109,6 +109,29 @@ ray_t* ray_arena_alloc(ray_arena_t* arena, size_t nbytes) {
     return v;
 }
 
+bool ray_arena_reserve(ray_arena_t* arena, size_t bytes) {
+    if (!arena) return false;
+    if (bytes == 0) return true;
+    ray_arena_chunk_t* c = arena->chunks;
+    if (c && (c->cap - c->used) >= bytes) return true;
+    size_t new_cap = arena->chunk_size;
+    if (bytes > new_cap) new_cap = ARENA_ALIGN_UP(bytes);
+    ray_arena_chunk_t* nc = arena_new_chunk(new_cap);
+    if (!nc) return false;
+    nc->next = arena->chunks;
+    arena->chunks = nc;
+    return true;
+}
+
+size_t ray_arena_total_used(const ray_arena_t* arena) {
+    if (!arena) return 0;
+    size_t total = 0;
+    for (const ray_arena_chunk_t* c = arena->chunks; c; c = c->next) {
+        total += c->used;
+    }
+    return total;
+}
+
 void ray_arena_reset(ray_arena_t* arena) {
     if (!arena || !arena->chunks) return;
 

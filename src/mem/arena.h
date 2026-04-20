@@ -25,6 +25,7 @@
 #define RAY_ARENA_H
 
 #include <rayforce.h>
+#include <stdbool.h>
 
 typedef struct ray_arena ray_arena_t;
 
@@ -35,6 +36,20 @@ ray_arena_t* ray_arena_new(size_t chunk_size);
  * Returns 32-byte aligned ray_t* with RAY_ATTR_ARENA set, rc=1.
  * Returns NULL on OOM. */
 ray_t* ray_arena_alloc(ray_arena_t* arena, size_t nbytes);
+
+/* Ensure the arena can serve subsequent allocations totalling at least
+ * `bytes` without the head chunk needing to grow.  If the head chunk has
+ * enough free space already, this is a no-op; otherwise a new chunk with
+ * capacity >= `bytes` is allocated and becomes the head.  Returns true on
+ * success, false on OOM.  Useful for making a sequence of follow-on
+ * allocations infallible, which is necessary when commits to multiple
+ * data structures must be atomic. */
+bool ray_arena_reserve(ray_arena_t* arena, size_t bytes);
+
+/* Total bytes currently used across every chunk in this arena.  Diagnostic
+ * introspection — monotonically grows with ray_arena_alloc, resets on
+ * ray_arena_reset.  Safe to call at any time. */
+size_t ray_arena_total_used(const ray_arena_t* arena);
 
 /* Reset arena — rewind all chunks to zero. Memory retained for reuse. */
 void ray_arena_reset(ray_arena_t* arena);

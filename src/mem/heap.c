@@ -817,6 +817,14 @@ ray_t* ray_alloc_copy(ray_t* v) {
         if (v->type == RAY_MAPCOMMON) n_ptrs = 2;
         if (n_ptrs < 0) return ray_error("oom", NULL);
         data_size = (size_t)n_ptrs * sizeof(ray_t*);
+    } else if (v->type == RAY_LIST) {
+        /* RAY_LIST has type==0, which the generic branch below (t <= 0)
+         * would route to data_size=0, silently producing a header-only copy
+         * whose item-pointer area is uninitialised — a shallow COW of a
+         * shared list would then lose every element.  Handle explicitly. */
+        if (v->len < 0 || (uint64_t)v->len > SIZE_MAX / sizeof(ray_t*))
+            return ray_error("oom", NULL);
+        data_size = (size_t)ray_len(v) * sizeof(ray_t*);
     } else {
         int8_t t = ray_type(v);
         if (t <= 0 || t >= RAY_TYPE_COUNT)
