@@ -55,6 +55,12 @@ ray_err_t ray_env_set(int64_t sym_id, ray_t* val);
  * during ray_lang_init. */
 ray_err_t ray_env_bind(int64_t sym_id, ray_t* val);
 
+/* True if a symbol's interned name starts with `.` — i.e. it belongs to
+ * the reserved namespace populated at startup by builtin registration.
+ * User-level binders (ray_env_set, ray_env_set_local, lambda parameter
+ * installer) refuse such names so system bindings can't be shadowed. */
+bool ray_sym_is_reserved(int64_t sym_id);
+
 /* Resolve a name for a Rayfall expression (tree-walking eval or bytecode
  * op_resolve): returns an OWNED ref (rc >= 1) that the caller must
  * release, or NULL if undefined.  Unlike ray_env_get which returns a

@@ -1200,6 +1200,35 @@ ray_t* ray_fn(ray_t** args, int64_t n) {
     /* args[0] = param vector (list of name symbols), args[1..n-1] = body exprs */
     ray_t* params_list = args[0];
 
+    /* Reject lambda parameters named under the reserved `.` namespace.
+     * Even though the bytecode VM resolves them to slot indices rather
+     * than env entries, a user-defined fn with `.sys.gc` as a parameter
+     * would silently override the builtin inside the body via the
+     * compile-time name→slot map — that counts as shadowing and is
+     * disallowed for the same reason `(let .sys.gc ...)` is.  Lambda
+     * param lists are SYM *vectors* (not RAY_LISTs): `[a b c]` of all
+     * syms is stored as a flat i64 sym-id array. */
+    if (params_list) {
+        int64_t nparams = ray_len(params_list);
+        if (params_list->type == RAY_SYM) {
+            int64_t* ids = (int64_t*)ray_data(params_list);
+            for (int64_t i = 0; i < nparams; i++)
+                if (ray_sym_is_reserved(ids[i]))
+                    return ray_error("reserve",
+                        "lambda parameter '%s' is in the reserved namespace",
+                        ray_str_ptr(ray_sym_str(ids[i])));
+        } else if (params_list->type == RAY_LIST) {
+            ray_t** pelems = (ray_t**)ray_data(params_list);
+            for (int64_t i = 0; i < nparams; i++) {
+                ray_t* p = pelems[i];
+                if (p && p->type == -RAY_SYM && ray_sym_is_reserved(p->i64))
+                    return ray_error("reserve",
+                        "lambda parameter '%s' is in the reserved namespace",
+                        ray_str_ptr(ray_sym_str(p->i64)));
+            }
+        }
+    }
+
     /* Create lambda object with space for 7 slots:
      * [0] params, [1] body, [2] bytecode, [3] constants, [4] n_locals,
      * [5] nfo (source location), [6] dbg (debug metadata) */

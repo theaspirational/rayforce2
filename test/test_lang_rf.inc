@@ -3350,6 +3350,18 @@ static MunitResult test_rf_reserved_namespace(const void* params, void* fixture)
     ASSERT_ER("(set .sys.gc 0)",       "reserve");   /* can't even overwrite */
     ASSERT_ER("(set .made.up.ns 42)",  "reserve");   /* arbitrary .* root */
 
+    /* Shadowing guards: the reserved namespace must stay intact across
+     * all binding paths, not just global `set`.  `let` is a local-scope
+     * binder; `fn` parameters are compile-time slot assignments —
+     * either route would otherwise let a user temporarily overwrite
+     * .sys.gc inside a lambda body. */
+    ASSERT_ER("(let .sys.gc 99)",              "reserve");
+    ASSERT_ER("(let .os.getenv \"bogus\")",    "reserve");
+    ASSERT_ER("((fn [.sys.gc] .sys.gc) 7)",    "reserve");
+    ASSERT_ER("(set _ (fn [.os.getenv] 1))",   "reserve");
+    /* Built-in still resolves after the blocked shadow attempts. */
+    ASSERT_EQ("(.sys.gc 0)", "0");
+
     /* User-level dotted writes under a non-`.` root still work. */
     ray_eval_str("(set myns.x 1)");
     ASSERT_EQ("myns.x", "1");

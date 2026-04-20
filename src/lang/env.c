@@ -444,8 +444,9 @@ static ray_t* lookup_top_frame(int64_t sym_id) {
 /* A sym belongs to the reserved system namespace if its name starts with
  * a dot (e.g. `.sys.gc`, `.os.getenv`).  The leading segment is the
  * category tag; builtin registration populates these via ray_env_bind
- * and user code is blocked at ray_env_set. */
-static bool sym_is_reserved(int64_t sym_id) {
+ * and every user-level binder refuses such names so the system
+ * bindings can't be shadowed in any scope. */
+bool ray_sym_is_reserved(int64_t sym_id) {
     ray_t* s = ray_sym_str(sym_id);
     if (!s) return false;
     const char* p = ray_str_ptr(s);
@@ -461,7 +462,7 @@ ray_err_t ray_env_bind(int64_t sym_id, ray_t* val) {
 }
 
 ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
-    if (sym_is_reserved(sym_id)) return RAY_ERR_RESERVED;
+    if (ray_sym_is_reserved(sym_id)) return RAY_ERR_RESERVED;
     return ray_env_bind(sym_id, val);
 }
 
@@ -545,6 +546,11 @@ int64_t ray_env_lookup_prefix(const char* prefix, int64_t len,
 }
 
 ray_err_t ray_env_set_local(int64_t sym_id, ray_t* val) {
+    /* Reserved names (.sys.*, .os.*, .csv.*, .ipc.*) can only be
+     * populated by builtin registration (ray_env_bind).  Refuse at
+     * every user-reachable binding path so `(let .sys.gc 99)` or a
+     * lambda parameter named `.sys.gc` cannot shadow the builtin. */
+    if (ray_sym_is_reserved(sym_id)) return RAY_ERR_RESERVED;
     if (scope_depth <= 0) return ray_env_set(sym_id, val);
     if (ray_sym_is_dotted(sym_id)) {
         return env_set_dotted(sym_id, val, lookup_top_frame, env_bind_local);
