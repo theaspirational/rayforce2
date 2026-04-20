@@ -791,28 +791,44 @@ static int32_t term_highlight_into(char* dst, int32_t dst_cap,
         }
 
         default:
-            /* Check for word at word boundary */
-            if ((i == 0 || !is_alphanum(buf[i - 1])) && is_alphanum(c)) {
-                int32_t j = i + 1;
-                while (j < buf_len && is_alphanum(buf[j])) j++;
-                int32_t wlen = j - i;
+            /* Check for word at word boundary.  Also accepts a leading `.`
+             * followed by alphanum so reserved-namespace builtins like
+             * `.sys.gc` / `.csv.read` are scanned as one token instead
+             * of three pieces (`.`, `sys`, `.`, `gc`).  Internal `.`
+             * extends the word only when followed by another alphanum,
+             * keeping `foo.` or `1.5)` from being mis-joined. */
+            {
+                int prev_ok = (i == 0 ||
+                               (!is_alphanum(buf[i - 1]) && buf[i - 1] != '.'));
+                int start_ok = is_alphanum(c) ||
+                               (c == '.' && i + 1 < buf_len && is_alphanum(buf[i + 1]));
+                if (prev_ok && start_ok) {
+                    int32_t j = i + 1;
+                    while (j < buf_len) {
+                        if (is_alphanum(buf[j])) { j++; continue; }
+                        if (buf[j] == '.' && j + 1 < buf_len &&
+                            is_alphanum(buf[j + 1])) { j++; continue; }
+                        break;
+                    }
+                    int32_t wlen = j - i;
 
-                const char* match = NULL;
-                int64_t nmatches = ray_env_lookup_prefix(buf + i, wlen,
-                                                         &match, 1);
-                if (nmatches == 1 && (int32_t)strlen(match) == wlen) {
-                    HL_LIT(CLR_GREEN);
-                    HL_APPEND(buf + i, wlen);
-                    HL_LIT(CLR_RESET);
+                    const char* match = NULL;
+                    int64_t nmatches = ray_env_lookup_prefix(buf + i, wlen,
+                                                             &match, 1);
+                    if (nmatches == 1 && (int32_t)strlen(match) == wlen) {
+                        HL_LIT(CLR_GREEN);
+                        HL_APPEND(buf + i, wlen);
+                        HL_LIT(CLR_RESET);
+                    } else {
+                        /* Not a builtin — emit plain */
+                        HL_APPEND(buf + i, wlen);
+                    }
                     i = j - 1;
                     colored = 1;
-                } else {
-                    /* Not a builtin — emit plain */
-                    HL_APPEND(buf + i, wlen);
-                    i = j - 1;
-                    colored = 1;
+                    break;
                 }
-            } else if (is_op_char(c)) {
+            }
+            if (is_op_char(c)) {
                 /* Check operator is standing alone (not part of a word) */
                 int prev_alnum = (i > 0 && is_alphanum(buf[i - 1]));
                 int next_alnum = (i + 1 < buf_len && is_alphanum(buf[i + 1]));
@@ -839,11 +855,22 @@ static int32_t term_highlight_into(char* dst, int32_t dst_cap,
 
 /* ===== Ghost text (inline completion) ===== */
 
-/* Find the start of the word at/before the cursor */
+/* Find the start of the word at/before the cursor.  Identifiers may
+ * include internal `.` (as in user `math.pi` or reserved `.sys.gc`) —
+ * a dot counts as part of the word if alphanum flanks it, or if it's
+ * the leading `.` of a reserved-namespace name followed by alphanum. */
 static int32_t find_word_start(const char* buf, int32_t pos) {
     int32_t i = pos;
-    while (i > 0 && is_alphanum(buf[i - 1]))
-        i--;
+    while (i > 0) {
+        char prev = buf[i - 1];
+        if (is_alphanum(prev)) { i--; continue; }
+        if (prev == '.') {
+            if (i - 1 == 0) { i--; break; }              /* leading dot at buf[0] */
+            if (is_alphanum(buf[i - 2])) { i--; continue; } /* internal dot */
+            i--; break;                                  /* leading dot after punct */
+        }
+        break;
+    }
     return i;
 }
 
