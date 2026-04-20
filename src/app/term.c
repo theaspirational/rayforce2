@@ -812,10 +812,11 @@ static int32_t term_highlight_into(char* dst, int32_t dst_cap,
                     }
                     int32_t wlen = j - i;
 
-                    const char* match = NULL;
-                    int64_t nmatches = ray_env_lookup_prefix(buf + i, wlen,
-                                                             &match, 1);
-                    if (nmatches == 1 && (int32_t)strlen(match) == wlen) {
+                    /* Exact-match env check — prefix lookup with max=1
+                     * returns only the first alphabetical match, which
+                     * would misclassify e.g. `de` when `del`/`desc` sort
+                     * earlier and hit the same prefix. */
+                    if (ray_env_has_name(buf + i, wlen)) {
                         HL_LIT(CLR_GREEN);
                         HL_APPEND(buf + i, wlen);
                         HL_LIT(CLR_RESET);
