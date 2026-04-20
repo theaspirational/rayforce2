@@ -22,6 +22,9 @@
  */
 
 #include "lang/env.h"
+#include "table/sym.h"
+#include "ops/dict.h"
+#include "ops/temporal.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -122,31 +125,164 @@ void ray_env_destroy(void) {
     memset(&g_env, 0, sizeof(g_env));
 }
 
-ray_t* ray_env_get(int64_t sym_id) {
-    /* Search local scopes top-down first */
+/* Flat (non-dotted) lookup — scope stack top-down, then global env.
+ * Returns NULL if not bound.  Always used as the head-segment resolver
+ * for dotted paths, and as the fast path for plain names. */
+static ray_t* env_lookup_flat(int64_t sym_id) {
     for (int32_t d = scope_depth - 1; d >= 0; d--) {
         ray_scope_frame_t* f = &scope_stack[d];
         for (int32_t i = 0; i < f->count; i++) {
             if (f->keys[i] == sym_id) return f->vals[i];
         }
     }
-    /* Fall through to global */
     for (int32_t i = 0; i < g_env.count; i++) {
         if (g_env.keys[i] == sym_id) return g_env.vals[i];
     }
     return NULL;
 }
 
-ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
+ray_t* ray_env_get(int64_t sym_id) {
+    /* Fast path: non-dotted name.  The bitmap check is one load + shift +
+     * and + predicted-taken branch; zero added cost in steady state. */
+    if (!ray_sym_is_dotted(sym_id)) {
+        return env_lookup_flat(sym_id);
+    }
+
+    /* Dotted path: head resolves via scope+global, rest are sym-keyed
+     * container probes — dicts walk via pair array, tables via schema
+     * lookup, anything else is surfaced as "undefined" (NULL).  Missing
+     * intermediate keys also return NULL so the evaluator's name-error
+     * reporting stays consistent with plain names.  Returning env-owned
+     * pointers (never fresh allocations) keeps the caller's retain/release
+     * balance correct. */
+    const int64_t* segs;
+    int n = ray_sym_segs(sym_id, &segs);
+    if (n < 2) return NULL;  /* defensive — dotted bit without segments */
+
+    ray_t* v = env_lookup_flat(segs[0]);
+    for (int i = 1; v && i < n; i++) {
+        v = container_probe_by_sym(v, segs[i]);
+    }
+    return v;
+}
+
+/* Owned-ref variant.  Always returns rc>=1 on success; caller must
+ * release.  Additionally handles temporal field extraction in the dotted
+ * walk (e.g. `date.dd`, `ts.hh`) — when the next container-probe step
+ * would fail and the current value is a RAY_DATE / RAY_TIME /
+ * RAY_TIMESTAMP vector or atom, we try mapping the segment sym to a
+ * RAY_EXTRACT_* field and call ray_temporal_extract, which allocates a
+ * fresh result.  Those fresh allocations are exactly why this function
+ * has a different retain contract from ray_env_get. */
+ray_t* ray_env_resolve(int64_t sym_id) {
+    /* Non-dotted: borrow from env and retain before returning. */
+    if (!ray_sym_is_dotted(sym_id)) {
+        ray_t* v = env_lookup_flat(sym_id);
+        if (v) ray_retain(v);
+        return v;
+    }
+
+    const int64_t* segs;
+    int n = ray_sym_segs(sym_id, &segs);
+    if (n < 2) return NULL;
+
+    /* `v` is either a borrowed env/container pointer (fresh=false) or a
+     * fresh temporal-extract result (fresh=true).  When switching between
+     * the two we must release the previous fresh value to avoid leaks. */
+    ray_t* v = env_lookup_flat(segs[0]);
+    bool   fresh = false;
+
+    for (int i = 1; v && i < n; i++) {
+        ray_t* next = container_probe_by_sym(v, segs[i]);
+        if (next) {
+            if (fresh) ray_release(v);
+            v = next;
+            fresh = false;
+            continue;
+        }
+
+        /* Container probe miss — try method dispatch: look up the
+         * segment as a callable in env, and if it's a unary function,
+         * apply it to the current value.  This makes `ts.ss`, `d.dd`,
+         * or any future `x.some_fn` work the same way, with the
+         * segment resolution going through the normal function
+         * registration path instead of a bespoke table.
+         *
+         * Walk both scope and global env looking for a RAY_UNARY
+         * binding — a local non-callable (e.g. a column named `ss`
+         * pushed into scope by the select fallback) must not shadow
+         * the globally-registered accessor function. */
+        ray_t* fn = NULL;
+        for (int32_t d = scope_depth - 1; d >= 0 && !fn; d--) {
+            ray_scope_frame_t* f = &scope_stack[d];
+            for (int32_t k = 0; k < f->count; k++) {
+                if (f->keys[k] == segs[i] && f->vals[k]
+                    && f->vals[k]->type == RAY_UNARY) {
+                    fn = f->vals[k];
+                    break;
+                }
+            }
+        }
+        if (!fn) {
+            for (int32_t k = 0; k < g_env.count; k++) {
+                if (g_env.keys[k] == segs[i] && g_env.vals[k]
+                    && g_env.vals[k]->type == RAY_UNARY) {
+                    fn = g_env.vals[k];
+                    break;
+                }
+            }
+        }
+        if (fn) {
+            ray_unary_fn f = (ray_unary_fn)(uintptr_t)fn->i64;
+            ray_t* r = f(v);
+            if (fresh) ray_release(v);
+            if (!r || RAY_IS_ERR(r)) return NULL;
+            v = r;
+            fresh = true;
+            continue;
+        }
+
+        /* Nothing matched — propagate "undefined". */
+        if (fresh) ray_release(v);
+        return NULL;
+    }
+
+    if (!v) return NULL;
+    if (!fresh) ray_retain(v);   /* hand back an owned ref */
+    return v;
+}
+
+/* Flat-binding helpers: mutate a specific scope (global or top frame) by
+ * sym_id.  Used by both the simple and dotted set paths.  Passing val=NULL
+ * means "delete" — if a slot exists, release its value and compact the
+ * slot out of the array (no-op if the slot doesn't exist).  This matches
+ * ray_del_fn's contract via ray_env_set(sym, NULL) and also covers the
+ * cascade-up case in env_set_dotted where every dict in a dotted path was
+ * emptied by the delete. */
+static ray_err_t env_bind_global(int64_t sym_id, ray_t* val) {
     env_lock();
     for (int32_t i = 0; i < g_env.count; i++) {
         if (g_env.keys[i] == sym_id) {
+            if (val == NULL) {
+                if (g_env.vals[i]) ray_release(g_env.vals[i]);
+                for (int32_t j = i; j + 1 < g_env.count; j++) {
+                    g_env.keys[j] = g_env.keys[j + 1];
+                    g_env.vals[j] = g_env.vals[j + 1];
+                }
+                g_env.count--;
+                env_unlock();
+                return RAY_OK;
+            }
             if (g_env.vals[i]) ray_release(g_env.vals[i]);
             ray_retain(val);
             g_env.vals[i] = val;
             env_unlock();
             return RAY_OK;
         }
+    }
+    if (val == NULL) {   /* deleting an absent binding: no-op */
+        env_unlock();
+        return RAY_OK;
     }
     if (g_env.count >= ENV_CAP) {
         env_unlock();
@@ -158,6 +294,158 @@ ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
     g_env.count++;
     env_unlock();
     return RAY_OK;
+}
+
+static ray_err_t env_bind_local(int64_t sym_id, ray_t* val) {
+    ray_scope_frame_t* f = &scope_stack[scope_depth - 1];
+    for (int32_t i = 0; i < f->count; i++) {
+        if (f->keys[i] == sym_id) {
+            if (val == NULL) {
+                if (f->vals[i]) ray_release(f->vals[i]);
+                for (int32_t j = i; j + 1 < f->count; j++) {
+                    f->keys[j] = f->keys[j + 1];
+                    f->vals[j] = f->vals[j + 1];
+                }
+                f->count--;
+                return RAY_OK;
+            }
+            if (f->vals[i]) ray_release(f->vals[i]);
+            ray_retain(val);
+            f->vals[i] = val;
+            return RAY_OK;
+        }
+    }
+    if (val == NULL) return RAY_OK;
+    if (f->count >= FRAME_CAP) return RAY_ERR_OOM;
+    f->keys[f->count] = sym_id;
+    ray_retain(val);
+    f->vals[f->count] = val;
+    f->count++;
+    return RAY_OK;
+}
+
+/* Dotted-path write.  base_lookup(head_sym) returns the current binding in
+ * the scope we are writing to (global or local frame), or NULL.  bind_fn
+ * rebinds the new top-level dict in that same scope.  Walks the existing
+ * chain (if any) for intermediate dicts, then COW-rebuilds bottom-up using
+ * dict_upsert.  Auto-creates missing intermediates as empty dicts. */
+static ray_err_t env_set_dotted(int64_t sym_id, ray_t* val,
+                                ray_t* (*base_lookup)(int64_t),
+                                ray_err_t (*bind_fn)(int64_t, ray_t*)) {
+    const int64_t* segs;
+    int n = ray_sym_segs(sym_id, &segs);
+    if (n < 2) return RAY_ERR_TYPE;   /* dotted flag without segments */
+
+    /* Walk existing chain to the deepest parent that still exists.  Record
+     * each level's dict pointer (borrowed) so we can rebuild upward.  Any
+     * non-dict intermediate is an error. */
+    ray_t* parents[256];
+    parents[0] = base_lookup(segs[0]);
+    if (parents[0] && !(parents[0]->type == RAY_LIST &&
+                        (parents[0]->attrs & RAY_ATTR_DICT)))
+        return RAY_ERR_TYPE;
+
+    /* parents[i] is the dict at path prefix segs[0..i].  If an intermediate
+     * key is missing, parents[i+1..n-2] are NULL and dict_upsert will create
+     * fresh dicts on the way back up. */
+    for (int i = 1; i < n - 1; i++) {
+        if (!parents[i - 1]) { parents[i] = NULL; continue; }
+        ray_t* child = dict_probe_by_sym(parents[i - 1], segs[i]);
+        if (child && !(child->type == RAY_LIST &&
+                       (child->attrs & RAY_ATTR_DICT)))
+            return RAY_ERR_TYPE;
+        parents[i] = child;
+    }
+
+    /* Delete path: (del ns.x) lowers to ray_env_set(sym_id, NULL).  The
+     * non-dotted path removes the env slot; the dotted path must actually
+     * remove the key from the leaf dict and rebuild the chain — otherwise
+     * the user would see a zombie entry like {:x NULL} instead of the
+     * key being gone.  No-op cleanly if any part of the path is missing.
+     * If the leaf-removal empties the containing dict, we must not rebind
+     * {} upward — that would leave a stale empty namespace.  Instead
+     * cascade up: at each level, if `cur` is empty, delete that key from
+     * its parent instead of upserting it.  If the cascade reaches the
+     * head with an empty dict, we rebind the head to NULL (env_bind_*
+     * treats NULL as "remove the slot"). */
+    int start_i;
+    ray_t* cur;
+    bool deleting = (val == NULL);
+    if (deleting) {
+        ray_t* leaf_parent = parents[n - 2];
+        if (!leaf_parent) return RAY_OK;
+        if (!dict_probe_by_sym(leaf_parent, segs[n - 1])) return RAY_OK;
+        ray_retain(leaf_parent);
+        cur = dict_remove(leaf_parent, segs[n - 1]);
+        if (!cur || RAY_IS_ERR(cur)) return RAY_ERR_OOM;
+        start_i = n - 2;   /* rebuild from the parent of the deleted key up */
+    } else {
+        ray_retain(val);
+        cur = val;
+        start_i = n - 1;
+    }
+
+    /* Build new chain bottom-up.  dict_upsert consumes its `dict` arg, so
+     * we retain parents before passing.  On failure we release cur and
+     * bail — parents are env-owned borrowed refs. */
+    for (int i = start_i; i >= 1; i--) {
+        ray_t* parent = parents[i - 1];
+
+        if (deleting && cur && cur->type == RAY_LIST
+            && (cur->attrs & RAY_ATTR_DICT) && cur->len == 0) {
+            /* Cascade: the rebuilt child became empty, so remove the key
+             * at this level rather than storing {}.  If parent is absent
+             * too, nothing more to do. */
+            ray_release(cur);
+            if (!parent) { cur = NULL; break; }
+            ray_retain(parent);
+            cur = dict_remove(parent, segs[i]);
+            if (!cur || RAY_IS_ERR(cur)) return RAY_ERR_OOM;
+            continue;
+        }
+
+        if (parent) ray_retain(parent);
+        ray_t* next = dict_upsert(parent, segs[i], cur);
+        ray_release(cur);
+        if (!next || RAY_IS_ERR(next)) return RAY_ERR_OOM;
+        cur = next;
+    }
+
+    /* If cascade reduced the head-level dict to empty (or propagated up
+     * past a missing parent), rebind the head as NULL so the stale empty
+     * namespace disappears from introspection and from future lookups. */
+    ray_t* to_bind = cur;
+    if (deleting && cur && cur->type == RAY_LIST
+        && (cur->attrs & RAY_ATTR_DICT) && cur->len == 0) {
+        to_bind = NULL;
+    }
+    ray_err_t err = bind_fn(segs[0], to_bind);
+    if (cur) ray_release(cur);
+    return err;
+}
+
+/* Scope-specific base lookups used by env_set_dotted. */
+static ray_t* lookup_global(int64_t sym_id) {
+    for (int32_t i = 0; i < g_env.count; i++) {
+        if (g_env.keys[i] == sym_id) return g_env.vals[i];
+    }
+    return NULL;
+}
+
+static ray_t* lookup_top_frame(int64_t sym_id) {
+    if (scope_depth <= 0) return NULL;
+    ray_scope_frame_t* f = &scope_stack[scope_depth - 1];
+    for (int32_t i = 0; i < f->count; i++) {
+        if (f->keys[i] == sym_id) return f->vals[i];
+    }
+    return NULL;
+}
+
+ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
+    if (ray_sym_is_dotted(sym_id)) {
+        return env_set_dotted(sym_id, val, lookup_global, env_bind_global);
+    }
+    return env_bind_global(sym_id, val);
 }
 
 ray_err_t ray_env_push_scope(void) {
@@ -241,20 +529,8 @@ int64_t ray_env_lookup_prefix(const char* prefix, int64_t len,
 
 ray_err_t ray_env_set_local(int64_t sym_id, ray_t* val) {
     if (scope_depth <= 0) return ray_env_set(sym_id, val);
-    ray_scope_frame_t* f = &scope_stack[scope_depth - 1];
-    /* Update existing in this frame */
-    for (int32_t i = 0; i < f->count; i++) {
-        if (f->keys[i] == sym_id) {
-            if (f->vals[i]) ray_release(f->vals[i]);
-            ray_retain(val);
-            f->vals[i] = val;
-            return RAY_OK;
-        }
+    if (ray_sym_is_dotted(sym_id)) {
+        return env_set_dotted(sym_id, val, lookup_top_frame, env_bind_local);
     }
-    if (f->count >= FRAME_CAP) return RAY_ERR_OOM;
-    f->keys[f->count] = sym_id;
-    ray_retain(val);
-    f->vals[f->count] = val;
-    f->count++;
-    return RAY_OK;
+    return env_bind_local(sym_id, val);
 }

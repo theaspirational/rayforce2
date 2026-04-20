@@ -28,6 +28,7 @@
 #include "lang/parse.h"
 #include "core/types.h"
 #include "ops/ops.h"
+#include "ops/temporal.h"
 #include "ops/datalog.h"
 #include "table/sym.h"
 #include "core/profile.h"
@@ -181,6 +182,40 @@ ray_t* unbox_vec_arg(ray_t* x, ray_t** _bx) {
     return x;
 }
 
+/* Construct a zero-valued owned atom matching the element type of a
+ * vector (typed or RAY_LIST).  Used only for empty-collection type
+ * probing by the atomic-map helpers: it lets us invoke a binary or
+ * unary `fn` with a representative scalar so the result's output
+ * type is observable even when the input has no elements.
+ *
+ * Symbol / string / GUID columns must produce atoms of their own
+ * element type — falling back to i64(0) for those would make, e.g.,
+ * `(== empty_sym_col 'foo)` probe an integer comparison and return
+ * I64 instead of the BOOL a non-empty input would yield.  Unknown
+ * element types still fall back to ray_i64(0). */
+static ray_t* zero_atom_for_elem_type(ray_t* coll) {
+    if (!coll) return ray_i64(0);
+    if (coll->type == RAY_LIST) return ray_i64(0);
+    switch (coll->type) {
+        case RAY_I64:       return ray_i64(0);
+        case RAY_I32:       return ray_i32(0);
+        case RAY_I16:       return ray_i16(0);
+        case RAY_U8:        return ray_u8(0);
+        case RAY_BOOL:      return make_bool(0);
+        case RAY_F64:       return make_f64(0.0);
+        case RAY_DATE:      return ray_date(0);
+        case RAY_TIME:      return ray_time(0);
+        case RAY_TIMESTAMP: return ray_timestamp(0);
+        case RAY_SYM:       return ray_sym(0);
+        case RAY_STR:       return ray_str("", 0);
+        case RAY_GUID: {
+            static const uint8_t zero_guid[16] = {0};
+            return ray_guid(zero_guid);
+        }
+        default:            return ray_i64(0);
+    }
+}
+
 /* Map a binary function element-wise over collections.
  * Both args can be collections (zip-map) or one scalar (broadcast).
  * Produces typed vectors when output is numeric/bool, boxed lists otherwise. */
@@ -198,7 +233,24 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     }
 
     if (len == 0) {
-        /* Return empty I64 vector for empty input */
+        /* Empty collection — no first element to probe, so fabricate a
+         * zero-valued atom of each operand's element type and run `fn`
+         * on it to learn the output type.  Without this the result was
+         * hardcoded to I64 and lost the semantics of type-preserving
+         * ops (e.g. `(xbar empty_TIME_col 10000)` returned an I64 empty
+         * vector instead of a TIME one). */
+        ray_t* la = left_coll  ? zero_atom_for_elem_type(left)  : left;
+        ray_t* ra = right_coll ? zero_atom_for_elem_type(right) : right;
+        ray_t* probe = (la && ra && !RAY_IS_ERR(la) && !RAY_IS_ERR(ra))
+                       ? fn(la, ra) : NULL;
+        if (left_coll  && la) ray_release(la);
+        if (right_coll && ra) ray_release(ra);
+        if (probe && !RAY_IS_ERR(probe) && probe->type < 0) {
+            int8_t t = (int8_t)(-probe->type);
+            ray_release(probe);
+            return ray_vec_new(t, 0);
+        }
+        if (probe && !RAY_IS_ERR(probe)) ray_release(probe);
         return ray_vec_new(RAY_I64, 0);
     }
 
@@ -607,6 +659,18 @@ ray_t* atomic_map_unary(ray_unary_fn fn, ray_t* arg) {
     int64_t len = ray_len(arg);
 
     if (len == 0) {
+        /* Empty — fabricate a zero atom of the element type and run
+         * `fn` to learn the output type; fall back to I64 if the
+         * probe can't resolve a typed atom. */
+        ray_t* z = zero_atom_for_elem_type(arg);
+        ray_t* probe = (z && !RAY_IS_ERR(z)) ? fn(z) : NULL;
+        if (z) ray_release(z);
+        if (probe && !RAY_IS_ERR(probe) && probe->type < 0) {
+            int8_t t = (int8_t)(-probe->type);
+            ray_release(probe);
+            return ray_vec_new(t, 0);
+        }
+        if (probe && !RAY_IS_ERR(probe)) ray_release(probe);
         return ray_vec_new(RAY_I64, 0);
     }
 
@@ -1068,9 +1132,10 @@ ray_t* ray_set_fn(ray_t* name_obj, ray_t* val_expr) {
     if (ray_is_lazy(val))
         val = ray_lazy_materialize(val);
     if (RAY_IS_ERR(val)) return val;
-    if (ray_env_set(name_obj->i64, val) != RAY_OK) {
+    ray_err_t err = ray_env_set(name_obj->i64, val);
+    if (err != RAY_OK) {
         ray_release(val);
-        return ray_error("oom", NULL);
+        return ray_error(ray_err_code_str(err), NULL);
     }
     return val;  /* set returns the value */
 }
@@ -1417,9 +1482,9 @@ op_dup: {
 op_resolve: {
     uint8_t idx = code[ip++];
     ray_t *name_obj = cpool[idx];
-    ray_t *val = ray_env_get(name_obj->i64);
+    ray_t *val = ray_env_resolve(name_obj->i64);
     if (!val) goto vm_error_name;
-    ray_retain(val);
+    /* env_resolve returns an owned ref (rc >= 1); no extra retain needed. */
     PUSH(val);
     DISPATCH();
 }
@@ -1428,9 +1493,8 @@ op_resolve_w: {
     uint16_t idx = (uint16_t)((code[ip] << 8) | code[ip + 1]);
     ip += 2;
     ray_t *name_obj = cpool[idx];
-    ray_t *val = ray_env_get(name_obj->i64);
+    ray_t *val = ray_env_resolve(name_obj->i64);
     if (!val) goto vm_error_name;
-    ray_retain(val);
     PUSH(val);
     DISPATCH();
 }
@@ -2039,6 +2103,20 @@ static void ray_register_builtins(void) {
     register_unary("time",       RAY_FN_NONE, ray_time_clock_fn);
     register_unary("timestamp",  RAY_FN_NONE, ray_timestamp_clock_fn);
 
+    /* Temporal field accessors: unary builtins that map 1:1 onto
+     * ray_temporal_extract.  Registered here so `(ss ts)` / `(dd d)`
+     * participate in the normal call machinery and `ts.ss` / `d.dd`
+     * resolve through env_resolve's "is segment a callable" lookup
+     * instead of a bespoke sym→field table. */
+    register_unary("ss",         RAY_FN_NONE, ray_extract_ss_fn);
+    register_unary("hh",         RAY_FN_NONE, ray_extract_hh_fn);
+    register_unary("minute",     RAY_FN_NONE, ray_extract_minute_fn);
+    register_unary("yyyy",       RAY_FN_NONE, ray_extract_yyyy_fn);
+    register_unary("mm",         RAY_FN_NONE, ray_extract_mm_fn);
+    register_unary("dd",         RAY_FN_NONE, ray_extract_dd_fn);
+    register_unary("dow",        RAY_FN_NONE, ray_extract_dow_fn);
+    register_unary("doy",        RAY_FN_NONE, ray_extract_doy_fn);
+
     /* Eval, parse, print, meta */
     register_unary("eval",       RAY_FN_NONE, ray_eval_builtin_fn);
     register_unary("parse",      RAY_FN_NONE, ray_parse_builtin_fn);
@@ -2190,7 +2268,7 @@ ray_t* ray_eval(ray_t* obj) {
                 if (name_str) ray_release(name_str);
             }
 
-            ray_t* val = ray_env_get(obj->i64);
+            ray_t* val = ray_env_resolve(obj->i64);
             if (!val) {
                 ray_t* ns = ray_sym_str(obj->i64);
                 if (ns) {
@@ -2202,7 +2280,7 @@ ray_t* ray_eval(ray_t* obj) {
                 }
                 goto out;
             }
-            ray_retain(val);
+            /* env_resolve hands back an owned ref; no extra retain. */
             ret = val; goto out;
         }
         ray_retain(obj);

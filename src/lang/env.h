@@ -45,6 +45,16 @@ void     ray_env_destroy(void);
 ray_t*    ray_env_get(int64_t sym_id);
 ray_err_t ray_env_set(int64_t sym_id, ray_t* val);
 
+/* Resolve a name for a Rayfall expression (tree-walking eval or bytecode
+ * op_resolve): returns an OWNED ref (rc >= 1) that the caller must
+ * release, or NULL if undefined.  Unlike ray_env_get which returns a
+ * borrowed ref and leaves refcount management to the caller, env_resolve
+ * retains before returning — so name-resolution sites can drop their
+ * manual ray_retain and still participate in the dotted-sym temporal
+ * extraction path (e.g. `trades.Time.dd`), which allocates fresh values
+ * mid-walk. */
+ray_t*    ray_env_resolve(int64_t sym_id);
+
 /* Prefix lookup: scan global env + keywords for names starting with prefix.
  * Fills results[] with pointers to interned name strings (valid until next
  * sym table mutation).  Returns count of matches (up to max_results).

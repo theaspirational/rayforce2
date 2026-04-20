@@ -32,6 +32,7 @@
 #include "lang/parse.h"
 #include "lang/eval.h"
 #include "lang/format.h"
+#include "ops/temporal.h"
 
 /* Forward-declare runtime API to avoid ray_vm_t redefinition from runtime.h */
 struct ray_runtime_s;
@@ -3213,6 +3214,641 @@ static MunitResult test_rf_null_propagate(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* ---- Dotted-name (namespace) resolution -------------------------------- */
+
+static MunitResult test_dotted_write_read(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set math.pi 3.14)");
+    ASSERT_EQ("math.pi", "3.14");
+    /* The auto-created parent is a plain dict */
+    ASSERT_EQ("math", "{pi: 3.14}");
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_multi_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set math2.pi 3.14)");
+    ray_eval_str("(set math2.e  2.71)");
+    ASSERT_EQ("math2.pi", "3.14");
+    ASSERT_EQ("math2.e",  "2.71");
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_nested(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set cfg.db.host 1)");
+    ray_eval_str("(set cfg.db.port 2)");
+    ASSERT_EQ("cfg.db.host", "1");
+    ASSERT_EQ("cfg.db.port", "2");
+    /* Deep create */
+    ray_eval_str("(set a.b.c.d 42)");
+    ASSERT_EQ("a.b.c.d", "42");
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_update_in_place(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set ns.pi 3.14)");
+    ray_eval_str("(set ns.e  2.71)");
+    ray_eval_str("(set ns.pi 3.14159)");   /* overwrite existing key */
+    ASSERT_EQ("ns.pi", "3.14159");
+    ASSERT_EQ("ns.e",  "2.71");           /* sibling preserved */
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_wrong_type_parent(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set xleaf 5)");
+    /* Writing through a non-dict parent is a type error, not a silent override */
+    ray_t* r = ray_eval_str("(set xleaf.y 1)");
+    munit_assert_true(RAY_IS_ERR(r));
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_missing_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set only.pi 3.14)");
+    /* Reading a missing key under a real dict reports 'undefined' */
+    ray_t* r = ray_eval_str("only.missing");
+    munit_assert_true(RAY_IS_ERR(r));
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_del_removes_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set __dns.x 5)");
+    ray_eval_str("(set __dns.y 10)");
+    ASSERT_EQ("__dns.x", "5");
+    ASSERT_EQ("__dns.y", "10");
+
+    /* del must REMOVE the key, not leave a zombie entry. */
+    ray_eval_str("(del __dns.x)");
+    /* Sibling survives; removed key reports undefined on read. */
+    ASSERT_EQ("__dns.y", "10");
+    ray_t* r = ray_eval_str("__dns.x");
+    munit_assert_true(RAY_IS_ERR(r));
+    /* The dict's cardinality reflects the removal (was 2 keys, now 1). */
+    ASSERT_EQ("(count __dns)", "1");
+
+    /* del on a missing leaf is a no-op (not an error). */
+    ray_t* r2 = ray_eval_str("(del __dns.never_existed)");
+    munit_assert_false(RAY_IS_ERR(r2));
+    ASSERT_EQ("(count __dns)", "1");
+
+    /* del on a missing head is a no-op too. */
+    ray_t* r3 = ray_eval_str("(del __missing.leaf)");
+    munit_assert_false(RAY_IS_ERR(r3));
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_del_nested(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set __abc.b.c 1)");
+    ray_eval_str("(set __abc.b.d 2)");
+    ray_eval_str("(del __abc.b.c)");
+    /* Sibling preserved, deleted key gone, intermediate dict still reachable. */
+    ASSERT_EQ("__abc.b.d", "2");
+    ASSERT_EQ("(count __abc.b)", "1");
+    ray_t* r = ray_eval_str("__abc.b.c");
+    munit_assert_true(RAY_IS_ERR(r));
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_del_cascade(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Deleting the only key in a namespace removes the namespace itself. */
+    ray_eval_str("(set __cascns.only 5)");
+    ASSERT_EQ("__cascns.only", "5");
+    ray_eval_str("(del __cascns.only)");
+    ray_t* r = ray_eval_str("__cascns");
+    munit_assert_true(RAY_IS_ERR(r));   /* namespace gone, not left as {} */
+
+    /* Deep cascade: a.b.c.d is the only key along the whole chain; deleting
+     * it should remove `a` entirely (no stale empty `a` / `a.b` / `a.b.c`
+     * bindings left behind). */
+    ray_eval_str("(set __deep.b.c.d 1)");
+    ray_eval_str("(del __deep.b.c.d)");
+    r = ray_eval_str("__deep");
+    munit_assert_true(RAY_IS_ERR(r));
+
+    /* Cascade stops at a level that still has siblings. */
+    ray_eval_str("(set __mix.b.c.d 1)");
+    ray_eval_str("(set __mix.other 2)");
+    ray_eval_str("(del __mix.b.c.d)");
+    ASSERT_EQ("__mix.other", "2");
+    ASSERT_EQ("(count __mix)", "1");    /* `b` chain cascaded out */
+    r = ray_eval_str("__mix.b");
+    munit_assert_true(RAY_IS_ERR(r));   /* empty `b` should not remain */
+
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_nullable_f64_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Nullable F64 key column: without null-awareness the new hash-based
+     * first-idx path collided the null group with the 0.0 group — F64
+     * null's bit pattern is -0.0, and ray_hash_f64 normalises -0.0 to
+     * +0.0, so hash(null) == hash(0.0) and the null group got a stale
+     * first_idx = -1.  The indices must point to the actual first row
+     * with that Price value (or first null row). */
+    ray_eval_str("(set __nv (table [OrderId Price] (list (til 5) [0.0 0Nf 0.0 0Nf 1.0])))");
+    ray_eval_str("(set __ng (select {from: __nv by: Price}))");
+    ASSERT_EQ("(count __ng)", "3");
+    /* Each group's OrderId must be the first row index where that Price
+     * (or null) appears: 0.0→row0, null→row1, 1.0→row4. */
+    ASSERT_EQ("(at (at __ng 'OrderId) 0)", "0");
+    ASSERT_EQ("(at (at __ng 'OrderId) 1)", "1");
+    ASSERT_EQ("(at (at __ng 'OrderId) 2)", "4");
+    /* The grouped Price column must preserve the null bit for the null
+     * group — not silently collapse to 0.0.  store_typed_elem routes
+     * nulls through ray_vec_set_null which range-checks against vec->len,
+     * so the destination vec's len must be set before the store loop
+     * populates it.  Previously len was assigned after the loop and the
+     * null bit was dropped. */
+    ASSERT_EQ("(nil? (at (at __ng 'Price) 0))", "false");
+    ASSERT_EQ("(nil? (at (at __ng 'Price) 1))", "true");
+    ASSERT_EQ("(nil? (at (at __ng 'Price) 2))", "false");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_computed_key_nullable_nonkey(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Computed key (by: (expr)) takes a third result-build path (lines
+     * around query.c:2120 — ray_group_fn on the computed vector + scatter
+     * non-key columns).  Same hazard as the other sites: dc->len wasn't
+     * set before store_typed_elem, so nullable non-key columns silently
+     * dropped their null bit.
+     *
+     * Use an I64 computed key (`(mod Qty 2)`) so ray_group_fn's scalar
+     * hash path actually merges duplicate buckets — F64 output would fall
+     * back to "every row is its own group" which masks every grouping
+     * bug and lets a broken test pass trivially.  Setup forces:
+     *   - 5 source rows collapse into 2 groups (bucket 1: rows 0,2,4;
+     *     bucket 0: rows 1,3);
+     *   - first-of-group Price for bucket 0 is row 1 which is NULL, so
+     *     the null bit must propagate into the scattered Price column;
+     *   - first-of-group Price for bucket 1 is row 0 = 10.0, checked so
+     *     the fix isn't hiding a cross-slot data corruption. */
+    ray_eval_str("(set __tc (table [Qty Price] (list [1 2 3 4 5] [10.0 0Nf 15.0 20.0 25.0])))");
+    ray_eval_str("(set __cg (select {from: __tc by: (% Qty 2)}))");
+    ASSERT_EQ("(count __cg)", "2");                         /* duplicates merged */
+    ASSERT_EQ("(nil? (at (at __cg 'Price) 0))", "false");   /* bucket 1 — row 0 = 10.0 */
+    ASSERT_EQ("(nil? (at (at __cg 'Price) 1))", "true");    /* bucket 0 — row 1 = null */
+    ASSERT_EQ("(+ 0.0 (at (at __cg 'Price) 0))", "10.0");   /* value preserved correctly */
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_str_nullable_nonkey(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* STR-keyed by-grouping routes through the eval_group fallback
+     * (ray_group_fn → gather first-of-group), which is a separate result-
+     * build site from the scalar-key DAG path.  Same hazard though: the
+     * non-key column's destination vec was filled via store_typed_elem
+     * before its len was set, so nullable non-key columns lost their
+     * null bits on output. */
+    ray_eval_str("(set __ts (table [Tag Price] (list (as 'STR [\"a\" \"b\" \"a\"]) [1.0 0Nf 3.0])))");
+    ray_eval_str("(set __sg (select {from: __ts by: Tag}))");
+    ASSERT_EQ("(count __sg)", "2");
+    /* Group \"a\" covers rows 0,2 (first-of-group → row 0, Price=1.0).
+     * Group \"b\" covers row 1 (Price=null).  The null bit on the
+     * resulting Price column must be preserved. */
+    ASSERT_EQ("(nil? (at (at __sg 'Price) 0))", "false");
+    ASSERT_EQ("(nil? (at (at __sg 'Price) 1))", "true");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_nullable_i64_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Nullable I64 key where a real 0 coexists with nulls — classic
+     * collision scenario for raw-bit hashing of null sentinels. */
+    ray_eval_str("(set __ni (table [Ord Key] (list (til 5) [0 0Nl 0 0Nl 7])))");
+    ray_eval_str("(set __ng (select {from: __ni by: Key}))");
+    ASSERT_EQ("(count __ng)", "3");
+    ASSERT_EQ("(at (at __ng 'Ord) 0)", "0");
+    ASSERT_EQ("(at (at __ng 'Ord) 1)", "1");
+    ASSERT_EQ("(at (at __ng 'Ord) 2)", "4");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_narrow_int_key(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Non-F64 scalar integer columns (I32, I16, I8, BOOL, narrow SYM) hit
+     * the same no-agg first-idx path.  The previous code read the key via
+     * ray_read_sym, which interprets attrs as SYM adaptive width and
+     * silently truncates to 1 byte for plain int columns — so I32 keys
+     * above 255 were wrapped mod 256 before hashing/comparison and the
+     * result table's key column held bogus values.  Group keys > 255 here
+     * forces any regression to truncate and misgroup. */
+    ray_eval_str("(set __niX (table [Age] (list (as 'I32 [300 700 300 700 1200]))))");
+    ray_t* g = ray_eval_str("(select {from: __niX by: Age})");
+    munit_assert_ptr_not_null(g);
+    munit_assert_false(RAY_IS_ERR(g));
+    ray_release(g);
+
+    ASSERT_EQ("(count (select {from: __niX by: Age}))", "3");
+    /* Force the I32 atoms to print as integers so we don't depend on
+     * I32-atom format string rendering. */
+    ASSERT_EQ("(+ 0 (at (at (select {from: __niX by: Age}) 'Age) 0))", "300");
+    ASSERT_EQ("(+ 0 (at (at (select {from: __niX by: Age}) 'Age) 1))", "700");
+    ASSERT_EQ("(+ 0 (at (at (select {from: __niX by: Age}) 'Age) 2))", "1200");
+
+    /* Same idea with RAY_I16. */
+    ray_eval_str("(set __niY (table [Year] (list (as 'I16 [2020 2024 2020 2024]))))");
+    ASSERT_EQ("(count (select {from: __niY by: Year}))", "2");
+    ASSERT_EQ("(+ 0 (at (at (select {from: __niY by: Year}) 'Year) 0))", "2020");
+    ASSERT_EQ("(+ 0 (at (at (select {from: __niY by: Year}) 'Year) 1))", "2024");
+
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_f64_perf(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Build a table with N rows where the F64 key column has N unique values
+     * (0.0, 1.0, 2.0, ...), so every row ends up in its own group.  The old
+     * first-of-group scan was O(N * n_groups) for non-GUID keys — quadratic
+     * on this shape — and hung for tens of seconds at N=200k.  With the
+     * hash-based first-idx path it should finish near-instantly.  The
+     * functional check is that each group has its matching OrderId. */
+    ray_eval_str("(set __sbn 2000)");
+    ray_eval_str("(set __sbf (table [OrderId Price] (list (til __sbn) (as 'F64 (til __sbn)))))");
+    ray_t* g = ray_eval_str("(select {from: __sbf by: Price})");
+    munit_assert_ptr_not_null(g);
+    munit_assert_false(RAY_IS_ERR(g));
+    ray_release(g);
+    /* Every row is its own group. */
+    ASSERT_EQ("(count (select {from: __sbf by: Price}))", "2000");
+    /* Spot-check first-of-group matches OrderId at that row. */
+    ASSERT_EQ("(at (at (select {from: __sbf by: Price}) 'OrderId) 0)",    "0");
+    ASSERT_EQ("(at (at (select {from: __sbf by: Price}) 'OrderId) 1999)", "1999");
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_temporal_atom(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* DATE atom: dotted field access maps to temporal component extract.
+     * The value is days since 2000-01-01, so 10000 lands in 2027-05-19
+     * via Hinnant's civil_from_days decomposition. */
+    ray_eval_str("(set __dt (as 'DATE 10000))");
+    ASSERT_EQ("__dt.yyyy", "2027");
+    ASSERT_EQ("__dt.mm",   "5");
+    ASSERT_EQ("__dt.dd",   "19");
+
+    /* TIMESTAMP atom: 1 hour + 1 minute + 1 second in microseconds. */
+    ray_eval_str("(set __ts (as 'TIMESTAMP 3661000000))");
+    ASSERT_EQ("__ts.hh",     "1");
+    ASSERT_EQ("__ts.minute", "1");
+    ASSERT_EQ("__ts.ss",     "1");
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_temporal_truncate_atom(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* `.date` / `.time` truncate a temporal value to day / second
+     * boundary, returning RAY_TIMESTAMP.  Atom path: 90,000,000,000 us =
+     * 1 day + 1 hour; truncating to day gives exactly 1 day = 86,400 s *
+     * 1e6 us = 86,400,000,000; truncating to second gives the same
+     * microsecond count minus the sub-second remainder (which is 0 for
+     * this choice). */
+    ray_eval_str("(set __tsa (as 'TIMESTAMP 90000000000))");
+    ASSERT_EQ("(as 'I64 __tsa.date)", "86400000000");
+    ASSERT_EQ("(as 'I64 __tsa.time)", "90000000000");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_nonagg_dotted_temporal(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Non-agg output expression using a dotted-temporal ref — e.g.
+     * `s: Timestamp.ss` — must flow through the scatter path the same
+     * way a plain column ref would.  Previously expr_bind_table_names
+     * checked the whole dotted sym against the table schema, found no
+     * column named "Timestamp.ss", and silently skipped binding — so
+     * the subsequent ray_eval fell off the env and reported undefined. */
+    ray_eval_str(
+        "(set __sy (table [Sym Ts] "
+        "(list ['A 'B 'A 'B 'A] "
+        "      (as 'TIMESTAMP [1000000 2000000 3000000 4000000 5000000]))))");
+    ray_t* r = ray_eval_str("(select {from: __sy by: Sym s: Ts.ss})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    ray_release(r);
+    /* 2 groups (A, B).  Each group's `s` list contains the extracted
+     * seconds for its rows: both A rows land in seconds 1/3/5, B in
+     * 2/4 — all within second 0..5 of 2000-01-01 so ss = whole-second
+     * index.  Spot-check lengths match source-row counts (3 and 2). */
+    ASSERT_EQ("(count (select {from: __sy by: Sym s: Ts.ss}))", "2");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_computed_key_many_groups(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: the computed-key fallback used a `fi2[256]` stack
+     * array and silently capped the first-index sweep at 256 groups;
+     * the downstream result-column loops still iterated up to ng2, so
+     * any group beyond 256 read uninitialised stack memory — UB under
+     * ASan, silent corruption otherwise.  500 distinct days is enough
+     * to trigger both the heap fallback and the past-256 range. */
+    ray_eval_str("(set __mn 500)");
+    ray_eval_str(
+        "(set __mt (table [Ts Price] "
+        "(list (as 'TIMESTAMP (* (til __mn) 86400000000)) "
+        "      (as 'F64 (til __mn)))))");
+    ray_t* g = ray_eval_str("(select {from: __mt by: Ts.date})");
+    munit_assert_ptr_not_null(g);
+    munit_assert_false(RAY_IS_ERR(g));
+    ray_release(g);
+    ASSERT_EQ("(count (select {from: __mt by: Ts.date}))", "500");
+    /* Each group has exactly one source row, so the non-key column's
+     * first-of-group value at position gi must equal gi. */
+    ASSERT_EQ("(+ 0.0 (at (at (select {from: __mt by: Ts.date}) 'Price) 499))", "499.0");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_dotted_key_surfaces_key_col(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: (select {from: t by: <computed key>}) with no aggs
+     * used to produce a result missing the grouping-key column — the
+     * computed-key fallback defaulted ckey_name to "+", looked that up
+     * in the source schema, found nothing, and fell through to only
+     * first-of-group source columns.  Users saw their grouped rows
+     * but with no column reporting the *key* that defined each group.
+     *
+     * Fix: derive a column name from the by-expression (tail segment
+     * of a dotted sym; last name arg of a call) and populate it from
+     * the computed_key values at first-of-group indices. */
+    ray_eval_str(
+        "(set __sb (table [OrderId Timestamp] "
+        "(list [1 2 3 4 5 6] "
+        "      (as 'TIMESTAMP [100000 200000 1100000 1200000 2100000 2200000]))))");
+    ray_t* r = ray_eval_str("(select {from: __sb by: Timestamp.ss})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    ray_release(r);
+    /* 3 groups (ss = 0, 1, 2), 3 columns (ss key + 2 source). */
+    ASSERT_EQ("(count (select {from: __sb by: Timestamp.ss}))", "3");
+    ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'ss) 0)", "0");
+    ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'ss) 1)", "1");
+    ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'ss) 2)", "2");
+    /* OrderId column carries first-of-group source values. */
+    ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'OrderId) 0)", "1");
+    ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'OrderId) 1)", "3");
+    ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'OrderId) 2)", "5");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_dotted_key_name_collision(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: when the dotted tail segment name matched a source
+     * column that wasn't the head of the dotted expression, the old
+     * code silently dropped that column from the result and the
+     * method-dispatch lookup during scattered eval found the
+     * (non-callable) local binding instead of the global accessor —
+     * so `Timestamp.ss` first became "undefined" and, once that was
+     * fixed, it still replaced the real `ss` column's data.
+     *
+     * Fix:
+     *   - env.c: method dispatch inside a dotted walk only considers
+     *     RAY_UNARY bindings when it re-scans the scope/global envs,
+     *     so a local column named `ss` no longer shadows the global
+     *     accessor function.
+     *   - query.c: when the dotted tail collides with an unrelated
+     *     source column, promote the key column name to the full
+     *     dotted sym so the source column stays intact. */
+    ray_eval_str(
+        "(set __sc (table [Timestamp ss] "
+        "(list (as 'TIMESTAMP [100000 1100000 2100000]) "
+        "      ['a 'b 'c])))");
+    ray_t* r = ray_eval_str("(select {from: __sc by: Timestamp.ss})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    ray_release(r);
+    /* 3 groups — key column promoted to full dotted name, source ss
+     * preserved as a separate column with first-of-group values. */
+    ASSERT_EQ("(count (select {from: __sc by: Timestamp.ss}))", "3");
+    ASSERT_EQ("(at (at (select {from: __sc by: Timestamp.ss}) 'Timestamp.ss) 0)", "0");
+    ASSERT_EQ("(at (at (select {from: __sc by: Timestamp.ss}) 'Timestamp.ss) 2)", "2");
+    /* Source ss column survives, carrying its first-of-group SYM values.
+     * Compare via sym-literal RHS ('a / 'b / 'c) so the assertion's
+     * own eval_str finds a real sym atom to format. */
+    ASSERT_EQ("(at (at (select {from: __sc by: Timestamp.ss}) 'ss) 0)", "'a");
+    ASSERT_EQ("(at (at (select {from: __sc by: Timestamp.ss}) 'ss) 1)", "'b");
+    ASSERT_EQ("(at (at (select {from: __sc by: Timestamp.ss}) 'ss) 2)", "'c");
+    return MUNIT_OK;
+}
+
+static MunitResult test_atomic_map_empty_sym_str_compare(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: zero_atom_for_elem_type fell back to ray_i64(0) for
+     * RAY_SYM / RAY_STR / RAY_GUID element types, so `(== empty_sym
+     * 'foo)` probed an integer comparison and surfaced an empty I64
+     * vector — a non-empty input would have produced BOOL.  Callers
+     * branching on the output type (e.g. filter builders, DAG type
+     * inference) saw disagreeing schemas for the same expression. */
+    ASSERT_EQ("(type (== (as 'SYM []) 'foo))",   "'B8");
+    ASSERT_EQ("(type (== (as 'STR []) \"a\"))",  "'B8");
+    ASSERT_EQ("(type (== (as 'SYM [foo]) 'foo))","'B8");
+    ASSERT_EQ("(type (== (as 'STR [\"a\"]) \"a\"))", "'B8");
+    /* GUID comparison path — same principle. */
+    ASSERT_EQ("(type (!= (as 'GUID []) (as 'GUID \"00000000-0000-0000-0000-000000000000\")))",
+              "'B8");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_xbar_empty_type(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: atomic_map_{unary,binary}_op returned a hardcoded I64
+     * empty vector when the input collection had zero elements — which
+     * then propagated to the empty-result key-column type.  For
+     * `(xbar TIME_col N)` on an empty table, the key column surfaced
+     * as I64 instead of TIME, so the empty schema disagreed with the
+     * non-empty one (and the source Ts column's type). */
+    ray_eval_str("(set __xe (table [Sym Ts] (list (as 'SYM []) (as 'TIME []))))");
+    ray_t* r = ray_eval_str("(select {from: __xe by: (xbar Ts 10000)})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    ray_release(r);
+    ASSERT_EQ("(count (select {from: __xe by: (xbar Ts 10000)}))", "0");
+    ASSERT_EQ("(type (at (select {from: __xe by: (xbar Ts 10000)}) 'Ts))", "'TIME");
+
+    /* Unary path: dotted `.date` truncate should produce TIMESTAMP on
+     * an empty TIMESTAMP column, not I64 (the tail accessor `.date`
+     * returns TIMESTAMP per ray_temporal_truncate). */
+    ray_eval_str("(set __xe2 (table [Timestamp] (list (as 'TIMESTAMP []))))");
+    ASSERT_EQ("(type (at (select {from: __xe2 by: Timestamp.date}) 'date))", "'TIMESTAMP");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_dotted_key_empty_schema(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: when `select by <dotted>` produced zero groups
+     * (empty source, or all rows filtered out), the empty-result
+     * schema only copied source columns — the key column was dropped
+     * because the old empty-path pulled the key from key_sym, which
+     * is -1 for computed keys.  The non-empty path surfaces an `ss`
+     * column, so the empty path must too, or client code branching on
+     * the result schema misreports the column set. */
+    ray_eval_str("(set __se (table [Timestamp Price] (list (as 'TIMESTAMP []) [])))");
+    ray_t* r = ray_eval_str("(select {from: __se by: Timestamp.ss})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    ray_release(r);
+    ASSERT_EQ("(count (select {from: __se by: Timestamp.ss}))", "0");
+    /* Probe each expected column: `at` on a table returns the column
+     * vector when the column exists (length 0 here), and errors
+     * otherwise.  The empty schema must include the `ss` key column
+     * produced by the dotted expression plus both source columns. */
+    ASSERT_EQ("(count (at (select {from: __se by: Timestamp.ss}) 'ss))", "0");
+    ASSERT_EQ("(type (at (select {from: __se by: Timestamp.ss}) 'ss))", "'I64");
+    ASSERT_EQ("(count (at (select {from: __se by: Timestamp.ss}) 'Timestamp))", "0");
+    ASSERT_EQ("(count (at (select {from: __se by: Timestamp.ss}) 'Price))", "0");
+    return MUNIT_OK;
+}
+
+static MunitResult test_select_by_dotted_temporal_key_nocrash(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: (select {from: t by: Timestamp.date}) used to crash
+     * in group_rows_range because the dotted sym was emitted as a scan
+     * of the non-existent column "Timestamp.date".  After the fix,
+     * either compile-time desugars to scan+trunc, or (runtime path)
+     * the computed-key fallback runs eval + truncate.  Here we assert
+     * the query completes cleanly and collapses 5 rows spanning 3 days
+     * into 3 groups. */
+    ray_eval_str(
+        "(set __tb (table [Timestamp Price] "
+        "(list (as 'TIMESTAMP [0 3600000000 86400000000 90000000000 172800000000]) "
+        "      [1.0 2.0 3.0 4.0 5.0])))");
+    ray_t* r = ray_eval_str("(select {from: __tb by: Timestamp.date})");
+    munit_assert_ptr_not_null(r);
+    munit_assert_false(RAY_IS_ERR(r));
+    ray_release(r);
+    ASSERT_EQ("(count (select {from: __tb by: Timestamp.date}))", "3");
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_temporal_vector(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* DATE vector extraction returns an I64 vector of the same length. */
+    ray_eval_str("(set __dv (as 'DATE [0 366 731]))");
+    /* 2000-01-01, 2001-01-01, 2002-01-01 */
+    ASSERT_EQ("(at __dv.yyyy 0)", "2000");
+    ASSERT_EQ("(at __dv.yyyy 1)", "2001");
+    ASSERT_EQ("(at __dv.yyyy 2)", "2002");
+    ASSERT_EQ("(at __dv.mm 0)",   "1");
+    ASSERT_EQ("(at __dv.dd 0)",   "1");
+    return MUNIT_OK;
+}
+
+static MunitResult test_dag_temporal_extract_nulls(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: DAG-path OP_EXTRACT / OP_DATE_TRUNC (emitted by
+     * compile_expr_dag when a dotted-temporal sym is referenced by a
+     * query) used to decode the raw null-sentinel bytes and emit bogus
+     * I64 / timestamp values *without* setting the output null bit.
+     * The null sentinel for RAY_TIMESTAMP is 0 (distinguished by the
+     * nullmap bit, not the value), so the extract kernel silently
+     * turned every null into `.ss == 0` and lost null-awareness for
+     * all downstream consumers.
+     *
+     * `select {from: t s: Ts.ss}` with no `by:` goes through
+     * compile_expr_dag → exec_extract and surfaces the I64 column
+     * directly, so we can assert that the null bit travels all the
+     * way to the final output column. */
+    ray_eval_str("(set __dvn (as 'TIMESTAMP (list 1000000 0Np 2000000)))");
+    ray_eval_str("(set __dvt (table [Ts] (list __dvn)))");
+
+    /* Non-null rows pass through unchanged. */
+    ASSERT_EQ("(at (at (select {from: __dvt s: Ts.ss}) 's) 0)", "1");
+    ASSERT_EQ("(at (at (select {from: __dvt s: Ts.ss}) 's) 2)", "2");
+    /* Null row must surface as 0Nl, not 0 — this is the regression. */
+    ASSERT_EQ("(at (at (select {from: __dvt s: Ts.ss}) 's) 1)", "0Nl");
+
+    /* OP_DATE_TRUNC path: `.date` truncates to day boundary and emits
+     * a TIMESTAMP column.  Null row must stay 0Np. */
+    ASSERT_EQ("(at (at (select {from: __dvt s: Ts.date}) 's) 1)", "0Np");
+    return MUNIT_OK;
+}
+
+static MunitResult test_temporal_extract_slice_nulls(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Regression: HAS_NULLS lives on the storage owner, not on slice
+     * views — `(input->attrs & RAY_ATTR_HAS_NULLS)` alone misses nulls
+     * when `input` is a slice pointing at a nullable parent.  Mirrors
+     * the slice-aware check used in sort.c / rerank.c / eval.c. */
+    int64_t raw[5] = {1000000, 2000000, 0, 4000000, 5000000};
+    ray_t* v = ray_vec_from_raw(RAY_TIMESTAMP, raw, 5);
+    munit_assert_ptr_not_null(v);
+    ray_vec_set_null(v, 2, true);
+    munit_assert_true((v->attrs & RAY_ATTR_HAS_NULLS) != 0);
+    munit_assert_true(ray_vec_is_null(v, 2));
+
+    /* Slice [1..4): {2_000_000, null, 4_000_000}.  Slice itself does
+     * not carry HAS_NULLS; only the parent does. */
+    ray_t* s = ray_vec_slice(v, 1, 3);
+    munit_assert_ptr_not_null(s);
+    munit_assert_false(RAY_IS_ERR(s));
+    munit_assert_true((s->attrs & RAY_ATTR_SLICE) != 0);
+    munit_assert_false((s->attrs & RAY_ATTR_HAS_NULLS) != 0);
+    munit_assert_true(ray_vec_is_null(s, 1));
+
+    /* Extract seconds.  Without slice-aware null detection this path
+     * decoded raw=0 at index 1 and emitted `ss=0` with no null bit. */
+    ray_t* ss = ray_temporal_extract(s, RAY_EXTRACT_SECOND);
+    munit_assert_ptr_not_null(ss);
+    munit_assert_false(RAY_IS_ERR(ss));
+    munit_assert_int(ss->len, ==, 3);
+    munit_assert_true(ray_vec_is_null(ss, 1));
+    munit_assert_false(ray_vec_is_null(ss, 0));
+    munit_assert_false(ray_vec_is_null(ss, 2));
+    int64_t* out = (int64_t*)ray_data(ss);
+    munit_assert_int(out[0], ==, 2);
+    munit_assert_int(out[2], ==, 4);
+
+    /* Same shape for truncate (.date / .time path). */
+    ray_t* tr = ray_temporal_truncate(s, RAY_EXTRACT_DAY);
+    munit_assert_ptr_not_null(tr);
+    munit_assert_false(RAY_IS_ERR(tr));
+    munit_assert_true(ray_vec_is_null(tr, 1));
+
+    ray_release(tr);
+    ray_release(ss);
+    ray_release(s);
+    ray_release(v);
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_temporal_table_column(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* t.col.field — chains through table → column → temporal extraction.
+     * Exercises the three probe steps in ray_env_resolve's dotted walk
+     * (scope/global for t, table column for Date, temporal extract for
+     * yyyy / mm / dd). */
+    ray_eval_str("(set __tt (table [Date Price] (list (as 'DATE [0 366 731]) [100.0 200.0 300.0])))");
+    ASSERT_EQ("(at __tt.Date.yyyy 0)", "2000");
+    ASSERT_EQ("(at __tt.Date.yyyy 2)", "2002");
+    ASSERT_EQ("(at __tt.Date.mm 0)",   "1");
+
+    /* Missing temporal field still reports undefined (matches every
+     * other "nothing matched" dotted failure). */
+    ray_t* r = ray_eval_str("__tt.Date.nope");
+    munit_assert_true(RAY_IS_ERR(r));
+    return MUNIT_OK;
+}
+
+static MunitResult test_dotted_table_column(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_eval_str("(set __tbl (table [OrderId Price] (list [10 20 30] [1.0 2.0 3.0])))");
+    /* t.col returns the column; it behaves as a vector downstream. */
+    ASSERT_EQ("(at __tbl.OrderId 0)", "10");
+    ASSERT_EQ("(at __tbl.OrderId 2)", "30");
+    ASSERT_EQ("(at __tbl.Price 1)",   "2.0");
+    ASSERT_EQ("(sum __tbl.Price)",    "6.0");
+    /* Missing column surfaces as 'undefined' (same as a missing dict key). */
+    ray_t* r = ray_eval_str("__tbl.NotAColumn");
+    munit_assert_true(RAY_IS_ERR(r));
+    return MUNIT_OK;
+}
+
 static MunitTest lang_tests[] = {
     { "/fn_unary",   test_fn_unary,   lang_setup, lang_teardown, 0, NULL },
     { "/fn_binary",  test_fn_binary,  lang_setup, lang_teardown, 0, NULL },
@@ -3395,6 +4031,36 @@ static MunitTest lang_tests[] = {
     { "/rf/alter",                 test_rf_alter,         lang_setup, lang_teardown, 0, NULL },
     { "/rf/null",                  test_rf_null,          lang_setup, lang_teardown, 0, NULL },
     { "/rf/null_propagate",        test_rf_null_propagate, lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/write_read",        test_dotted_write_read,        lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/multi_key",         test_dotted_multi_key,         lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/nested",            test_dotted_nested,            lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/update_in_place",   test_dotted_update_in_place,   lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/wrong_type_parent", test_dotted_wrong_type_parent, lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/missing_key",       test_dotted_missing_key,       lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/del_removes_key",   test_dotted_del_removes_key,   lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/del_nested",        test_dotted_del_nested,        lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/del_cascade",       test_dotted_del_cascade,       lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/table_column",      test_dotted_table_column,      lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/temporal_atom",     test_dotted_temporal_atom,     lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/temporal_vector",   test_dotted_temporal_vector,   lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/dag_temporal_nulls", test_dag_temporal_extract_nulls, lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/temporal_slice_nulls", test_temporal_extract_slice_nulls, lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/temporal_truncate_atom", test_dotted_temporal_truncate_atom, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_dotted_temporal_key_nocrash", test_select_by_dotted_temporal_key_nocrash, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_dotted_key_surfaces_key_col", test_select_by_dotted_key_surfaces_key_col, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_dotted_key_name_collision", test_select_by_dotted_key_name_collision, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_dotted_key_empty_schema", test_select_by_dotted_key_empty_schema, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_xbar_empty_type", test_select_by_xbar_empty_type, lang_setup, lang_teardown, 0, NULL },
+    { "/atomic_map_empty_sym_str_compare", test_atomic_map_empty_sym_str_compare, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_computed_key_many_groups",    test_select_by_computed_key_many_groups,    lang_setup, lang_teardown, 0, NULL },
+    { "/select_nonagg_dotted_temporal",         test_select_nonagg_dotted_temporal,         lang_setup, lang_teardown, 0, NULL },
+    { "/dotted/temporal_table_column", test_dotted_temporal_table_column, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_f64_perf",       test_select_by_f64_perf,       lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_narrow_int_key", test_select_by_narrow_int_key, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_nullable_f64_key", test_select_by_nullable_f64_key, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_nullable_i64_key", test_select_by_nullable_i64_key, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_str_nullable_nonkey", test_select_by_str_nullable_nonkey, lang_setup, lang_teardown, 0, NULL },
+    { "/select_by_computed_key_nullable_nonkey", test_select_by_computed_key_nullable_nonkey, lang_setup, lang_teardown, 0, NULL },
     { "/rf/set_ops",               test_rf_set_ops,       lang_setup, lang_teardown, 0, NULL },
     { "/rf/cast",                  test_rf_cast,          lang_setup, lang_teardown, 0, NULL },
     { "/rf/lambda",                test_rf_lambda,        lang_setup, lang_teardown, 0, NULL },
