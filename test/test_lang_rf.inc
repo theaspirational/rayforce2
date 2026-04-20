@@ -3311,6 +3311,22 @@ static MunitResult test_rf_serde(const void* params, void* fixture) {
     (void)params; (void)fixture;
 
     ASSERT_EQ("(de (ser null))", "null");
+
+    /* Typed null atoms must survive a serialize/deserialize roundtrip.
+     * Regression for (de (ser 0Nl)) -> 0 and friends. */
+    ASSERT_EQ("(de (ser 0Nl))", "0Nl");
+    ASSERT_EQ("(de (ser 0Nf))", "0Nf");
+    ASSERT_EQ("(de (ser 0Ni))", "0Ni");
+    ASSERT_EQ("(de (ser 0Nh))", "0Nh");
+    /* 0Nb isn't a parseable literal in Rayfall yet — covered at the C
+     * level by test_store.c:/serde_typed_null_atoms. */
+
+    /* Non-null atoms still roundtrip cleanly. */
+    ASSERT_EQ("(de (ser 42))", "42");
+    ASSERT_EQ("(de (ser 3.14))", "3.14");
+    ASSERT_EQ("(de (ser 'hello))", "'hello");
+    ASSERT_EQ("(de (ser \"world\"))", "\"world\"");
+
     return MUNIT_OK;
 }
 
