@@ -3319,8 +3319,27 @@ static MunitResult test_rf_reserved_namespace(const void* params, void* fixture)
      * and the call path works.  (Rayfall reports function `type` as
      * `'?` regardless of arity — so we exercise by calling, which is
      * what actually matters here.) */
-    /* .sys.gc returns 0 on success — doubles as a binding-exists probe. */
+    /* .sys.gc returns 0 on success — doubles as a binding-exists probe.
+     * Registered as variadic so both (.sys.gc) and (.sys.gc 0) work;
+     * other .sys.* info builtins follow the same convention. */
+    ASSERT_EQ("(.sys.gc)",   "0");
     ASSERT_EQ("(.sys.gc 0)", "0");
+    ASSERT_EQ("(count (.sys.info))",  "3");
+    ASSERT_EQ("(count (.sys.mem))",   "5");
+    ASSERT_EQ("(count (.sys.build))", "2");
+
+    /* The namespace roots themselves are real dicts — typing just
+     * `.sys` at the REPL returns a dict with every `.sys.*` entry
+     * accessible via dict key.  This replaces the earlier "flat sym
+     * with leading-dot magic" bookkeeping. */
+    ASSERT_EQ("(type .sys)", "'DICT");
+    ASSERT_EQ("(type .os)",  "'DICT");
+    ASSERT_EQ("(type .ipc)", "'DICT");
+    ASSERT_EQ("(type .csv)", "'DICT");
+    ASSERT_EQ("(count .sys)", "5");  /* gc, exec, build, mem, info */
+    ASSERT_EQ("(count .os)",  "2");  /* getenv, setenv */
+    ASSERT_EQ("(count .ipc)", "3");  /* open, close, send */
+    ASSERT_EQ("(count .csv)", "2");  /* read, write */
     /* OS env round-trip: set a key, read it back. */
     ray_eval_str("(.os.setenv \"RAYF_NS_TEST\" \"hello\")");
     ASSERT_EQ("(.os.getenv \"RAYF_NS_TEST\")", "\"hello\"");

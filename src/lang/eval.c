@@ -1934,41 +1934,83 @@ vm_error_cleanup: {
  * Builtin registration
  * ══════════════════════════════════════════ */
 
-static void register_binary(const char* name, uint8_t attrs, ray_binary_fn fn) {
+/* Bind `obj` under `name` in the global env.  For reserved-namespace
+ * names like `.sys.gc` the first segment (`.sys`) is a real dict in
+ * the env holding `[gc, fn]` pairs — typing `.sys` alone at the REPL
+ * returns the whole dict, and `.sys.gc` resolves through the regular
+ * dotted segment walk in env_resolve.  For regular names (no leading
+ * dot) this is just ray_env_bind.
+ *
+ * Only 2-level namespaces are used right now (.sys.gc, .os.setenv, …)
+ * so the bookkeeping below does not build nested child dicts — nsegs
+ * is asserted to be 2.  Adding deeper paths would need additional
+ * rebind logic for intermediate dicts. */
+static void reg_bind(const char* name, ray_t* obj) {
     int64_t sym = ray_sym_intern(name, strlen(name));
-    ray_t* obj = ray_fn_binary(name, attrs, fn);
+    if (name[0] == '.' && ray_sym_is_dotted(sym)) {
+        const int64_t* segs;
+        int nsegs = ray_sym_segs(sym, &segs);
+        assert(nsegs == 2 && "reg_bind only supports 2-level reserved namespaces");
+        int64_t root_sym = segs[0];     /* e.g. sym-id for `.sys` */
+        int64_t leaf_sym = segs[1];     /* e.g. sym-id for `gc`   */
+
+        /* Take an owned reference to the namespace dict — either create
+         * fresh (refcount 1) or retain the existing env binding. */
+        ray_t* root = ray_env_get(root_sym);
+        if (root) {
+            ray_retain(root);
+        } else {
+            root = ray_list_new(0);
+            assert(root && !RAY_IS_ERR(root));
+            root->attrs |= RAY_ATTR_DICT;
+        }
+
+        /* Append [leaf_key, fn].  ray_list_append may COW or realloc
+         * and return a different pointer; the final `root` value is
+         * what we must rebind into the env. */
+        ray_t* leaf_key = ray_sym(leaf_sym);
+        root = ray_list_append(root, leaf_key);
+        root = ray_list_append(root, obj);
+        ray_release(leaf_key);
+
+        /* ray_env_bind retains `root` and releases the old binding. */
+        assert(ray_env_bind(root_sym, root) == RAY_OK);
+        ray_release(root);
+        return;
+    }
     assert(ray_env_bind(sym, obj) == RAY_OK);
+}
+
+static void register_binary(const char* name, uint8_t attrs, ray_binary_fn fn) {
+    ray_t* obj = ray_fn_binary(name, attrs, fn);
+    reg_bind(name, obj);
     ray_release(obj);
 }
 
 /* Register binary with a DAG opcode for vectorized execution */
 static void register_binary_op(const char* name, uint8_t attrs, ray_binary_fn fn, uint16_t opcode) {
-    int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_binary(name, attrs, fn);
     RAY_FN_SET_OPCODE(obj, opcode);
-    assert(ray_env_bind(sym, obj) == RAY_OK);
+    reg_bind(name, obj);
     ray_release(obj);
 }
 
 static void register_unary(const char* name, uint8_t attrs, ray_unary_fn fn) {
-    int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_unary(name, attrs, fn);
-    assert(ray_env_bind(sym, obj) == RAY_OK);
+    reg_bind(name, obj);
     ray_release(obj);
 }
 
 static void register_unary_op(const char* name, uint8_t attrs, ray_unary_fn fn, uint16_t opcode) {
-    int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_unary(name, attrs, fn);
     RAY_FN_SET_OPCODE(obj, opcode);
-    assert(ray_env_bind(sym, obj) == RAY_OK);
+    reg_bind(name, obj);
     ray_release(obj);
 }
 
 static void register_vary(const char* name, uint8_t attrs, ray_vary_fn fn) {
-    int64_t sym = ray_sym_intern(name, strlen(name));
     ray_t* obj = ray_fn_vary(name, attrs, fn);
-    assert(ray_env_bind(sym, obj) == RAY_OK);
+    reg_bind(name, obj);
     ray_release(obj);
 }
 
@@ -2155,7 +2197,7 @@ static void ray_register_builtins(void) {
     /* System builtins — bound under the reserved `.sys.*` namespace so
      * user code can't shadow them and a glance at the name identifies
      * the category. */
-    register_unary(".sys.gc",   RAY_FN_NONE,        ray_gc_fn);
+    register_vary (".sys.gc",   RAY_FN_NONE,        ray_gc_fn);
     register_unary(".sys.exec", RAY_FN_RESTRICTED,  ray_system_fn);
 
     /* OS env / process interaction under `.os.*` */
@@ -2206,11 +2248,11 @@ static void ray_register_builtins(void) {
     /* del, modify, pivot remain top-level language primitives.
      * Runtime/heap introspection moves under `.sys.*`. */
     register_vary("del",          RAY_FN_SPECIAL_FORM | RAY_FN_RESTRICTED, ray_del_fn);
-    register_unary(".sys.build", RAY_FN_NONE, ray_internals_fn);
-    register_unary(".sys.mem",   RAY_FN_NONE, ray_memstat_fn);
-    register_vary("modify",      RAY_FN_RESTRICTED, ray_modify_fn);
-    register_vary("pivot",       RAY_FN_NONE, ray_pivot_fn);
-    register_unary(".sys.info",  RAY_FN_NONE, ray_sysinfo_fn);
+    register_vary(".sys.build", RAY_FN_NONE, ray_internals_fn);
+    register_vary(".sys.mem",   RAY_FN_NONE, ray_memstat_fn);
+    register_vary("modify",     RAY_FN_RESTRICTED, ray_modify_fn);
+    register_vary("pivot",      RAY_FN_NONE, ray_pivot_fn);
+    register_vary(".sys.info",  RAY_FN_NONE, ray_sysinfo_fn);
     register_unary("sym-name",   RAY_FN_NONE, ray_sym_name_fn);
     register_binary("unify",     RAY_FN_NONE, ray_unify_fn);
     register_binary("xrank",     RAY_FN_NONE, ray_xrank_fn);

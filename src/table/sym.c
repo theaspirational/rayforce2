@@ -346,18 +346,29 @@ static bool sym_cache_segments(uint32_t new_id, const char* str, size_t len) {
         return true;
     }
 
-    /* Inspect: validate + per-segment probe. */
-    if (str[0] == '.' || str[len - 1] == '.') {
+    /* Validate structure.  Trailing dot → not dotted.  Leading `.` is
+     * allowed ONLY when followed by another dot (e.g. `.sys.gc`) —
+     * in that case segment 0 includes the leading dot (`.sys`), so
+     * reserved-namespace names resolve against their root dict via
+     * the regular segment walk. */
+    if (str[len - 1] == '.') {
         g_sym.scanned[word] |= bit;
         return true;
     }
-    size_t dot_count = 0;
-    for (size_t i = 0; i < len; i++) if (str[i] == '.') dot_count++;
-    if (dot_count + 1 > 255) {
+    bool leading_dot = (str[0] == '.');
+    if (leading_dot) {
+        /* `.sys` alone (no second dot) is a plain name. */
+        const char* second = (const char*)memchr(str + 1, '.', len - 1);
+        if (!second) { g_sym.scanned[word] |= bit; return true; }
+    }
+    size_t sep_dots = 0;
+    for (size_t i = (leading_dot ? 1 : 0); i < len; i++)
+        if (str[i] == '.') sep_dots++;
+    if (sep_dots + 1 > 255) {
         g_sym.scanned[word] |= bit;
         return true;
     }
-    uint8_t nsegs = (uint8_t)(dot_count + 1);
+    uint8_t nsegs = (uint8_t)(sep_dots + 1);
 
     struct { const char* p; size_t len; uint32_t hash; int64_t id; } descs[256];
     uint32_t new_seg_count = 0;
@@ -367,7 +378,13 @@ static bool sym_cache_segments(uint32_t new_id, const char* str, size_t len) {
         size_t remaining = len;
         uint8_t i = 0;
         while (remaining && i < nsegs) {
-            const char* dot = (const char*)memchr(p, '.', remaining);
+            /* Segment 0 starts at str[0] but skips the leading `.` when
+             * searching for the segment-terminating dot — so seg 0 of
+             * `.sys.gc` is `.sys`, not `` (empty). */
+            size_t skip = (i == 0 && leading_dot) ? 1 : 0;
+            const char* dot = remaining > skip
+                ? (const char*)memchr(p + skip, '.', remaining - skip)
+                : NULL;
             size_t seg_len = dot ? (size_t)(dot - p) : remaining;
             if (seg_len == 0) { g_sym.scanned[word] |= bit; return true; }
             uint32_t h = (uint32_t)ray_hash_bytes(p, seg_len);
@@ -567,22 +584,36 @@ static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len) {
 
     const char* first_dot = (const char*)memchr(str, '.', len);
     if (first_dot) {
-        /* Reject leading / trailing / empty segments; treat as plain. */
-        bool valid = (str[0] != '.') && (str[len - 1] != '.');
-        size_t dot_count = 0;
+        /* Dotted-name rules (parallel to sym_cache_segments):
+         *   - Trailing dot            → plain (not dotted).
+         *   - Leading dot alone       → plain (`.sys` with no inner dot).
+         *   - Leading dot + inner dot → segment 0 is `.<head>` including
+         *                                the leading dot.  This is how
+         *                                reserved-namespace names like
+         *                                `.sys.gc` resolve against the
+         *                                `.sys` root dict. */
+        bool valid = str[len - 1] != '.';
+        bool leading_dot = (str[0] == '.');
+        if (valid && leading_dot) {
+            const char* second = (const char*)memchr(str + 1, '.', len - 1);
+            if (!second) valid = false;
+        }
+        size_t sep_dots = 0;
         if (valid) {
-            for (size_t i = 0; i < len; i++) if (str[i] == '.') dot_count++;
-            if (dot_count + 1 > 255) valid = false;
+            for (size_t i = (leading_dot ? 1 : 0); i < len; i++)
+                if (str[i] == '.') sep_dots++;
+            if (sep_dots + 1 > 255) valid = false;
         }
         if (valid) {
-            /* Probe each segment; count new ones and the arena bytes
-             * they will consume at commit time. */
-            nsegs = (uint8_t)(dot_count + 1);
+            nsegs = (uint8_t)(sep_dots + 1);
             const char* p = str;
             size_t remaining = len;
             uint8_t i = 0;
             while (remaining && i < nsegs) {
-                const char* dot = (const char*)memchr(p, '.', remaining);
+                size_t skip = (i == 0 && leading_dot) ? 1 : 0;
+                const char* dot = remaining > skip
+                    ? (const char*)memchr(p + skip, '.', remaining - skip)
+                    : NULL;
                 size_t seg_len = dot ? (size_t)(dot - p) : remaining;
                 if (seg_len == 0) { valid = false; break; }
                 uint32_t seg_hash = (uint32_t)ray_hash_bytes(p, seg_len);

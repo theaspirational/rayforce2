@@ -216,8 +216,9 @@ ray_t* ray_meta_fn(ray_t* x) {
     return dict;
 }
 
-/* (gc) -- no-op garbage collection trigger, return 0 */
-ray_t* ray_gc_fn(ray_t* x) { (void)x; return ray_i64(0); }
+/* (.sys.gc) -- no-op garbage collection trigger, return 0.  Variadic
+ * so the call site can be (.sys.gc) without the dummy-arg ceremony. */
+ray_t* ray_gc_fn(ray_t** args, int64_t n) { (void)args; (void)n; return ray_i64(0); }
 
 /* (system cmd) -- run shell command, return exit code */
 ray_t* ray_system_fn(ray_t* x) {
@@ -366,9 +367,9 @@ ray_t* ray_env_fn(ray_t* x) {
     return dict;
 }
 
-/* (internals) -- return dict with internal build information */
-ray_t* ray_internals_fn(ray_t* x) {
-    (void)x;
+/* (.sys.build) -- return dict with internal build information */
+ray_t* ray_internals_fn(ray_t** args, int64_t n) {
+    (void)args; (void)n;
     ray_t* dict = ray_list_new(4);
     if (RAY_IS_ERR(dict)) return dict;
     dict->attrs |= RAY_ATTR_DICT;
@@ -396,9 +397,9 @@ ray_t* ray_internals_fn(ray_t* x) {
     return dict;
 }
 
-/* (memstat) -- return dict with memory allocator statistics */
-ray_t* ray_memstat_fn(ray_t* x) {
-    (void)x;
+/* (.sys.mem) -- return dict with memory allocator statistics */
+ray_t* ray_memstat_fn(ray_t** args, int64_t n) {
+    (void)args; (void)n;
     ray_mem_stats_t st;
     ray_mem_stats(&st);
 
@@ -439,8 +440,8 @@ ray_t* ray_memstat_fn(ray_t* x) {
     return dict;
 }
 
-ray_t* ray_sysinfo_fn(ray_t* x) {
-    (void)x;
+ray_t* ray_sysinfo_fn(ray_t** args, int64_t n) {
+    (void)args; (void)n;
     ray_t* dict = ray_list_new(6);
     if (RAY_IS_ERR(dict)) return dict;
     dict->attrs |= RAY_ATTR_DICT;
