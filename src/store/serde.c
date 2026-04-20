@@ -129,27 +129,30 @@ int64_t ray_serde_size(ray_t* obj) {
 
     int8_t type = obj->type;
 
-    /* Atoms (negative type) */
+    /* Atoms (negative type).  Format: type(1) + flags(1) + value-bytes.
+     * `flags` carries the typed-null bit so a deserialize round-trip
+     * restores 0Nl/0Nf/0Nd/0Nt etc. instead of decoding the zero-value
+     * payload as a plain atom (see ray_typed_null / RAY_ATOM_IS_NULL). */
     if (type < 0) {
         int8_t base = -type;
         switch (base) {
         case RAY_BOOL:
-        case RAY_U8:        return 1 + 1;
-        case RAY_I16:       return 1 + 2;
+        case RAY_U8:        return 1 + 1 + 1;
+        case RAY_I16:       return 1 + 1 + 2;
         case RAY_I32:
         case RAY_DATE:
         case RAY_TIME:
-        case RAY_F32:       return 1 + 4;
+        case RAY_F32:       return 1 + 1 + 4;
         case RAY_I64:
         case RAY_TIMESTAMP:
-        case RAY_F64:       return 1 + 8;
-        case RAY_GUID:      return 1 + 16;
+        case RAY_F64:       return 1 + 1 + 8;
+        case RAY_GUID:      return 1 + 1 + 16;
         case RAY_SYM: {
             ray_t* s = ray_sym_str(obj->i64);
-            return 1 + (s ? (int64_t)ray_str_len(s) : 0) + 1; /* +1 for null terminator */
+            return 1 + 1 + (s ? (int64_t)ray_str_len(s) : 0) + 1; /* +1 for null terminator */
         }
         case RAY_STR: {
-            return 1 + 8 + (int64_t)ray_str_len(obj);
+            return 1 + 1 + 8 + (int64_t)ray_str_len(obj);
         }
         default: return 0;
         }
@@ -253,38 +256,43 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
     buf[0] = (uint8_t)type;
     buf++;
 
-    /* Atoms */
+    /* Atoms — format: type(1) + flags(1) + value-bytes.  `flags` bit 0
+     * carries the typed-null marker (nullmap[0] & 1 on the source atom)
+     * so (de (ser 0Nl)) roundtrips instead of decoding as plain 0. */
     if (type < 0) {
+        uint8_t aflags = (uint8_t)(obj->nullmap[0] & 1);
+        buf[0] = aflags;
+        buf++;
         int8_t base = -type;
         switch (base) {
         case RAY_BOOL:
         case RAY_U8:
             buf[0] = obj->u8;
-            return 2;
+            return 1 + 1 + 1;
         case RAY_I16:
             memcpy(buf, &obj->i16, 2);
-            return 3;
+            return 1 + 1 + 2;
         case RAY_I32:
         case RAY_DATE:
         case RAY_TIME:
             memcpy(buf, &obj->i32, 4);
-            return 5;
+            return 1 + 1 + 4;
         case RAY_F32:
             memcpy(buf, &obj->i32, 4); /* same 4-byte slot */
-            return 5;
+            return 1 + 1 + 4;
         case RAY_I64:
         case RAY_TIMESTAMP:
             memcpy(buf, &obj->i64, 8);
-            return 9;
+            return 1 + 1 + 8;
         case RAY_F64:
             memcpy(buf, &obj->f64, 8);
-            return 9;
+            return 1 + 1 + 8;
         case RAY_GUID: {
             /* GUID atom stored via obj pointer to 16-byte data */
             ray_t* gv = obj->obj;
             if (gv) memcpy(buf, ray_data(gv), 16);
             else    memset(buf, 0, 16);
-            return 17;
+            return 1 + 1 + 16;
         }
         case RAY_SYM: {
             ray_t* s = ray_sym_str(obj->i64);
@@ -292,10 +300,10 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
                 size_t slen = ray_str_len(s);
                 memcpy(buf, ray_str_ptr(s), slen);
                 buf[slen] = '\0';
-                return 1 + (int64_t)slen + 1;
+                return 1 + 1 + (int64_t)slen + 1;
             }
             buf[0] = '\0';
-            return 2;
+            return 1 + 1 + 1;
         }
         case RAY_STR: {
             size_t slen = ray_str_len(obj);
@@ -304,7 +312,7 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
             int64_t n = (int64_t)slen;
             memcpy(buf, &n, 8);
             memcpy(buf + 8, p, slen);
-            return 1 + 8 + (int64_t)slen;
+            return 1 + 1 + 8 + (int64_t)slen;
         }
         default: return 0;
         }
@@ -488,52 +496,68 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
     /* Null */
     if ((uint8_t)type == RAY_SERDE_NULL) return NULL;
 
-    /* Atoms */
+    /* Atoms — read 1-byte flags (typed-null bit) before the value.  If
+     * the null bit is set we always return ray_typed_null(type) regardless
+     * of the value bytes, which are still read/skipped to keep the buffer
+     * position in sync with the serialized length. */
     if (type < 0) {
+        if (*len < 1) return ray_error("domain", NULL);
+        uint8_t aflags = buf[0];
+        buf++; (*len)--;
+        bool is_null = (aflags & 1) != 0;
         int8_t base = -type;
         switch (base) {
         case RAY_BOOL:
             if (*len < 1) return ray_error("domain", NULL);
             (*len)--;
-            return ray_bool(buf[0]);
+            return is_null ? ray_typed_null(type) : ray_bool(buf[0]);
         case RAY_U8:
             if (*len < 1) return ray_error("domain", NULL);
             (*len)--;
-            return ray_u8(buf[0]);
+            return is_null ? ray_typed_null(type) : ray_u8(buf[0]);
         case RAY_I16:
             if (*len < 2) return ray_error("domain", NULL);
-            { int16_t v; memcpy(&v, buf, 2); *len -= 2; return ray_i16(v); }
+            { int16_t v; memcpy(&v, buf, 2); *len -= 2;
+              return is_null ? ray_typed_null(type) : ray_i16(v); }
         case RAY_I32:
             if (*len < 4) return ray_error("domain", NULL);
-            { int32_t v; memcpy(&v, buf, 4); *len -= 4; return ray_i32(v); }
+            { int32_t v; memcpy(&v, buf, 4); *len -= 4;
+              return is_null ? ray_typed_null(type) : ray_i32(v); }
         case RAY_DATE:
             if (*len < 4) return ray_error("domain", NULL);
-            { int32_t v; memcpy(&v, buf, 4); *len -= 4; return ray_date((int64_t)v); }
+            { int32_t v; memcpy(&v, buf, 4); *len -= 4;
+              return is_null ? ray_typed_null(type) : ray_date((int64_t)v); }
         case RAY_TIME:
             if (*len < 4) return ray_error("domain", NULL);
-            { int32_t v; memcpy(&v, buf, 4); *len -= 4; return ray_time((int64_t)v); }
+            { int32_t v; memcpy(&v, buf, 4); *len -= 4;
+              return is_null ? ray_typed_null(type) : ray_time((int64_t)v); }
         case RAY_F32:
             if (*len < 4) return ray_error("domain", NULL);
             { float v; memcpy(&v, buf, 4); *len -= 4;
-              return ray_f64((double)v); /* promote to f64 atom */ }
+              return is_null ? ray_typed_null(-RAY_F64)
+                             : ray_f64((double)v); /* promote to f64 atom */ }
         case RAY_I64:
             if (*len < 8) return ray_error("domain", NULL);
-            { int64_t v; memcpy(&v, buf, 8); *len -= 8; return ray_i64(v); }
+            { int64_t v; memcpy(&v, buf, 8); *len -= 8;
+              return is_null ? ray_typed_null(type) : ray_i64(v); }
         case RAY_TIMESTAMP:
             if (*len < 8) return ray_error("domain", NULL);
-            { int64_t v; memcpy(&v, buf, 8); *len -= 8; return ray_timestamp(v); }
+            { int64_t v; memcpy(&v, buf, 8); *len -= 8;
+              return is_null ? ray_typed_null(type) : ray_timestamp(v); }
         case RAY_F64:
             if (*len < 8) return ray_error("domain", NULL);
-            { double v; memcpy(&v, buf, 8); *len -= 8; return ray_f64(v); }
+            { double v; memcpy(&v, buf, 8); *len -= 8;
+              return is_null ? ray_typed_null(type) : ray_f64(v); }
         case RAY_GUID:
             if (*len < 16) return ray_error("domain", NULL);
             *len -= 16;
-            return ray_guid(buf);
+            return is_null ? ray_typed_null(type) : ray_guid(buf);
         case RAY_SYM: {
             size_t slen = safe_strlen(buf, *len);
             if ((int64_t)slen >= *len) return ray_error("domain", NULL);
-            int64_t id = ray_sym_intern((const char*)buf, slen);
             *len -= (int64_t)slen + 1;
+            if (is_null) return ray_typed_null(type);
+            int64_t id = ray_sym_intern((const char*)buf, slen);
             return ray_sym(id);
         }
         case RAY_STR: {
@@ -541,9 +565,9 @@ ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
             int64_t slen; memcpy(&slen, buf, 8);
             buf += 8; *len -= 8;
             if (*len < slen || slen < 0) return ray_error("domain", NULL);
-            ray_t* s = ray_str((const char*)buf, (size_t)slen);
             *len -= slen;
-            return s;
+            if (is_null) return ray_typed_null(type);
+            return ray_str((const char*)buf, (size_t)slen);
         }
         default:
             return ray_error("type", NULL);

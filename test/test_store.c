@@ -1579,6 +1579,67 @@ static MunitResult test_serde_null_roundtrip(const void* params, void* fixture) 
     return MUNIT_OK;
 }
 
+/* ---- test_serde_typed_null_atoms ---------------------------------------- */
+
+static MunitResult test_serde_typed_null_atoms(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Typed null atoms (0Nl, 0Nf, 0Nd, 0Nt, 0Ni, ...) must roundtrip as
+     * typed nulls.  Before the fix, the atom wire format carried no null
+     * marker, so (de (ser 0Nl)) decoded as plain ray_i64(0) and silently
+     * lost the null bit.  The fix adds a 1-byte flags field after the
+     * type byte on the atom path. */
+
+    const int8_t atom_types[] = {
+        -RAY_I64, -RAY_F64, -RAY_DATE, -RAY_TIME, -RAY_TIMESTAMP,
+        -RAY_I32, -RAY_I16, -RAY_BOOL, -RAY_U8, -RAY_SYM, -RAY_STR,
+    };
+    for (size_t i = 0; i < sizeof(atom_types)/sizeof(atom_types[0]); i++) {
+        int8_t t = atom_types[i];
+        ray_t* orig = ray_typed_null(t);
+        munit_assert_ptr_not_null(orig);
+        munit_assert_false(RAY_IS_ERR(orig));
+        munit_assert_true(RAY_ATOM_IS_NULL(orig));
+
+        ray_t* wire = ray_ser(orig);
+        munit_assert_ptr_not_null(wire);
+        munit_assert_false(RAY_IS_ERR(wire));
+
+        ray_t* back = ray_de(wire);
+        munit_assert_ptr_not_null(back);
+        munit_assert_false(RAY_IS_ERR(back));
+        munit_assert_int(back->type, ==, t);
+        munit_assert_true(RAY_ATOM_IS_NULL(back));
+
+        ray_release(back);
+        ray_release(wire);
+        ray_release(orig);
+    }
+
+    /* And regular (non-null) atoms must continue to roundtrip cleanly
+     * with their value bit intact. */
+    {
+        ray_t* a = ray_i64(42);
+        ray_t* w = ray_ser(a);
+        ray_t* b = ray_de(w);
+        munit_assert_int(b->type, ==, -RAY_I64);
+        munit_assert_false(RAY_ATOM_IS_NULL(b));
+        munit_assert_int(b->i64, ==, 42);
+        ray_release(b); ray_release(w); ray_release(a);
+    }
+    {
+        ray_t* a = ray_f64(3.14);
+        ray_t* w = ray_ser(a);
+        ray_t* b = ray_de(w);
+        munit_assert_int(b->type, ==, -RAY_F64);
+        munit_assert_false(RAY_ATOM_IS_NULL(b));
+        munit_assert_double_equal(b->f64, 3.14, 10);
+        ray_release(b); ray_release(w); ray_release(a);
+    }
+
+    return MUNIT_OK;
+}
+
 /* ---- test_mem_budget --------------------------------------------------- */
 
 static MunitResult test_mem_budget(const void* params, void* fixture) {
@@ -2012,6 +2073,7 @@ static MunitTest store_tests[] = {
     { "/read_splayed_bad_sym",   test_read_splayed_bad_sym_fatal, store_setup, store_teardown, 0, NULL },
     { "/serde_long_str_roundtrip", test_serde_long_str_roundtrip, store_setup, store_teardown, 0, NULL },
     { "/serde_null_roundtrip", test_serde_null_roundtrip, store_setup, store_teardown, 0, NULL },
+    { "/serde_typed_null_atoms", test_serde_typed_null_atoms, store_setup, store_teardown, 0, NULL },
     { "/mem_budget",          test_mem_budget,          NULL,        NULL,            0, NULL },
     { "/ipc/compress_rt",        test_ipc_compress_rt,        NULL, NULL, 0, NULL },
     { "/ipc/compress_threshold", test_ipc_compress_threshold,  NULL, NULL, 0, NULL },
