@@ -34,6 +34,7 @@
 
 #include <rayforce.h>
 #include "core/types.h"
+#include <stdbool.h>
 
 /* Symbol width encoding (lower 2 bits of attrs when type == RAY_SYM) */
 #define RAY_SYM_W_MASK   0x03
@@ -86,5 +87,50 @@ static inline void ray_write_sym(void* data, int64_t row, uint64_t val, int8_t t
 /* Intern with pre-computed wyhash, no lock.
  * Caller must guarantee single-threaded access. */
 int64_t ray_sym_intern_prehashed(uint32_t hash, const char* str, size_t len);
+
+/* ---- Dotted name resolution (namespace paths) ---------------------------
+ * A symbol whose name contains one or more '.' is a *dotted* sym.  At intern
+ * time we memchr once, split the name on '.', intern each segment, and cache
+ * the resulting segment sym_ids.  `ray_sym_is_dotted` is cheap (one bitmap
+ * load) and gates the slow path in env lookup/set. */
+bool ray_sym_is_dotted(int64_t sym_id);
+
+/* Returns segment count (>=2 if dotted, 0 otherwise).  *out_segs is set to
+ * an interned sym_id array of length `nsegs` (valid for the lifetime of the
+ * sym table). */
+int ray_sym_segs(int64_t sym_id, const int64_t** out_segs);
+
+/* Bulk-intern variant that does NOT sub-intern segments.  Used only by
+ * persistence paths (ray_sym_load, ray_sym_save merge phase) where the
+ * disk-position==sym_id invariant would be broken by segment sub-interning
+ * appending entries mid-sequence.  Callers MUST follow a batch of these
+ * with ray_sym_rebuild_segments to populate the dotted cache. */
+int64_t ray_sym_intern_no_split(const char* str, size_t len);
+
+/* Walk the intern table and cache segment sym_ids for any dotted name
+ * that hasn't been cached yet.  Idempotent — safe to call multiple times.
+ * Needed after bulk loads that used ray_sym_intern_no_split.  Returns
+ * RAY_ERR_OOM on the first allocation/sub-intern failure so persistence
+ * paths can abort instead of leaving dotted names silently un-cached. */
+ray_err_t ray_sym_rebuild_segments(void);
+
+/* Upper bound on the arena bytes that sym_str_arena consumes for a name
+ * of the given length.  Used by the three-phase atomic intern to pre-
+ * reserve arena capacity, so the commit phase cannot fail partway.
+ *
+ * Short path (<7 bytes): ray_arena_alloc(_, 0) charges ARENA_ALIGN_UP(32)
+ * = 32 bytes.  Long path: sym_str_arena computes chars_block =
+ * ALIGN(32 + len + 1) and calls ray_arena_alloc(_, chars_block), which
+ * charges ARENA_ALIGN_UP(32 + chars_block) = 32 + chars_block because
+ * chars_block is 32-aligned.  The +32 term is the crucial one — omitting
+ * it under-reserves by exactly 32 bytes per long sym.
+ *
+ * Exposed as inline so tests can verify the bound against actual arena
+ * consumption for every length in a range. */
+static inline size_t ray_sym_bytes_upper(size_t len) {
+    if (len < 7) return 32;
+    size_t chars_block = ((size_t)32 + len + 1 + 31) & ~(size_t)31;
+    return 32 + chars_block;
+}
 
 #endif /* RAY_SYM_H */
