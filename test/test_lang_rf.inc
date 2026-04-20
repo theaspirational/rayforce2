@@ -3307,6 +3307,41 @@ static MunitResult test_rf_update(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* ---- Temporal unary builtins (yyyy / mm / dd / hh / minute / ss / dow /
+ * doy) must work as bare functions in addition to the dotted-access form
+ * (`ts.yyyy` etc.).  The dotted path is already covered by the /dotted
+ * tests; this test pins down the bare-call surface so the two stay in
+ * sync. */
+static MunitResult test_rf_temporal_bare(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* DATE atom: 2024-03-15 */
+    ASSERT_EQ("(yyyy 2024.03.15)", "2024");
+    ASSERT_EQ("(mm   2024.03.15)", "3");
+    ASSERT_EQ("(dd   2024.03.15)", "15");
+    /* 2024-03-15 was a Friday (ISO DOW 5) and the 75th day of the year. */
+    ASSERT_EQ("(dow  2024.03.15)", "5");
+    ASSERT_EQ("(doy  2024.03.15)", "75");
+
+    /* TIME atom: 12:34:56 */
+    ASSERT_EQ("(hh     12:34:56)", "12");
+    ASSERT_EQ("(minute 12:34:56)", "34");
+    ASSERT_EQ("(ss     12:34:56)", "56");
+
+    /* Null input propagates to null output; the null-sentinel bit
+     * pattern must NOT decode to a bogus calendar value (regression for
+     * earlier "2000 year"/random-year bugs on null dates). */
+    ASSERT_EQ("(yyyy 0Nd)", "0Nl");
+    ASSERT_EQ("(ss   0Nt)", "0Nl");
+
+    /* NOTE: TIMESTAMP-atom extraction (e.g. `(yyyy 2024.03.15D12:34:56.000)`)
+     * currently returns an epoch-unit value rather than the calendar
+     * year. Tracked separately; DATE/TIME atoms and TIMESTAMP *vectors*
+     * work correctly (covered by /dotted/temporal_vector). */
+
+    return MUNIT_OK;
+}
+
 static MunitResult test_rf_serde(const void* params, void* fixture) {
     (void)params; (void)fixture;
 
@@ -6092,6 +6127,7 @@ static MunitResult test_rf_write_csv(const void* params, void* fixture) {
     { "/rf/query",                 test_rf_query,         lang_setup, lang_teardown, 0, NULL },
     { "/rf/update",                test_rf_update,        lang_setup, lang_teardown, 0, NULL },
     { "/rf/serde",                 test_rf_serde,         lang_setup, lang_teardown, 0, NULL },
+    { "/rf/temporal_bare",         test_rf_temporal_bare, lang_setup, lang_teardown, 0, NULL },
     { "/rf/literals",              test_rf_literals,      lang_setup, lang_teardown, 0, NULL },
     { "/rf/cmp",                   test_rf_cmp,           lang_setup, lang_teardown, 0, NULL },
     { "/rf/distinct",              test_rf_distinct,      lang_setup, lang_teardown, 0, NULL },

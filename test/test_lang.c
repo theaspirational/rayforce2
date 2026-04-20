@@ -4009,6 +4009,7 @@ static MunitTest lang_tests[] = {
     { "/rf/query",                 test_rf_query,         lang_setup, lang_teardown, 0, NULL },
     { "/rf/update",                test_rf_update,        lang_setup, lang_teardown, 0, NULL },
     { "/rf/serde",                 test_rf_serde,         lang_setup, lang_teardown, 0, NULL },
+    { "/rf/temporal_bare",         test_rf_temporal_bare, lang_setup, lang_teardown, 0, NULL },
     { "/rf/literals",              test_rf_literals,      lang_setup, lang_teardown, 0, NULL },
     { "/rf/cmp",                   test_rf_cmp,           lang_setup, lang_teardown, 0, NULL },
     { "/rf/distinct",              test_rf_distinct,      lang_setup, lang_teardown, 0, NULL },
