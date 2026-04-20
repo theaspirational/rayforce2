@@ -739,15 +739,20 @@ ray_t* ray_del_fn(ray_t** args, int64_t n) {
     ray_t* name = args[0];
     if (name->type != -RAY_SYM)
         return ray_error("type", "del expects a symbol");
-    /* Propagate ray_env_set's reserved-namespace guard: silently
-     * ignoring the return value would let `(del .sys.gc)` appear to
-     * succeed while leaving the builtin intact — a confusing lie. */
+    /* Propagate ray_env_set's failure: silently ignoring the return
+     * value would let `(del .sys.gc)` appear to succeed while leaving
+     * the builtin intact — a confusing lie.  Emit a precise message
+     * per error code rather than blaming every failure on the
+     * reserved-namespace guard (OOM on dotted-path upsert, for
+     * example, is not a reserve error). */
     ray_err_t err = ray_env_set(name->i64, NULL);
-    if (err != RAY_OK)
-        return ray_error(ray_err_code_str(err),
-                         "cannot delete reserved binding '%s'",
-                         ray_str_ptr(ray_sym_str(name->i64)));
-    return ray_i64(0);
+    if (err == RAY_OK) return ray_i64(0);
+    const char* nm = ray_str_ptr(ray_sym_str(name->i64));
+    if (err == RAY_ERR_RESERVED)
+        return ray_error("reserve",
+                         "cannot delete reserved binding '%s'", nm);
+    return ray_error(ray_err_code_str(err),
+                     "del '%s' failed", nm);
 }
 
 /* ══════════════════════════════════════════
