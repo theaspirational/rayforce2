@@ -30,6 +30,8 @@
 #include "lang/env.h"
 #include "ops/ops.h"
 #include "ops/internal.h"
+#include "ops/hash.h"
+#include "ops/temporal.h"
 #include "table/sym.h"
 #include "mem/sys.h"
 
@@ -349,6 +351,46 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         if (bound) return bound;
         ray_t* s = ray_sym_str(expr->i64);
         if (!s) return NULL;
+
+        /* Dotted name — desugar at compile time by walking the
+         * segments: emit a scan for the head column, then for each
+         * subsequent segment look up the name's registered DAG-level
+         * emitter and chain it.  `col.ss` → scan(col) → extract(SS),
+         * `col.date` → scan(col) → date_trunc(DAY), etc.  Segment
+         * resolution uses the same name table as the runtime
+         * `(ss col)` form, so adding a new accessor means registering
+         * one unary builtin (temporal or otherwise) — no bespoke sym
+         * → field map here.  Anything we can't lower returns NULL
+         * (compile error), avoiding the old crash path where unknown
+         * dotted names became scans of non-existent columns. */
+        if (ray_sym_is_dotted(expr->i64)) {
+            const int64_t* segs;
+            int nsegs = ray_sym_segs(expr->i64, &segs);
+            if (nsegs < 2) return NULL;
+            if (!g->table || g->table->type != RAY_TABLE) return NULL;
+            if (!ray_table_get_col(g->table, segs[0])) return NULL;
+            ray_t* head_name = ray_sym_str(segs[0]);
+            if (!head_name) return NULL;
+            ray_op_t* op = ray_scan(g, ray_str_ptr(head_name));
+            if (!op) return NULL;
+            for (int i = 1; i < nsegs; i++) {
+                int field = ray_temporal_field_from_sym(segs[i]);
+                if (field >= 0) {
+                    op = ray_extract(g, op, field);
+                    if (!op) return NULL;
+                    continue;
+                }
+                int trunc_kind = ray_temporal_trunc_from_sym(segs[i]);
+                if (trunc_kind >= 0) {
+                    op = ray_date_trunc(g, op, trunc_kind);
+                    if (!op) return NULL;
+                    continue;
+                }
+                return NULL;
+            }
+            return op;
+        }
+
         /* Column names on the bound table shadow global env —
          * matches eval-level name-resolution order. */
         if (g->table && g->table->type == RAY_TABLE &&
@@ -743,8 +785,23 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
 static void expr_bind_table_names(ray_t* expr, ray_t* tbl) {
     if (!expr) return;
     if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
+        /* Plain column reference — bind the column into local scope. */
         ray_t* col = ray_table_get_col(tbl, expr->i64);
-        if (col) ray_env_set_local(expr->i64, col);
+        if (col) { ray_env_set_local(expr->i64, col); return; }
+        /* Dotted reference (e.g. `Timestamp.ss`) — the whole dotted
+         * sym isn't a column name, but its HEAD segment might be.
+         * Bind the head so ray_env_resolve's dotted walk can reach
+         * it when ray_eval fires on this expression.  Non-column
+         * heads (globals, locals) fall through to env_resolve's
+         * normal scope-chain lookup. */
+        if (ray_sym_is_dotted(expr->i64)) {
+            const int64_t* segs;
+            int nsegs = ray_sym_segs(expr->i64, &segs);
+            if (nsegs >= 1) {
+                ray_t* head_col = ray_table_get_col(tbl, segs[0]);
+                if (head_col) ray_env_set_local(segs[0], head_col);
+            }
+        }
         return;
     }
     if (expr->type == RAY_LIST && !(expr->attrs & RAY_ATTR_DICT)) {
@@ -780,7 +837,16 @@ static int is_agg_expr(ray_t* expr);  /* defined below */
 static int expr_refs_row_column(ray_t* expr, ray_t* tbl) {
     if (!expr) return 0;
     if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
-        return ray_table_get_col(tbl, expr->i64) ? 1 : 0;
+        if (ray_table_get_col(tbl, expr->i64)) return 1;
+        /* Dotted name whose head is a column is a row-aligned ref —
+         * `Timestamp.ss` flows through row-by-row the same as plain
+         * `Timestamp` would, so the scatter must treat it as one. */
+        if (ray_sym_is_dotted(expr->i64)) {
+            const int64_t* segs;
+            int nsegs = ray_sym_segs(expr->i64, &segs);
+            if (nsegs >= 1 && ray_table_get_col(tbl, segs[0])) return 1;
+        }
+        return 0;
     }
     if (expr->type == RAY_LIST && !(expr->attrs & RAY_ATTR_DICT)) {
         /* If this call is itself an aggregation, its column refs
@@ -1810,12 +1876,17 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     } else {
                         dst = ray_vec_new(sc->type, n_groups);
                         if (dst && !RAY_IS_ERR(dst)) {
+                            /* len BEFORE the loop: store_typed_elem's null
+                             * path routes through ray_vec_set_null which
+                             * silently drops out-of-range writes — post-
+                             * loop assignment would lose the null bit on
+                             * every nullable row in this gather. */
+                            dst->len = n_groups;
                             for (int64_t gi = 0; gi < n_groups; gi++) {
                                 int a = 0; ray_t* v = collection_elem(sc, fi[gi], &a);
                                 store_typed_elem(dst, gi, v);
                                 if (a) ray_release(v);
                             }
-                            dst->len = n_groups;
                         }
                     }
                     if (!dst || RAY_IS_ERR(dst)) {
@@ -2026,9 +2097,16 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
             int64_t n_groups = ray_table_nrows(grouped);
 
-            /* Resolve key column sym early — needed for empty result schema */
+            /* Resolve key column sym early — needed for empty result schema.
+             * A dotted name like `Timestamp.date` compiles to a scan + trunc
+             * chain, not a direct column lookup, so it must land in the
+             * computed-key fallback path below (key_sym stays -1).  Otherwise
+             * downstream `ray_table_get_col(filtered_tbl, key_sym)` would
+             * return NULL for the non-existent "Timestamp.date" column and
+             * the subsequent deref would crash. */
             int64_t key_sym = -1;
-            if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME))
+            if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME)
+                && !ray_sym_is_dotted(by_expr->i64))
                 key_sym = by_expr->i64;
             else if (by_expr->type == RAY_SYM && ray_len(by_expr) == 1)
                 key_sym = ((int64_t*)ray_data(by_expr))[0];
@@ -2036,18 +2114,88 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             if (n_groups == 0) {
                 ray_release(grouped);
                 int64_t nc0 = ray_table_ncols(filtered_tbl);
-                ray_t* empty = ray_table_new(nc0);
+                ray_t* empty = ray_table_new(nc0 + 1);
                 if (!RAY_IS_ERR(empty)) {
-                    /* Key column first */
-                    { ray_t* sc = ray_table_get_col(filtered_tbl, key_sym);
-                      if (sc) {
-                        ray_t* ev = (sc->type == RAY_STR) ? ray_vec_new(RAY_STR, 0) : ray_vec_new(sc->type, 0);
-                        if (!RAY_IS_ERR(ev)) { empty = ray_table_add_col(empty, key_sym, ev); ray_release(ev); }
-                      }
+                    /* Key column.  For a plain/column key, key_sym
+                     * names a real source column and we mirror its
+                     * type.  For a computed key (dotted, xbar, ...)
+                     * we evaluate by_expr against the filtered (empty)
+                     * table to learn the key's type and name without
+                     * duplicating schema derivation logic. */
+                    int64_t empty_key_name = key_sym;
+                    ray_t* empty_key_vec = NULL;
+                    if (key_sym >= 0) {
+                        ray_t* sc = ray_table_get_col(filtered_tbl, key_sym);
+                        if (sc) {
+                            empty_key_vec = (sc->type == RAY_STR)
+                                            ? ray_vec_new(RAY_STR, 0)
+                                            : ray_vec_new(sc->type, 0);
+                        }
+                    } else {
+                        /* Match the computed-key fallback's naming
+                         * rules (dotted tail / last name arg) and
+                         * collision handling. */
+                        int64_t ck_name = -1;
+                        int64_t ck_full = -1;
+                        int64_t ck_head = -1;
+                        if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME)) {
+                            ck_full = by_expr->i64;
+                            if (ray_sym_is_dotted(by_expr->i64)) {
+                                const int64_t* segs;
+                                int nsegs = ray_sym_segs(by_expr->i64, &segs);
+                                if (nsegs > 0) { ck_name = segs[nsegs - 1]; ck_head = segs[0]; }
+                            } else {
+                                ck_name = by_expr->i64;
+                            }
+                        } else if (by_expr->type == RAY_LIST && by_expr->len >= 2) {
+                            ray_t** be = (ray_t**)ray_data(by_expr);
+                            for (int64_t i = by_expr->len - 1; i >= 1; i--) {
+                                if (be[i]->type == -RAY_SYM && (be[i]->attrs & RAY_ATTR_NAME)) {
+                                    ck_name = be[i]->i64;
+                                    break;
+                                }
+                            }
+                        }
+                        if (ck_name < 0) ck_name = ray_sym_intern("key", 3);
+                        if (ck_head >= 0 && ck_full >= 0 && ck_name != ck_full) {
+                            for (int64_t c = 0; c < nc0; c++) {
+                                int64_t cn = ray_table_col_name(filtered_tbl, c);
+                                if (cn == ck_name && cn != ck_head) {
+                                    ck_name = ck_full;
+                                    break;
+                                }
+                            }
+                        }
+                        empty_key_name = ck_name;
+
+                        /* Evaluate by_expr against the (empty) filtered table
+                         * to get a length-0 key vector typed like the
+                         * non-empty path would produce it. */
+                        ray_env_push_scope();
+                        for (int64_t c = 0; c < nc0; c++) {
+                            ray_env_set_local(ray_table_col_name(filtered_tbl, c),
+                                              ray_table_get_col_idx(filtered_tbl, c));
+                        }
+                        ray_t* ck_vec = ray_eval(by_expr);
+                        ray_env_pop_scope();
+                        if (ck_vec && !RAY_IS_ERR(ck_vec) && ray_is_vec(ck_vec)) {
+                            int8_t kt = ck_vec->type;
+                            empty_key_vec = (kt == RAY_STR)
+                                            ? ray_vec_new(RAY_STR, 0)
+                                            : (kt == RAY_LIST)
+                                              ? ray_list_new(0)
+                                              : ray_vec_new(kt, 0);
+                        }
+                        if (ck_vec && !RAY_IS_ERR(ck_vec)) ray_release(ck_vec);
                     }
+                    if (empty_key_vec && !RAY_IS_ERR(empty_key_vec)) {
+                        empty = ray_table_add_col(empty, empty_key_name, empty_key_vec);
+                        ray_release(empty_key_vec);
+                    }
+
                     for (int64_t c = 0; c < nc0; c++) {
                         int64_t cn = ray_table_col_name(filtered_tbl, c);
-                        if (cn == key_sym) continue;
+                        if (cn == empty_key_name) continue;
                         ray_t* sc = ray_table_get_col_idx(filtered_tbl, c);
                         ray_t* ev = (sc->type == RAY_STR) ? ray_vec_new(RAY_STR, 0) :
                                     (sc->type == RAY_LIST) ? ray_list_new(0) :
@@ -2089,38 +2237,118 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 int64_t ng2 = ray_len(groups2) / 2;
                 if (ng2 == 0) { ray_release(groups2); ray_release(computed_key); if (filtered_tbl != tbl) ray_release(filtered_tbl); ray_release(tbl); return ray_table_new(0); }
                 ray_t** gi2 = (ray_t**)ray_data(groups2);
-                int64_t fi2[256];
-                for (int64_t g2 = 0; g2 < ng2 && g2 < 256; g2++) {
+
+                /* fi2 must sweep EVERY group, not just the first 256 —
+                 * the downstream result-column loops iterate up to ng2
+                 * and indexed reads beyond a fixed-size stack slot would
+                 * pick up uninitialised bytes.  Stack-fast for small
+                 * group counts, heap-fallback once we need more. */
+                int64_t fi2_stack[256];
+                ray_t*  fi2_hdr = NULL;
+                int64_t* fi2 = fi2_stack;
+                if (ng2 > 256) {
+                    fi2_hdr = ray_alloc((size_t)ng2 * sizeof(int64_t));
+                    if (!fi2_hdr) {
+                        ray_release(groups2); ray_release(computed_key);
+                        if (filtered_tbl != tbl) ray_release(filtered_tbl);
+                        ray_release(tbl);
+                        return ray_error("oom", NULL);
+                    }
+                    fi2 = (int64_t*)ray_data(fi2_hdr);
+                }
+                for (int64_t g2 = 0; g2 < ng2; g2++) {
                     int alloc2 = 0;
                     ray_t* i02 = collection_elem(gi2[g2 * 2 + 1], 0, &alloc2);
                     fi2[g2] = as_i64(i02);
                     if (alloc2) ray_release(i02);
                 }
-                int64_t ckey_name = ray_sym_intern("+", 1);
-                if (by_expr->type == RAY_LIST && by_expr->len >= 2) {
+                /* Name for the synthesized key column:
+                 *  - dotted sym `a.b.c` → tail segment (`c`) so `Timestamp.ss`
+                 *    surfaces as an `ss` column (pretty in the common case).
+                 *    If the tail collides with an *unrelated* source column
+                 *    (not the head of the dotted path), fall back to the
+                 *    full dotted name so we don't silently drop real data.
+                 *  - list expr `(xbar N col)` / `(+ col 1)` → last name-typed
+                 *    argument, so the transform's output deliberately
+                 *    replaces the source column (matches xbar convention).
+                 *  - fall back to an interned "key" if nothing more specific
+                 *    can be derived. */
+                int64_t ckey_name = -1;
+                int64_t ckey_full = -1;       /* full dotted sym, for collision fallback */
+                int64_t ckey_head = -1;       /* head segment of dotted expr (input column) */
+                if (by_expr->type == -RAY_SYM && (by_expr->attrs & RAY_ATTR_NAME)) {
+                    ckey_full = by_expr->i64;
+                    if (ray_sym_is_dotted(by_expr->i64)) {
+                        const int64_t* segs;
+                        int nsegs = ray_sym_segs(by_expr->i64, &segs);
+                        if (nsegs > 0) {
+                            ckey_name = segs[nsegs - 1];
+                            ckey_head = segs[0];
+                        }
+                    } else {
+                        ckey_name = by_expr->i64;
+                    }
+                } else if (by_expr->type == RAY_LIST && by_expr->len >= 2) {
                     ray_t** be = (ray_t**)ray_data(by_expr);
-                    if (be[1]->type == -RAY_SYM && (be[1]->attrs & RAY_ATTR_NAME))
-                        ckey_name = be[1]->i64;
+                    for (int64_t i = by_expr->len - 1; i >= 1; i--) {
+                        if (be[i]->type == -RAY_SYM && (be[i]->attrs & RAY_ATTR_NAME)) {
+                            ckey_name = be[i]->i64;
+                            break;
+                        }
+                    }
                 }
-                ray_t* res2 = ray_table_new(tbl_ncols);
-                /* Key column first */
-                { ray_t* okc = ray_table_get_col(filtered_tbl, ckey_name);
-                  if (okc) {
-                    ray_t* kv = ray_vec_new(okc->type, ng2);
-                    for (int64_t g2 = 0; g2 < ng2; g2++) { int a2 = 0; ray_t* v2 = collection_elem(okc, fi2[g2], &a2); store_typed_elem(kv, g2, v2); if (a2) ray_release(v2); }
-                    kv->len = ng2;
-                    res2 = ray_table_add_col(res2, ckey_name, kv); ray_release(kv);
-                  }
+                if (ckey_name < 0) ckey_name = ray_sym_intern("key", 3);
+
+                /* Collision check for dotted tail: if the tail name matches
+                 * a source column that isn't the head of the dotted expr,
+                 * the old code silently dropped that source column from the
+                 * result.  Promote to the full dotted sym so both stay. */
+                if (ckey_head >= 0 && ckey_full >= 0 && ckey_name != ckey_full) {
+                    for (int64_t c = 0; c < tbl_ncols; c++) {
+                        int64_t cn = ray_table_col_name(filtered_tbl, c);
+                        if (cn == ckey_name && cn != ckey_head) {
+                            ckey_name = ckey_full;
+                            break;
+                        }
+                    }
+                }
+
+                ray_t* res2 = ray_table_new(tbl_ncols + 1);
+                /* Key column: computed_key's first-of-group values, which
+                 * are the distinct grouping-key values surfaced to the
+                 * user.  Using the source column at fi2 indices would lose
+                 * the transform (e.g. raw Timestamp instead of its `.ss`). */
+                if (ray_is_vec(computed_key)) {
+                    ray_t* kv = ray_vec_new(computed_key->type, ng2);
+                    if (!RAY_IS_ERR(kv)) {
+                        /* len BEFORE store loop — ray_vec_set_null (called
+                         * by store_typed_elem for null atoms) range-checks
+                         * idx against vec->len and silently no-ops
+                         * otherwise. */
+                        kv->len = ng2;
+                        for (int64_t g2 = 0; g2 < ng2; g2++) {
+                            int a2 = 0;
+                            ray_t* v2 = collection_elem(computed_key, fi2[g2], &a2);
+                            store_typed_elem(kv, g2, v2);
+                            if (a2) ray_release(v2);
+                        }
+                        res2 = ray_table_add_col(res2, ckey_name, kv);
+                        ray_release(kv);
+                    }
                 }
                 for (int64_t c = 0; c < tbl_ncols; c++) {
                     int64_t cn = ray_table_col_name(filtered_tbl, c);
+                    /* Avoid duplicating a column name already used by the
+                     * key: e.g. `by: Timestamp` (plain, non-dotted) would
+                     * collide with the source Timestamp column. */
                     if (cn == ckey_name) continue;
                     ray_t* sc = ray_table_get_col_idx(filtered_tbl, c);
                     ray_t* dc = ray_vec_new(sc->type, ng2);
+                    dc->len = ng2;    /* see note above — hoisted for null bits */
                     for (int64_t g2 = 0; g2 < ng2; g2++) { int a2 = 0; ray_t* v2 = collection_elem(sc, fi2[g2], &a2); store_typed_elem(dc, g2, v2); if (a2) ray_release(v2); }
-                    dc->len = ng2;
                     res2 = ray_table_add_col(res2, cn, dc); ray_release(dc);
                 }
+                if (fi2_hdr) ray_free(fi2_hdr);
                 ray_release(groups2); ray_release(computed_key);
                 if (filtered_tbl != tbl) ray_release(filtered_tbl);
                 ray_release(tbl);
@@ -2147,13 +2375,46 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
 
             /* Copy group key values while grouped is still alive.
              * STR/LIST/GUID keys are routed through eval-level fallback
-             * above, so only integer-like types reach here. */
+             * above, so only integer-like types reach here.  Use
+             * read_col_i64 for non-F64 types — it dispatches on the
+             * column type (I32/I16/I8/BOOL/SYM adaptive width etc.),
+             * whereas ray_read_sym interprets `attrs` as SYM width and
+             * silently truncates to 1 byte for plain integer columns
+             * where attrs doesn't carry width bits.
+             *
+             * We also record a per-group null flag.  The DAG GROUP path
+             * stores null keys with value=0 and differentiates via a
+             * null mask — if we hashed raw bits only, a null group would
+             * collide with non-null value 0 (for I64 / I32 / SYM / DATE
+             * / TIME etc.) or with +0.0 for F64 (ray_hash_f64 normalises
+             * -0.0 to +0.0, and F64's null bit pattern on this platform
+             * is the -0.0 pattern).  The null flag keeps those groups
+             * distinct. */
+            uint8_t gk_null_stack[256];
+            ray_t*  gk_null_hdr = NULL;
+            uint8_t* gk_null = gk_null_stack;
+            if (n_groups > 256) {
+                gk_null_hdr = ray_alloc((size_t)n_groups * sizeof(uint8_t));
+                if (!gk_null_hdr) {
+                    if (gk_heap_hdr) ray_free(gk_heap_hdr);
+                    ray_release(grouped);
+                    if (filtered_tbl != tbl) ray_release(filtered_tbl);
+                    ray_release(tbl);
+                    return ray_error("oom", NULL);
+                }
+                gk_null = (uint8_t*)ray_data(gk_null_hdr);
+            }
+            memset(gk_null, 0, (size_t)n_groups * sizeof(uint8_t));
+
             if (grp_key_col) {
+                bool gk_has_nulls = (grp_key_col->attrs & RAY_ATTR_HAS_NULLS) != 0;
                 for (int64_t gi = 0; gi < n_groups; gi++) {
                     if (kt == RAY_F64)
                         memcpy(&gk_vals[gi], &((double*)ray_data(grp_key_col))[gi], 8);
                     else
-                        gk_vals[gi] = ray_read_sym(ray_data(grp_key_col), gi, kt, grp_key_col->attrs);
+                        gk_vals[gi] = read_col_i64(ray_data(grp_key_col), gi, kt, grp_key_col->attrs);
+                    if (gk_has_nulls && ray_vec_is_null(grp_key_col, gi))
+                        gk_null[gi] = 1;
                 }
             }
             ray_release(grouped); /* grp_key_col is now invalid */
@@ -2168,18 +2429,92 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 first_idx = (int64_t*)ray_data(fi_heap_hdr);
             }
 
-            /* Single scan: mark first occurrence of each group key */
+            /* Build {key_bits -> group_index} hash table from gk_vals so the
+             * scan below is O(nrows_orig + n_groups) instead of
+             * O(nrows_orig * n_groups).  Without this a 1M-row / 1M-group
+             * float-key grouping hangs for tens of seconds — I64 has a
+             * low-cardinality direct-array fast path upstream, but F64
+             * and other non-GUID scalar keys fall through to this scan. */
             for (int64_t gi = 0; gi < n_groups; gi++) first_idx[gi] = -1;
-            int64_t found = 0;
-            for (int64_t r = 0; r < nrows_orig && found < n_groups; r++) {
-                int64_t ov;
-                if (kt == RAY_F64) memcpy(&ov, &((double*)ray_data(orig_key_col))[r], 8);
-                else ov = ray_read_sym(ray_data(orig_key_col), r, kt, orig_key_col->attrs);
-                for (int64_t gi = 0; gi < n_groups; gi++) {
-                    if (first_idx[gi] >= 0) continue;
-                    if (ov == gk_vals[gi]) { first_idx[gi] = r; found++; break; }
+            {
+                uint32_t fi_cap = 64;
+                while ((uint64_t)fi_cap < (uint64_t)n_groups * 2 && fi_cap < (1u << 30))
+                    fi_cap <<= 1;
+                uint32_t fi_mask = fi_cap - 1;
+                ray_t* fi_ht_hdr = ray_alloc((size_t)fi_cap * sizeof(uint32_t));
+                if (!fi_ht_hdr) {
+                    if (gk_heap_hdr) ray_free(gk_heap_hdr);
+                    if (fi_heap_hdr) ray_free(fi_heap_hdr);
+                    if (filtered_tbl != tbl) ray_release(filtered_tbl);
+                    ray_release(tbl);
+                    return ray_error("oom", NULL);
                 }
+                uint32_t* fi_ht = (uint32_t*)ray_data(fi_ht_hdr);
+                memset(fi_ht, 0xFF, (size_t)fi_cap * sizeof(uint32_t));
+
+                /* Insert every group key into the HT keyed by bit pattern.
+                 * For F64 keys, hash via the float path; memcpy bit pattern
+                 * out of gk_vals to dodge strict-aliasing.  Null groups
+                 * get a distinct hash so they don't collide with zero-valued
+                 * groups (F64 null has the -0.0 bit pattern, which
+                 * ray_hash_f64 normalises to +0.0; integer-flavoured
+                 * nulls are stored as value=0). */
+                for (int64_t gi = 0; gi < n_groups; gi++) {
+                    uint64_t h;
+                    if (gk_null[gi]) {
+                        h = ray_hash_i64((int64_t)0xDEADBEEFCAFEBABEULL);
+                    } else if (kt == RAY_F64) {
+                        double dv;
+                        memcpy(&dv, &gk_vals[gi], 8);
+                        h = ray_hash_f64(dv);
+                    } else {
+                        h = ray_hash_i64(gk_vals[gi]);
+                    }
+                    uint32_t slot = (uint32_t)(h & fi_mask);
+                    while (fi_ht[slot] != UINT32_MAX) slot = (slot + 1) & fi_mask;
+                    fi_ht[slot] = (uint32_t)gi;
+                }
+
+                /* Single linear scan of the source column; for each row
+                 * hash-lookup its group index and record the first row
+                 * that maps to it.  Terminate early once every group has
+                 * a first-row. */
+                bool orig_nulls_flag = orig_key_col
+                    && (orig_key_col->attrs & RAY_ATTR_HAS_NULLS) != 0;
+                int64_t found = 0;
+                for (int64_t r = 0; r < nrows_orig && found < n_groups; r++) {
+                    bool r_null = orig_nulls_flag && ray_vec_is_null(orig_key_col, r);
+                    int64_t ov;
+                    if (kt == RAY_F64) memcpy(&ov, &((double*)ray_data(orig_key_col))[r], 8);
+                    else ov = read_col_i64(ray_data(orig_key_col), r, kt, orig_key_col->attrs);
+                    uint64_t h;
+                    if (r_null) {
+                        h = ray_hash_i64((int64_t)0xDEADBEEFCAFEBABEULL);
+                    } else if (kt == RAY_F64) {
+                        double dv;
+                        memcpy(&dv, &ov, 8);
+                        h = ray_hash_f64(dv);
+                    } else {
+                        h = ray_hash_i64(ov);
+                    }
+                    uint32_t slot = (uint32_t)(h & fi_mask);
+                    while (fi_ht[slot] != UINT32_MAX) {
+                        uint32_t cand = fi_ht[slot];
+                        bool match = (r_null && gk_null[cand])
+                                     || (!r_null && !gk_null[cand] && gk_vals[cand] == ov);
+                        if (match) {
+                            if (first_idx[cand] < 0) {
+                                first_idx[cand] = r;
+                                found++;
+                            }
+                            break;
+                        }
+                        slot = (slot + 1) & fi_mask;
+                    }
+                }
+                ray_free(fi_ht_hdr);
             }
+            if (gk_null_hdr) ray_free(gk_null_hdr);
             if (gk_heap_hdr) ray_free(gk_heap_hdr);
 
             /* Now build the result table using first_idx gathered above.
@@ -2206,13 +2541,20 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
             } else {
                 ray_t* key_vec_dst = ray_vec_new(key_vec_src->type, n_groups);
                 if (RAY_IS_ERR(key_vec_dst)) { if (fi_heap_hdr) ray_free(fi_heap_hdr); ray_release(tbl); ray_release(result); return key_vec_dst; }
+                /* Set len BEFORE the store loop: store_typed_elem routes
+                 * null atoms through ray_vec_set_null, which range-checks
+                 * idx against vec->len and silently returns RAY_ERR_RANGE
+                 * otherwise.  Postponing len=n_groups until after the loop
+                 * therefore dropped the null bit on every nullable key row
+                 * — the result would read back the raw zero/-0.0 bits with
+                 * no HAS_NULLS flag, corrupting the grouped key column. */
+                key_vec_dst->len = n_groups;
                 for (int64_t gi = 0; gi < n_groups; gi++) {
                     int alloc = 0;
                     ray_t* val = collection_elem(key_vec_src, first_idx[gi], &alloc);
                     store_typed_elem(key_vec_dst, gi, val);
                     if (alloc) ray_release(val);
                 }
-                key_vec_dst->len = n_groups;
                 result = ray_table_add_col(result, key_sym, key_vec_dst);
                 ray_release(key_vec_dst);
             }
@@ -2251,16 +2593,19 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     result = ray_table_add_col(result, col_name, dst);
                     ray_release(dst);
                 } else {
-                    /* Typed vector: copy elements at first indices */
+                    /* Typed vector: copy elements at first indices.
+                     * len must be set before the store loop so null bits
+                     * propagate through store_typed_elem → ray_vec_set_null
+                     * (same reason as the key column above). */
                     ray_t* dst = ray_vec_new(ct, n_groups);
                     if (RAY_IS_ERR(dst)) { if (fi_heap_hdr) ray_free(fi_heap_hdr); ray_release(tbl); ray_release(result); return dst; }
+                    dst->len = n_groups;
                     for (int64_t gi = 0; gi < n_groups; gi++) {
                         int alloc = 0;
                         ray_t* val = collection_elem(src_col, first_idx[gi], &alloc);
                         store_typed_elem(dst, gi, val);
                         if (alloc) ray_release(val);
                     }
-                    dst->len = n_groups;
                     result = ray_table_add_col(result, col_name, dst);
                     ray_release(dst);
                 }

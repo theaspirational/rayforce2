@@ -2876,10 +2876,15 @@ static MunitResult test_rf_query(const void* params, void* fixture) {
                    "(table [Symbol s]"
                    "(list [apll good msfk ibmd amznt fbad baba]"
                    "[7.00 9.00 11.00 3.00 4.00 5.00 6.00]))");
+    // by: (xbar Ts 10000) groups rows into 10-second buckets; the Ts
+    // key column surfaces the bucket start (09:00:00, 09:00:10), not
+    // an arbitrary first-of-group raw value.  The prior expectation
+    // encoded a bug where the key column read from the source Ts at
+    // the first-of-group row index instead of the computed key.
     ASSERT_EQ(
         "(set trades (table [Sym Ts Price] (list [a b a] [09:00:01.000 09:00:05.000 09:00:11.000] [10 20 30])))"
         "(select {from: trades by: (xbar Ts 10000)})",
-        "(table [Ts Sym Price] (list [09:00:01.000 09:00:11.000] [a a] [10 30]))");
+        "(table [Ts Sym Price] (list [09:00:00.000 09:00:10.000] [a a] [10 30]))");
 
     // --- Null group keys (gh#6): a null key must form its own group
     //     distinct from real 0, and the output key column must carry
