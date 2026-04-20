@@ -55,6 +55,13 @@ ray_err_t ray_env_set(int64_t sym_id, ray_t* val);
  * during ray_lang_init. */
 ray_err_t ray_env_bind(int64_t sym_id, ray_t* val);
 
+/* Flat variant of ray_env_bind: writes the binding directly into the
+ * global env hash without traversing dotted-segment dict upserts.
+ * Used to register every fully-qualified builtin name (`.sys.gc`,
+ * `.os.getenv`, …) alongside the root namespace dict, so prefix
+ * lookup (REPL completion + highlighter) enumerates them all. */
+ray_err_t ray_env_bind_flat(int64_t sym_id, ray_t* val);
+
 /* True if a symbol's interned name starts with `.` — i.e. it belongs to
  * the reserved namespace populated at startup by builtin registration.
  * User-level binders (ray_env_set, ray_env_set_local, lambda parameter

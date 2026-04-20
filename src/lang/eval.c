@@ -1976,8 +1976,10 @@ static void reg_bind(const char* name, ray_t* obj) {
 
         /* 2. Flat binding under the full `.ns.action` sym so
          *    ray_env_lookup_prefix (REPL completion + syntax
-         *    highlighting) enumerates every reserved builtin by name. */
-        assert(ray_env_bind(sym, obj) == RAY_OK);
+         *    highlighting) enumerates every reserved builtin by name.
+         *    ray_env_bind_flat skips the dotted-walk path — we don't
+         *    want this call to upsert into the `.sys` dict again. */
+        assert(ray_env_bind_flat(sym, obj) == RAY_OK);
         return;
     }
     assert(ray_env_bind(sym, obj) == RAY_OK);

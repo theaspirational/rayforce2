@@ -3340,6 +3340,18 @@ static MunitResult test_rf_reserved_namespace(const void* params, void* fixture)
     ASSERT_EQ("(count .os)",  "2");  /* getenv, setenv */
     ASSERT_EQ("(count .ipc)", "3");  /* open, close, send */
     ASSERT_EQ("(count .csv)", "2");  /* read, write */
+
+    /* REPL completion + syntax highlighting go through
+     * ray_env_lookup_prefix scanning flat g_env keys.  The namespace
+     * dicts alone don't satisfy that path, so every reserved builtin
+     * is ALSO bound flat under its fully-qualified name.  This probes
+     * the same path via `resolve`, which returns the sym if no binding
+     * exists and the function object otherwise — we just check the
+     * binding is present. */
+    ASSERT_EQ("(nil? (resolve '.sys.gc))",   "false");
+    ASSERT_EQ("(nil? (resolve '.sys.info))", "false");
+    ASSERT_EQ("(nil? (resolve '.os.getenv))", "false");
+    ASSERT_EQ("(nil? (resolve '.csv.read))",  "false");
     /* OS env round-trip: set a key, read it back. */
     ray_eval_str("(.os.setenv \"RAYF_NS_TEST\" \"hello\")");
     ASSERT_EQ("(.os.getenv \"RAYF_NS_TEST\")", "\"hello\"");

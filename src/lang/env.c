@@ -142,13 +142,15 @@ static ray_t* env_lookup_flat(int64_t sym_id) {
 }
 
 ray_t* ray_env_get(int64_t sym_id) {
-    /* Fast path: non-dotted name.  The bitmap check is one load + shift +
-     * and + predicted-taken branch; zero added cost in steady state. */
-    if (!ray_sym_is_dotted(sym_id)) {
-        return env_lookup_flat(sym_id);
-    }
+    /* Flat lookup first — covers every non-dotted name AND every
+     * reserved builtin like `.sys.gc` which is bound both flat (for
+     * O(1) resolution + prefix enumeration) and inside the `.sys`
+     * namespace dict (for REPL introspection). */
+    ray_t* flat = env_lookup_flat(sym_id);
+    if (flat) return flat;
+    if (!ray_sym_is_dotted(sym_id)) return NULL;
 
-    /* Dotted path: head resolves via scope+global, rest are sym-keyed
+    /* Dotted walk: head resolves via scope+global, rest are sym-keyed
      * container probes — dicts walk via pair array, tables via schema
      * lookup, anything else is surfaced as "undefined" (NULL).  Missing
      * intermediate keys also return NULL so the evaluator's name-error
@@ -175,12 +177,13 @@ ray_t* ray_env_get(int64_t sym_id) {
  * fresh result.  Those fresh allocations are exactly why this function
  * has a different retain contract from ray_env_get. */
 ray_t* ray_env_resolve(int64_t sym_id) {
-    /* Non-dotted: borrow from env and retain before returning. */
-    if (!ray_sym_is_dotted(sym_id)) {
-        ray_t* v = env_lookup_flat(sym_id);
-        if (v) ray_retain(v);
-        return v;
-    }
+    /* Flat lookup first — short-circuits dotted reserved builtins
+     * (`.sys.gc`, `.os.getenv`, …) that are additionally bound flat
+     * alongside their namespace dict.  Non-dotted names take the
+     * same path. */
+    ray_t* flat = env_lookup_flat(sym_id);
+    if (flat) { ray_retain(flat); return flat; }
+    if (!ray_sym_is_dotted(sym_id)) return NULL;
 
     const int64_t* segs;
     int n = ray_sym_segs(sym_id, &segs);
@@ -458,6 +461,10 @@ ray_err_t ray_env_bind(int64_t sym_id, ray_t* val) {
     if (ray_sym_is_dotted(sym_id)) {
         return env_set_dotted(sym_id, val, lookup_global, env_bind_global);
     }
+    return env_bind_global(sym_id, val);
+}
+
+ray_err_t ray_env_bind_flat(int64_t sym_id, ray_t* val) {
     return env_bind_global(sym_id, val);
 }
 
