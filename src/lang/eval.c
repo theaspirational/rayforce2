@@ -1935,16 +1935,20 @@ vm_error_cleanup: {
  * ══════════════════════════════════════════ */
 
 /* Bind `obj` under `name` in the global env.  For reserved-namespace
- * names like `.sys.gc` the first segment (`.sys`) is a real dict in
- * the env holding `[gc, fn]` pairs — typing `.sys` alone at the REPL
- * returns the whole dict, and `.sys.gc` resolves through the regular
- * dotted segment walk in env_resolve.  For regular names (no leading
- * dot) this is just ray_env_bind.
+ * names like `.sys.gc`:
  *
- * Only 2-level namespaces are used right now (.sys.gc, .os.setenv, …)
- * so the bookkeeping below does not build nested child dicts — nsegs
- * is asserted to be 2.  Adding deeper paths would need additional
- * rebind logic for intermediate dicts. */
+ *   - `.sys` itself is a RAY_LIST dict in the env.  Typing `.sys`
+ *     at the REPL returns the whole dict for introspection.
+ *   - `.sys.gc` is ALSO bound flat in the env, pointing at the same
+ *     function object.  This keeps direct lookup O(1), surfaces the
+ *     full name to `ray_env_lookup_prefix` (so tab completion and
+ *     REPL highlighting continue to see every reserved builtin),
+ *     and lets error messages cite the fully-qualified name.
+ *
+ * The two bindings are created at startup and kept in sync — writes
+ * to any `.`-prefixed name are refused by ray_env_set, so user code
+ * can't drift them apart.  Only 2-level namespaces are in use; the
+ * assert below guards against silent breakage if that changes. */
 static void reg_bind(const char* name, ray_t* obj) {
     int64_t sym = ray_sym_intern(name, strlen(name));
     if (name[0] == '.' && ray_sym_is_dotted(sym)) {
@@ -1954,8 +1958,7 @@ static void reg_bind(const char* name, ray_t* obj) {
         int64_t root_sym = segs[0];     /* e.g. sym-id for `.sys` */
         int64_t leaf_sym = segs[1];     /* e.g. sym-id for `gc`   */
 
-        /* Take an owned reference to the namespace dict — either create
-         * fresh (refcount 1) or retain the existing env binding. */
+        /* 1. Maintain the .<ns> root dict. */
         ray_t* root = ray_env_get(root_sym);
         if (root) {
             ray_retain(root);
@@ -1964,18 +1967,17 @@ static void reg_bind(const char* name, ray_t* obj) {
             assert(root && !RAY_IS_ERR(root));
             root->attrs |= RAY_ATTR_DICT;
         }
-
-        /* Append [leaf_key, fn].  ray_list_append may COW or realloc
-         * and return a different pointer; the final `root` value is
-         * what we must rebind into the env. */
         ray_t* leaf_key = ray_sym(leaf_sym);
         root = ray_list_append(root, leaf_key);
         root = ray_list_append(root, obj);
         ray_release(leaf_key);
-
-        /* ray_env_bind retains `root` and releases the old binding. */
         assert(ray_env_bind(root_sym, root) == RAY_OK);
         ray_release(root);
+
+        /* 2. Flat binding under the full `.ns.action` sym so
+         *    ray_env_lookup_prefix (REPL completion + syntax
+         *    highlighting) enumerates every reserved builtin by name. */
+        assert(ray_env_bind(sym, obj) == RAY_OK);
         return;
     }
     assert(ray_env_bind(sym, obj) == RAY_OK);

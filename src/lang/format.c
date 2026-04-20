@@ -932,9 +932,15 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
     } else if (type == RAY_LAMBDA) {
         fmt_puts(b, "lambda");
     } else if (type == RAY_UNARY || type == RAY_BINARY || type == RAY_VARY) {
+        /* Render function objects with angle brackets so a fn is
+         * visually distinct from a sym or string.  Without them,
+         * `.os` printed as `{getenv:.os.getenv …}` — looked like
+         * a dict of sym self-references.  Now it reads
+         * `{getenv:<.os.getenv> …}`. */
         const char* name = ray_fn_name(obj);
-        if (name[0]) fmt_puts(b, name);
-        else fmt_puts(b, type == RAY_UNARY ? "builtin/1" : type == RAY_BINARY ? "builtin/2" : "builtin/n");
+        if (name[0]) { fmt_puts(b, "<"); fmt_puts(b, name); fmt_puts(b, ">"); }
+        else fmt_puts(b, type == RAY_UNARY ? "<builtin/1>" :
+                         type == RAY_BINARY ? "<builtin/2>" : "<builtin/n>");
     } else if (type == RAY_LAZY) {
         ray_t* concrete = ray_lazy_materialize(obj);
         fmt_obj(b, concrete, mode);
