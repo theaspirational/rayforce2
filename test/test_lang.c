@@ -3495,8 +3495,9 @@ static MunitResult test_dotted_temporal_atom(const void* params, void* fixture) 
     ASSERT_EQ("__dt.mm",   "5");
     ASSERT_EQ("__dt.dd",   "19");
 
-    /* TIMESTAMP atom: 1 hour + 1 minute + 1 second in microseconds. */
-    ray_eval_str("(set __ts (as 'TIMESTAMP 3661000000))");
+    /* TIMESTAMP atom: 1 hour + 1 minute + 1 second in nanoseconds
+     * (RAY_TIMESTAMP's native unit — matches io/csv.c). */
+    ray_eval_str("(set __ts (as 'TIMESTAMP 3661000000000))");
     ASSERT_EQ("__ts.hh",     "1");
     ASSERT_EQ("__ts.minute", "1");
     ASSERT_EQ("__ts.ss",     "1");
@@ -3506,14 +3507,13 @@ static MunitResult test_dotted_temporal_atom(const void* params, void* fixture) 
 static MunitResult test_dotted_temporal_truncate_atom(const void* params, void* fixture) {
     (void)params; (void)fixture;
     /* `.date` / `.time` truncate a temporal value to day / second
-     * boundary, returning RAY_TIMESTAMP.  Atom path: 90,000,000,000 us =
-     * 1 day + 1 hour; truncating to day gives exactly 1 day = 86,400 s *
-     * 1e6 us = 86,400,000,000; truncating to second gives the same
-     * microsecond count minus the sub-second remainder (which is 0 for
-     * this choice). */
-    ray_eval_str("(set __tsa (as 'TIMESTAMP 90000000000))");
-    ASSERT_EQ("(as 'I64 __tsa.date)", "86400000000");
-    ASSERT_EQ("(as 'I64 __tsa.time)", "90000000000");
+     * boundary, returning RAY_TIMESTAMP.  Atom path: 90,000,000,000,000
+     * ns = 1 day + 1 hour; truncating to day gives exactly 1 day =
+     * 86,400 s * 1e9 ns = 86,400,000,000,000; truncating to second
+     * leaves the value unchanged (no sub-second remainder here). */
+    ray_eval_str("(set __tsa (as 'TIMESTAMP 90000000000000))");
+    ASSERT_EQ("(as 'I64 __tsa.date)", "86400000000000");
+    ASSERT_EQ("(as 'I64 __tsa.time)", "90000000000000");
     return MUNIT_OK;
 }
 
@@ -3528,7 +3528,7 @@ static MunitResult test_select_nonagg_dotted_temporal(const void* params, void* 
     ray_eval_str(
         "(set __sy (table [Sym Ts] "
         "(list ['A 'B 'A 'B 'A] "
-        "      (as 'TIMESTAMP [1000000 2000000 3000000 4000000 5000000]))))");
+        "      (as 'TIMESTAMP [1000000000 2000000000 3000000000 4000000000 5000000000]))))");
     ray_t* r = ray_eval_str("(select {from: __sy by: Sym s: Ts.ss})");
     munit_assert_ptr_not_null(r);
     munit_assert_false(RAY_IS_ERR(r));
@@ -3552,7 +3552,7 @@ static MunitResult test_select_by_computed_key_many_groups(const void* params, v
     ray_eval_str("(set __mn 500)");
     ray_eval_str(
         "(set __mt (table [Ts Price] "
-        "(list (as 'TIMESTAMP (* (til __mn) 86400000000)) "
+        "(list (as 'TIMESTAMP (* (til __mn) 86400000000000)) "
         "      (as 'F64 (til __mn)))))");
     ray_t* g = ray_eval_str("(select {from: __mt by: Ts.date})");
     munit_assert_ptr_not_null(g);
@@ -3580,7 +3580,7 @@ static MunitResult test_select_by_dotted_key_surfaces_key_col(const void* params
     ray_eval_str(
         "(set __sb (table [OrderId Timestamp] "
         "(list [1 2 3 4 5 6] "
-        "      (as 'TIMESTAMP [100000 200000 1100000 1200000 2100000 2200000]))))");
+        "      (as 'TIMESTAMP [100000000 200000000 1100000000 1200000000 2100000000 2200000000]))))");
     ray_t* r = ray_eval_str("(select {from: __sb by: Timestamp.ss})");
     munit_assert_ptr_not_null(r);
     munit_assert_false(RAY_IS_ERR(r));
@@ -3617,7 +3617,7 @@ static MunitResult test_select_by_dotted_key_name_collision(const void* params, 
      *     dotted sym so the source column stays intact. */
     ray_eval_str(
         "(set __sc (table [Timestamp ss] "
-        "(list (as 'TIMESTAMP [100000 1100000 2100000]) "
+        "(list (as 'TIMESTAMP [100000000 1100000000 2100000000]) "
         "      ['a 'b 'c])))");
     ray_t* r = ray_eval_str("(select {from: __sc by: Timestamp.ss})");
     munit_assert_ptr_not_null(r);
@@ -3716,7 +3716,7 @@ static MunitResult test_select_by_dotted_temporal_key_nocrash(const void* params
      * into 3 groups. */
     ray_eval_str(
         "(set __tb (table [Timestamp Price] "
-        "(list (as 'TIMESTAMP [0 3600000000 86400000000 90000000000 172800000000]) "
+        "(list (as 'TIMESTAMP [0 3600000000000 86400000000000 90000000000000 172800000000000]) "
         "      [1.0 2.0 3.0 4.0 5.0])))");
     ray_t* r = ray_eval_str("(select {from: __tb by: Timestamp.date})");
     munit_assert_ptr_not_null(r);
@@ -3754,7 +3754,7 @@ static MunitResult test_dag_temporal_extract_nulls(const void* params, void* fix
      * compile_expr_dag → exec_extract and surfaces the I64 column
      * directly, so we can assert that the null bit travels all the
      * way to the final output column. */
-    ray_eval_str("(set __dvn (as 'TIMESTAMP (list 1000000 0Np 2000000)))");
+    ray_eval_str("(set __dvn (as 'TIMESTAMP (list 1000000000 0Np 2000000000)))");
     ray_eval_str("(set __dvt (table [Ts] (list __dvn)))");
 
     /* Non-null rows pass through unchanged. */
@@ -3775,15 +3775,18 @@ static MunitResult test_temporal_extract_slice_nulls(const void* params, void* f
      * views — `(input->attrs & RAY_ATTR_HAS_NULLS)` alone misses nulls
      * when `input` is a slice pointing at a nullable parent.  Mirrors
      * the slice-aware check used in sort.c / rerank.c / eval.c. */
-    int64_t raw[5] = {1000000, 2000000, 0, 4000000, 5000000};
+    /* RAY_TIMESTAMP is ns since 2000-01-01; 1e9 ns = 1 second, so
+     * raw[i] * 1e9 gives seconds i..5.  The extract kernel converts
+     * ns → µs internally and returns whole-second indices. */
+    int64_t raw[5] = {1000000000, 2000000000, 0, 4000000000, 5000000000};
     ray_t* v = ray_vec_from_raw(RAY_TIMESTAMP, raw, 5);
     munit_assert_ptr_not_null(v);
     ray_vec_set_null(v, 2, true);
     munit_assert_true((v->attrs & RAY_ATTR_HAS_NULLS) != 0);
     munit_assert_true(ray_vec_is_null(v, 2));
 
-    /* Slice [1..4): {2_000_000, null, 4_000_000}.  Slice itself does
-     * not carry HAS_NULLS; only the parent does. */
+    /* Slice [1..4): {2s, null, 4s}.  Slice itself does not carry
+     * HAS_NULLS; only the parent does. */
     ray_t* s = ray_vec_slice(v, 1, 3);
     munit_assert_ptr_not_null(s);
     munit_assert_false(RAY_IS_ERR(s));

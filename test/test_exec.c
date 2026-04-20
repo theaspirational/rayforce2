@@ -2126,8 +2126,11 @@ static MunitResult test_exec_extract(const void* params, void* data) {
     ray_heap_init();
     (void)ray_sym_init();
 
-    /* 2024-06-15 12:30:45 UTC as microseconds since 2000-01-01 */
-    int64_t ts = 771769845000000LL;
+    /* 2024-06-15 12:30:45 UTC as nanoseconds since 2000-01-01.
+     * RAY_TIMESTAMP is stored as i64 *nanoseconds* (matches
+     * io/csv.c's parser and the rest of the runtime); the calendar
+     * decomposer internally converts to µs. */
+    int64_t ts = 771769845000000000LL;
     ray_t* ts_vec = ray_vec_from_raw(RAY_TIMESTAMP, &ts, 1);
 
     int64_t n_ts = ray_sym_intern("ts", 2);
@@ -2180,7 +2183,8 @@ static MunitResult test_exec_date_trunc(const void* params, void* data) {
     ray_heap_init();
     (void)ray_sym_init();
 
-    int64_t ts = 771769845000000LL;
+    /* 2024-06-15 12:30:45 UTC as nanoseconds since 2000-01-01. */
+    int64_t ts = 771769845000000000LL;
     ray_t* ts_vec = ray_vec_from_raw(RAY_TIMESTAMP, &ts, 1);
 
     int64_t n_ts = ray_sym_intern("ts", 2);

@@ -3334,10 +3334,16 @@ static MunitResult test_rf_temporal_bare(const void* params, void* fixture) {
     ASSERT_EQ("(yyyy 0Nd)", "0Nl");
     ASSERT_EQ("(ss   0Nt)", "0Nl");
 
-    /* NOTE: TIMESTAMP-atom extraction (e.g. `(yyyy 2024.03.15D12:34:56.000)`)
-     * currently returns an epoch-unit value rather than the calendar
-     * year. Tracked separately; DATE/TIME atoms and TIMESTAMP *vectors*
-     * work correctly (covered by /dotted/temporal_vector). */
+    /* TIMESTAMP literal 2024.03.15D12:34:56.000 — regression for the
+     * unit-mismatch bug where ray_temporal_extract treated RAY_TIMESTAMP
+     * as microseconds while the runtime stores it as nanoseconds,
+     * producing e.g. `(yyyy ts)` = 26204 on this input. */
+    ASSERT_EQ("(yyyy 2024.03.15D12:34:56.000)", "2024");
+    ASSERT_EQ("(mm   2024.03.15D12:34:56.000)", "3");
+    ASSERT_EQ("(dd   2024.03.15D12:34:56.000)", "15");
+    ASSERT_EQ("(hh   2024.03.15D12:34:56.000)", "12");
+    ASSERT_EQ("(minute 2024.03.15D12:34:56.000)", "34");
+    ASSERT_EQ("(ss   2024.03.15D12:34:56.000)", "56");
 
     return MUNIT_OK;
 }

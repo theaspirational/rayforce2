@@ -93,14 +93,23 @@ static int64_t rte_extract_one(int64_t us, int field) {
     return 0;
 }
 
-/* Convert a raw slot value (int32 days, int32 ms, int64 us) from the
- * respective temporal type into microseconds-since-2000. */
+/* Convert a raw slot value from the respective temporal type into
+ * microseconds-since-2000 — the internal unit used by rte_extract_one's
+ * Hinnant math.  DATE is stored as int32 days, TIME as int32 ms,
+ * TIMESTAMP as int64 *nanoseconds* (matching io/csv.c's parse and the
+ * rest of the runtime).  The previous version of this helper treated
+ * TIMESTAMP as µs, which made (yyyy ts) decode to absurd years (26204
+ * on 2024-03-15) — a 1000× unit mismatch. */
 static inline int64_t rte_to_us(int8_t type, int64_t raw) {
     if (type == RAY_DATE || type == -RAY_DATE) return raw * RTE_USEC_PER_DAY;
     if (type == RAY_TIME || type == -RAY_TIME) return raw * 1000LL;
-    /* RAY_TIMESTAMP / -RAY_TIMESTAMP or I64 pretending to be µs */
-    return raw;
+    /* RAY_TIMESTAMP / -RAY_TIMESTAMP: ns → µs (floor toward -inf). */
+    return raw >= 0 ? raw / 1000LL
+                    : -(((-raw) + 999LL) / 1000LL);
 }
+
+/* Inverse of rte_to_us for TIMESTAMP output paths (truncate). */
+static inline int64_t rte_us_to_ts_raw(int64_t us) { return us * 1000LL; }
 
 ray_t* ray_temporal_extract(ray_t* input, int field) {
     if (!input || RAY_IS_ERR(input)) return input;
@@ -219,7 +228,7 @@ ray_t* ray_temporal_truncate(ray_t* input, int kind) {
             : RTE_USEC_PER_SEC;
         int64_t r = us % bucket;
         int64_t out_us = us - r - (r < 0 ? bucket : 0);
-        return ray_timestamp(out_us);
+        return ray_timestamp(rte_us_to_ts_raw(out_us));
     }
 
     /* Vector input. */
@@ -256,7 +265,7 @@ ray_t* ray_temporal_truncate(ray_t* input, int kind) {
         else                     raw = ((const int64_t*)base)[i];
         int64_t us = rte_to_us(t, raw);
         int64_t r = us % bucket;
-        out[i] = us - r - (r < 0 ? bucket : 0);
+        out[i] = rte_us_to_ts_raw(us - r - (r < 0 ? bucket : 0));
     }
     return result;
 }
@@ -328,8 +337,15 @@ ray_t* exec_extract(ray_graph_t* g, ray_op_t* op) {
                 int32_t ms = ((const int32_t*)m.morsel_ptr)[i];
                 us = (int64_t)ms * 1000LL;
             } else {
-                /* RAY_TIMESTAMP / RAY_I64: already microseconds */
-                us = ((const int64_t*)m.morsel_ptr)[i];
+                /* RAY_TIMESTAMP: int64 *nanoseconds* since 2000 (matches
+                 * io/csv parse and the rest of the runtime).  Convert to
+                 * µs for the calendar/time decomposition below.  RAY_I64
+                 * inputs flow through the same path; anything higher-
+                 * resolution than µs loses its low three digits, which
+                 * doesn't matter for calendar or clock field extraction. */
+                int64_t ns = ((const int64_t*)m.morsel_ptr)[i];
+                us = ns >= 0 ? ns / 1000LL
+                             : -(((-ns) + 999LL) / 1000LL);
             }
 
             if (field == RAY_EXTRACT_EPOCH) {
@@ -475,33 +491,42 @@ ray_t* exec_date_trunc(ray_graph_t* g, ray_op_t* op) {
                 int32_t ms = ((const int32_t*)m.morsel_ptr)[i];
                 us = (int64_t)ms * 1000LL;
             } else {
-                us = ((const int64_t*)m.morsel_ptr)[i];
+                /* RAY_TIMESTAMP: nanoseconds since 2000 → microseconds.
+                 * Sub-microsecond precision is intentionally dropped —
+                 * every DATE_TRUNC field truncates at second boundary
+                 * or coarser. */
+                int64_t ns = ((const int64_t*)m.morsel_ptr)[i];
+                us = ns >= 0 ? ns / 1000LL
+                             : -(((-ns) + 999LL) / 1000LL);
             }
 
+            /* Truncation math below happens in µs; the final value is
+             * scaled back to ns before storing, because the result
+             * vector is RAY_TIMESTAMP and the rest of the runtime
+             * expects ns. */
+            int64_t out_us;
             switch (field) {
                 case RAY_EXTRACT_SECOND: {
-                    /* Truncate to second boundary */
                     int64_t r = us % DT_USEC_PER_SEC;
-                    out[off + i] = us - r - (r < 0 ? DT_USEC_PER_SEC : 0);
+                    out_us = us - r - (r < 0 ? DT_USEC_PER_SEC : 0);
                     break;
                 }
                 case RAY_EXTRACT_MINUTE: {
                     int64_t r = us % DT_USEC_PER_MIN;
-                    out[off + i] = us - r - (r < 0 ? DT_USEC_PER_MIN : 0);
+                    out_us = us - r - (r < 0 ? DT_USEC_PER_MIN : 0);
                     break;
                 }
                 case RAY_EXTRACT_HOUR: {
                     int64_t r = us % DT_USEC_PER_HOUR;
-                    out[off + i] = us - r - (r < 0 ? DT_USEC_PER_HOUR : 0);
+                    out_us = us - r - (r < 0 ? DT_USEC_PER_HOUR : 0);
                     break;
                 }
                 case RAY_EXTRACT_DAY: {
                     int64_t r = us % DT_USEC_PER_DAY;
-                    out[off + i] = us - r - (r < 0 ? DT_USEC_PER_DAY : 0);
+                    out_us = us - r - (r < 0 ? DT_USEC_PER_DAY : 0);
                     break;
                 }
                 case RAY_EXTRACT_MONTH: {
-                    /* Decompose to y/m/d, set d=1, recompose */
                     int64_t days2k = us / DT_USEC_PER_DAY;
                     if (us < 0 && us % DT_USEC_PER_DAY != 0) days2k--;
                     int64_t z = days2k + 10957 + 719468;
@@ -513,11 +538,10 @@ ray_t* exec_date_trunc(ray_graph_t* g, ray_op_t* op) {
                     uint64_t mp = (5*doy_mar + 2) / 153;
                     uint64_t mo = mp < 10 ? mp + 3 : mp - 9;
                     y += (mo <= 2);
-                    out[off + i] = days_from_civil(y, (int64_t)mo, 1) * DT_USEC_PER_DAY;
+                    out_us = days_from_civil(y, (int64_t)mo, 1) * DT_USEC_PER_DAY;
                     break;
                 }
                 case RAY_EXTRACT_YEAR: {
-                    /* Decompose to y/m/d, set m=1 d=1, recompose */
                     int64_t days2k = us / DT_USEC_PER_DAY;
                     if (us < 0 && us % DT_USEC_PER_DAY != 0) days2k--;
                     int64_t z = days2k + 10957 + 719468;
@@ -529,13 +553,14 @@ ray_t* exec_date_trunc(ray_graph_t* g, ray_op_t* op) {
                     uint64_t mp = (5*doy_mar + 2) / 153;
                     uint64_t mo = mp < 10 ? mp + 3 : mp - 9;
                     y += (mo <= 2);
-                    out[off + i] = days_from_civil(y, 1, 1) * DT_USEC_PER_DAY;
+                    out_us = days_from_civil(y, 1, 1) * DT_USEC_PER_DAY;
                     break;
                 }
                 default:
-                    out[off + i] = us;
+                    out_us = us;
                     break;
             }
+            out[off + i] = out_us * 1000LL;  /* µs → ns for RAY_TIMESTAMP */
         }
         off += n;
     }
