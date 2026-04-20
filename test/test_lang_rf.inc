@@ -3369,8 +3369,16 @@ static MunitResult test_rf_reserved_namespace(const void* params, void* fixture)
     ray_eval_str("(set _compiled_call_shadow (fn [x] (let .sys.gc 99) (.sys.gc 0)))");
     ASSERT_ER("(_compiled_call_shadow 1)",         "reserve");
 
+    /* `(del name)` is a separate path — it goes through ray_env_set
+     * with NULL but previously discarded the return code, so
+     * `(del .sys.gc)` appeared to succeed while leaving the builtin
+     * intact (a lie).  Must now surface the `reserve` error. */
+    ASSERT_ER("(del .sys.gc)",     "reserve");
+    ASSERT_ER("(del .os.getenv)",  "reserve");
+
     /* Built-in still resolves after the blocked shadow attempts. */
     ASSERT_EQ("(.sys.gc 0)", "0");
+    ASSERT_EQ("(nil? .os.getenv)", "false");
 
     /* User-level dotted writes under a non-`.` root still work. */
     ray_eval_str("(set myns.x 1)");
