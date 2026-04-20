@@ -220,7 +220,7 @@ static void send_response(ray_sock_t fd, ray_t* result)
 
     ray_ipc_header_t hdr = {
         .prefix  = RAY_SERDE_PREFIX,
-        .version = RAY_VERSION_MAJOR,
+        .version = RAY_SERDE_WIRE_VERSION,
         .flags   = flags,
         .endian  = 0,
         .msgtype = RAY_IPC_MSG_RESP,
@@ -408,7 +408,9 @@ static ray_t* ipc_read_header(ray_poll_t* poll, ray_selector_t* sel)
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
     memcpy(&cd->hdr, sel->rx.buf->data, sizeof(ray_ipc_header_t));
 
-    if (cd->hdr.prefix != RAY_SERDE_PREFIX || cd->hdr.size <= 0 ||
+    if (cd->hdr.prefix != RAY_SERDE_PREFIX ||
+        cd->hdr.version != RAY_SERDE_WIRE_VERSION ||
+        cd->hdr.size <= 0 ||
         cd->hdr.size > 256 * 1024 * 1024) {
         ray_poll_deregister(poll, sel->id);
         return NULL;
@@ -542,6 +544,7 @@ static void conn_on_header(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     memcpy(&c->hdr, c->rx_buf, sizeof(ray_ipc_header_t));
 
     if (c->hdr.prefix != RAY_SERDE_PREFIX) { conn_close(srv, c); return; }
+    if (c->hdr.version != RAY_SERDE_WIRE_VERSION) { conn_close(srv, c); return; }
     if (c->hdr.size <= 0)                  { conn_close(srv, c); return; }
     if (c->hdr.size > 256 * 1024 * 1024)   { conn_close(srv, c); return; }
 
@@ -884,7 +887,7 @@ static int64_t client_send_msg(int64_t handle, ray_t* msg, uint8_t msgtype)
 
     ray_ipc_header_t hdr = {
         .prefix  = RAY_SERDE_PREFIX,
-        .version = RAY_VERSION_MAJOR,
+        .version = RAY_SERDE_WIRE_VERSION,
         .flags   = flags,
         .endian  = 0,
         .msgtype = msgtype,
@@ -999,6 +1002,10 @@ ray_t* ray_ipc_send(int64_t handle, ray_t* msg)
     if (hdr.prefix != RAY_SERDE_PREFIX || hdr.size <= 0) {
         ray_ipc_close(handle);
         return ray_error("io", "ipc bad response header");
+    }
+    if (hdr.version != RAY_SERDE_WIRE_VERSION) {
+        ray_ipc_close(handle);
+        return ray_error("version", "ipc peer wire version mismatch");
     }
     if (hdr.size > 256 * 1024 * 1024) {
         ray_ipc_close(handle);

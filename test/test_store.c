@@ -1640,6 +1640,48 @@ static MunitResult test_serde_typed_null_atoms(const void* params, void* fixture
     return MUNIT_OK;
 }
 
+/* ---- test_serde_wire_version_mismatch ---------------------------------- */
+
+static MunitResult test_serde_wire_version_mismatch(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* A payload serialized at the current wire version must roundtrip
+     * cleanly; one tagged with a different version must be rejected
+     * with a version error instead of being silently mis-parsed by a
+     * peer that happens to share the prefix. */
+    ray_t* orig = ray_i64(42);
+    ray_t* wire = ray_ser(orig);
+    munit_assert_ptr_not_null(wire);
+    munit_assert_false(RAY_IS_ERR(wire));
+
+    /* Clean roundtrip baseline. */
+    {
+        ray_t* back = ray_de(wire);
+        munit_assert_false(RAY_IS_ERR(back));
+        ray_release(back);
+    }
+
+    /* Tamper with the header's version byte. */
+    ray_ipc_header_t* hdr = (ray_ipc_header_t*)ray_data(wire);
+    uint8_t old_v = hdr->version;
+    hdr->version = (uint8_t)(old_v + 1);
+
+    ray_t* bad = ray_de(wire);
+    munit_assert_true(RAY_IS_ERR(bad));
+    /* err type string should be "version" per the fix in ray_de */
+    munit_assert_memory_equal(7, bad->sdata, "version");
+
+    /* Restore and confirm good version still works. */
+    hdr->version = old_v;
+    ray_t* good = ray_de(wire);
+    munit_assert_false(RAY_IS_ERR(good));
+    ray_release(good);
+
+    ray_release(wire);
+    ray_release(orig);
+    return MUNIT_OK;
+}
+
 /* ---- test_mem_budget --------------------------------------------------- */
 
 static MunitResult test_mem_budget(const void* params, void* fixture) {
@@ -2074,6 +2116,7 @@ static MunitTest store_tests[] = {
     { "/serde_long_str_roundtrip", test_serde_long_str_roundtrip, store_setup, store_teardown, 0, NULL },
     { "/serde_null_roundtrip", test_serde_null_roundtrip, store_setup, store_teardown, 0, NULL },
     { "/serde_typed_null_atoms", test_serde_typed_null_atoms, store_setup, store_teardown, 0, NULL },
+    { "/serde_wire_version_mismatch", test_serde_wire_version_mismatch, store_setup, store_teardown, 0, NULL },
     { "/mem_budget",          test_mem_budget,          NULL,        NULL,            0, NULL },
     { "/ipc/compress_rt",        test_ipc_compress_rt,        NULL, NULL, 0, NULL },
     { "/ipc/compress_threshold", test_ipc_compress_threshold,  NULL, NULL, 0, NULL },

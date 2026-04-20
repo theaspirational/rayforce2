@@ -874,7 +874,7 @@ ray_t* ray_ser(ray_t* obj) {
 
     ray_ipc_header_t* hdr = (ray_ipc_header_t*)ray_data(buf);
     hdr->prefix  = RAY_SERDE_PREFIX;
-    hdr->version = RAY_VERSION_MAJOR;
+    hdr->version = RAY_SERDE_WIRE_VERSION;
     hdr->flags   = 0;
     hdr->endian  = 0;
     hdr->msgtype = 0;
@@ -907,6 +907,8 @@ ray_t* ray_de(ray_t* bytes) {
     ray_ipc_header_t* hdr = (ray_ipc_header_t*)buf;
     if (hdr->prefix != RAY_SERDE_PREFIX)
         return ray_error("domain", NULL);
+    if (hdr->version != RAY_SERDE_WIRE_VERSION)
+        return ray_error("version", "serde wire version mismatch");
     if (hdr->size < 0 || hdr->size > 1000000000)
         return ray_error("domain", NULL);
     if (hdr->size + (int64_t)sizeof(ray_ipc_header_t) != total)

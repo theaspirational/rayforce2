@@ -29,6 +29,20 @@
 /* Wire format prefix */
 #define RAY_SERDE_PREFIX 0xcefadefa
 
+/* Wire format version.  Bumped whenever the on-the-wire layout of any
+ * serialized value changes (e.g. a new field is added to the atom
+ * record) so a peer running older code detects the mismatch and
+ * rejects the payload instead of silently mis-parsing.  Decoupled from
+ * RAY_VERSION_MAJOR on purpose: API version and wire version evolve
+ * independently.
+ *
+ *   Version 2 — atoms: type(1) + value-bytes.
+ *   Version 3 — atoms: type(1) + flags(1) + value-bytes.  `flags` bit 0
+ *               carries the typed-null marker so (de (ser 0Nl)) round-
+ *               trips (previously decoded as ray_i64(0) and dropped the
+ *               null bit). */
+#define RAY_SERDE_WIRE_VERSION 3
+
 /* Wire-only null marker (not a valid ray_t type) */
 #define RAY_SERDE_NULL 126
 
