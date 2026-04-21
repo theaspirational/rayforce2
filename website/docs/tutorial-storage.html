@@ -120,8 +120,8 @@
 
       <!-- Step 1 -->
       <h2 id="reading-csv">1. Reading CSV Files</h2>
-      <p>Create a CSV file on disk, then load it with <code>read-csv</code>. The first row is treated as column headers, and types are inferred automatically:</p>
-      <pre><code>(<span class="hl-kw">set</span> trades (<span class="hl-fn">read-csv</span> <span class="hl-str">"/tmp/rayforce-test/trades.csv"</span>))
+      <p>Create a CSV file on disk, then load it with <code>.csv.read</code>. The first row is treated as column headers, and types are inferred automatically:</p>
+      <pre><code>(<span class="hl-kw">set</span> trades (<span class="hl-fn">.csv.read</span> <span class="hl-str">"/tmp/rayforce-test/trades.csv"</span>))
 trades</code></pre>
       <p>Assuming <code>trades.csv</code> contains:</p>
       <pre><code>Symbol,Price,Qty
@@ -270,12 +270,12 @@ loaded</code></pre>
 
       <!-- Step 7 -->
       <h2 id="writing-csv">7. Writing CSV</h2>
-      <p>Export any table to CSV with <code>write-csv</code>. The return value <code>0</code> indicates success:</p>
+      <p>Export any table to CSV with <code>.csv.write</code>. The return value <code>0</code> indicates success:</p>
       <pre><code>(<span class="hl-kw">set</span> big (<span class="hl-kw">select</span> {<span class="hl-sym">from:</span>trades <span class="hl-sym">where:</span> (<span class="hl-fn">&gt;</span> <span class="hl-sym">Price</span> <span class="hl-num">200.0</span>)}))
-(<span class="hl-fn">write-csv</span> big <span class="hl-str">"/tmp/rayforce-test/big_trades.csv"</span>)</code></pre>
+(<span class="hl-fn">.csv.write</span> big <span class="hl-str">"/tmp/rayforce-test/big_trades.csv"</span>)</code></pre>
       <pre><code>0</code></pre>
       <p>Verify by reading it back:</p>
-      <pre><code>(<span class="hl-fn">read-csv</span> <span class="hl-str">"/tmp/rayforce-test/big_trades.csv"</span>)</code></pre>
+      <pre><code>(<span class="hl-fn">.csv.read</span> <span class="hl-str">"/tmp/rayforce-test/big_trades.csv"</span>)</code></pre>
       <pre><code>&#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
 &#9474; Symbol &#9474; Price &#9474;        Qty         &#9474;
 &#9474;  sym   &#9474;  f64  &#9474;        i64         &#9474;
@@ -299,10 +299,10 @@ loaded</code></pre>
     [<span class="hl-num">100</span> <span class="hl-num">200</span> <span class="hl-num">50</span> <span class="hl-num">300</span> <span class="hl-num">150</span>])))
 
 <span class="hl-comment">; 2. Save to CSV</span>
-(<span class="hl-fn">write-csv</span> trades <span class="hl-str">"/tmp/rayforce-test/trades.csv"</span>)
+(<span class="hl-fn">.csv.write</span> trades <span class="hl-str">"/tmp/rayforce-test/trades.csv"</span>)
 
 <span class="hl-comment">; 3. Reload from CSV</span>
-(<span class="hl-kw">set</span> loaded (<span class="hl-fn">read-csv</span> <span class="hl-str">"/tmp/rayforce-test/trades.csv"</span>))
+(<span class="hl-kw">set</span> loaded (<span class="hl-fn">.csv.read</span> <span class="hl-str">"/tmp/rayforce-test/trades.csv"</span>))
 
 <span class="hl-comment">; 4. Filter: only trades above 200</span>
 (<span class="hl-kw">set</span> big (<span class="hl-kw">select</span> {<span class="hl-sym">from:</span>loaded <span class="hl-sym">where:</span> (<span class="hl-fn">&gt;</span> <span class="hl-sym">Price</span> <span class="hl-num">200.0</span>)}))
@@ -336,7 +336,7 @@ loaded</code></pre>
           <tr><th>Format</th><th>Function</th><th>Preserves Types</th><th>Best For</th></tr>
         </thead>
         <tbody>
-          <tr><td>CSV</td><td><code>read-csv</code> / <code>write-csv</code></td><td>No (re-inferred on load)</td><td>Interoperability, human-readable data</td></tr>
+          <tr><td>CSV</td><td><code>.csv.read</code> / <code>.csv.write</code></td><td>No (re-inferred on load)</td><td>Interoperability, human-readable data</td></tr>
           <tr><td>Binary</td><td><code>ser</code> / <code>de</code></td><td>Yes</td><td>Caching, IPC, embedding in messages</td></tr>
           <tr><td>Splayed</td><td><code>set-splayed</code> / <code>get-splayed</code></td><td>Yes</td><td>Persistent storage, fast reload, mmap</td></tr>
         </tbody>

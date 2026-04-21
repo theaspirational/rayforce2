@@ -131,7 +131,7 @@ src/ops/string.c            String opcode execution (UPPER/LOWER/TRIM/SUBSTR/REP
 src/ops/temporal.c          Temporal opcode execution + date/time/timestamp builtins
 src/ops/embedding.c         Embedding/vector similarity execution
 src/ops/query.c             Query bridge — select/update/insert/upsert/join builtins
-src/ops/builtins.c          I/O builtins (println/show/format/read-csv/write-csv), cast, misc
+src/ops/builtins.c          I/O builtins (println/show/format/.csv.read/.csv.write), cast, misc
 src/ops/agg.c               Aggregation builtins (sum/count/avg/min/max/first/last/med/dev)
 src/ops/arith.c             Arithmetic builtins (+, -, *, /, %, neg, round, floor, ceil)
 src/ops/cmp.c               Comparison builtins (>, <, >=, <=, ==, !=)

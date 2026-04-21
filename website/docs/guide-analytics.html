@@ -300,10 +300,10 @@
         [<span class="hl-sym">A</span> <span class="hl-sym">B</span> <span class="hl-sym">A</span>])))
 
 <span class="hl-comment">; Save to CSV</span>
-(<span class="hl-fn">write-csv</span> data <span class="hl-str">"/tmp/grades.csv"</span>)
+(<span class="hl-fn">.csv.write</span> data <span class="hl-str">"/tmp/grades.csv"</span>)
 
 <span class="hl-comment">; Load it back</span>
-(<span class="hl-fn">read-csv</span> <span class="hl-str">"/tmp/grades.csv"</span>)</code></pre>
+(<span class="hl-fn">.csv.read</span> <span class="hl-str">"/tmp/grades.csv"</span>)</code></pre>
       <pre><code>┌─────────┬───────┬───────────────────┐
 │  Name   │ Score │       Grade       │
 │   sym   │  i64  │        sym        │
@@ -314,7 +314,7 @@
 ├─────────┴───────┴───────────────────┤
 │ 3 rows (3 shown) 3 columns (3 shown)│
 └─────────────────────────────────────┘</code></pre>
-      <p>A typical workflow: <code>read-csv</code> to load, <code>select</code> to filter and transform, <code>write-csv</code> to save results. The CSV reader uses parallel parsing and automatic type inference for fast loading of large files.</p>
+      <p>A typical workflow: <code>.csv.read</code> to load, <code>select</code> to filter and transform, <code>.csv.write</code> to save results. The CSV reader uses parallel parsing and automatic type inference for fast loading of large files.</p>
 
       <!-- 8. Complex Aggregation with fold -->
       <h2 id="fold-aggregation">8. Complex Aggregation with <code>fold</code></h2>

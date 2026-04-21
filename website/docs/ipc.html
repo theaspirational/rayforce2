@@ -170,7 +170,7 @@
           <tr><td>Mutation</td><td><code>set</code>, <code>del</code>, <code>update</code>, <code>insert</code>, <code>upsert</code>, <code>modify</code></td></tr>
           <tr><td>File writes</td><td><code>write</code>, <code>.csv.write</code>, <code>load</code>, <code>set-splayed</code></td></tr>
           <tr><td>File reads</td><td><code>read</code>, <code>.csv.read</code></td></tr>
-          <tr><td>System</td><td><code>.sys.exec</code>, <code>getenv</code>, <code>setenv</code>, <code>os-get-var</code>, <code>os-set-var</code>, <code>exit</code></td></tr>
+          <tr><td>System</td><td><code>.sys.exec</code>, <code>.os.getenv</code>, <code>.os.setenv</code>, <code>exit</code></td></tr>
           <tr><td>IPC chaining</td><td><code>.ipc.open</code>, <code>.ipc.close</code>, <code>.ipc.send</code></td></tr>
         </tbody>
       </table>
@@ -194,7 +194,7 @@
       <h2 id="client-builtins">Client Builtins</h2>
       <p>Connect to a running server and send queries from Rayfall:</p>
 
-      <h3>hopen</h3>
+      <h3>.ipc.open</h3>
       <pre><code><span class="hl-comment">;; Connect to a server (no auth)</span>
 (<span class="hl-kw">set</span> h (<span class="hl-fn">.ipc.open</span> <span class="hl-str">"127.0.0.1:5000"</span>))
 <span class="hl-comment">;; =&gt; 0  (connection handle)</span>
@@ -204,7 +204,7 @@
 <span class="hl-comment">;; =&gt; 0  (connection handle)</span></code></pre>
       <p>The format is <code>"host:port"</code> for unauthenticated connections, or <code>"host:port:user:password"</code> when the server requires authentication. If the server requires auth and no credentials are provided, <code>.ipc.open</code> returns an <code>"access"</code> error.</p>
 
-      <h3>hsend</h3>
+      <h3>.ipc.send</h3>
       <p><code>.ipc.send</code> sends any serializable value to the server and returns the result. The server&rsquo;s behavior depends on the payload type:</p>
 
       <table>
@@ -257,7 +257,7 @@
 (<span class="hl-fn">.ipc.send</span> h (<span class="hl-fn">list</span> select {<span class="hl-sym">from:</span> trades <span class="hl-sym">where:</span> (<span class="hl-fn">list</span> &gt; (quote price) threshold)}))
 <span class="hl-comment">;; =&gt; trades where price &gt; 200</span></code></pre>
 
-      <h3>hclose</h3>
+      <h3>.ipc.close</h3>
       <pre><code><span class="hl-comment">;; Close the connection</span>
 (<span class="hl-fn">.ipc.close</span> h)</code></pre>
 

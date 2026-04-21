@@ -129,7 +129,7 @@
         <li><strong>Global intern table</strong> &mdash; symbols are shared across all columns and tables</li>
       </ul>
       <pre><code><span class="hl-comment">; Create a table with a SYM column (default for short repeated strings in CSV)</span>
-<span class="hl-comment">ray&gt;</span> (<span class="hl-kw">set</span> t (<span class="hl-fn">read-csv</span> <span class="hl-str">"trades.csv"</span>))
+<span class="hl-comment">ray&gt;</span> (<span class="hl-kw">set</span> t (<span class="hl-fn">.csv.read</span> <span class="hl-str">"trades.csv"</span>))
 <span class="hl-comment">; region column is automatically SYM — only 4 unique values across 1M rows</span></code></pre>
 
       <h3 id="ray-str">RAY_STR &mdash; Variable-Length Strings</h3>

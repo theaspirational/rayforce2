@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Memory &amp; Monitoring — Rayforce Documentation</title>
-  <meta name="description" content="Memory management, garbage collection, profiling, and monitoring tools in Rayforce: memstat, gc, sysinfo, timeit, progress bars, and practical patterns.">
+  <meta name="description" content="Memory management, garbage collection, profiling, and monitoring tools in Rayforce: .sys.mem, gc, .sys.info, timeit, progress bars, and practical patterns.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Oswald:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -128,8 +128,8 @@
       </ul>
       <p>For a deep dive into the allocator internals, see <a href="architecture-memory.html">Memory Model</a>.</p>
 
-      <!-- 2. memstat -->
-      <h2 id="memstat">2. The <code>.sys.mem</code> Function</h2>
+      <!-- 2. .sys.mem -->
+      <h2 id=".sys.mem">2. The <code>.sys.mem</code> Function</h2>
       <p>Call <code>(.sys.mem 0)</code> to get a snapshot of the current heap&rsquo;s allocation statistics. It returns a dictionary with the following fields:</p>
 
       <table>
@@ -203,8 +203,8 @@ sys-current     | 8388608</code></pre>
         <strong>Note:</strong> Because Rayforce uses deterministic ref counting (not tracing GC), memory is freed immediately when the last reference is released. The buddy allocator coalesces blocks and releases pages back to the OS automatically. <code>(.sys.gc 0)</code> exists as a hook for future use.
       </div>
 
-      <!-- 4. sysinfo -->
-      <h2 id="sysinfo">4. The <code>.sys.info</code> Function</h2>
+      <!-- 4. .sys.info -->
+      <h2 id=".sys.info">4. The <code>.sys.info</code> Function</h2>
       <p>Call <code>(.sys.info 0)</code> to see system-level information about the Rayforce runtime:</p>
       <pre><code>(<span class="hl-fn">.sys.info</span>)</code></pre>
       <pre><code>cores     | 16

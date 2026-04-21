@@ -598,10 +598,8 @@
           <tr><td><code>parse</code></td><td>unary</td><td>&mdash;</td><td>Parse a string into a Rayfall expression tree</td><td><code>(parse "(+ 1 2)")</code></td></tr>
           <tr><td><code>.sys.gc</code></td><td>unary</td><td>&mdash;</td><td>Trigger garbage collection / heap flush</td><td><code>(.sys.gc 0)</code></td></tr>
           <tr><td><code>.sys.exec</code></td><td>unary</td><td>restricted</td><td>Execute a shell command, return output as string</td><td><code>(.sys.exec "ls -la")</code></td></tr>
-          <tr><td><code>getenv</code></td><td>unary</td><td>restricted</td><td>Get environment variable value</td><td><code>(getenv "HOME")</code></td></tr>
-          <tr><td><code>setenv</code></td><td>binary</td><td>restricted</td><td>Set environment variable</td><td><code>(setenv "KEY" "value")</code></td></tr>
-          <tr><td><code>os-get-var</code></td><td>unary</td><td>restricted</td><td>Alias for getenv</td><td><code>(os-get-var "PATH")</code></td></tr>
-          <tr><td><code>os-set-var</code></td><td>binary</td><td>restricted</td><td>Alias for setenv</td><td><code>(os-set-var "KEY" "val")</code></td></tr>
+          <tr><td><code>.os.getenv</code></td><td>unary</td><td>restricted</td><td>Get environment variable value</td><td><code>(.os.getenv "HOME")</code></td></tr>
+          <tr><td><code>.os.setenv</code></td><td>binary</td><td>restricted</td><td>Set environment variable</td><td><code>(.os.setenv "KEY" "value")</code></td></tr>
           <tr><td><code>args</code></td><td>unary</td><td>&mdash;</td><td>Get command-line arguments as vector</td><td><code>(args 0)</code></td></tr>
           <tr><td><code>env</code></td><td>unary</td><td>&mdash;</td><td>List all global environment bindings</td><td><code>(env 0)</code></td></tr>
           <tr><td><code>timer</code></td><td>unary</td><td>&mdash;</td><td>High-resolution monotonic nanosecond clock</td><td><code>(timer 0)</code></td></tr>

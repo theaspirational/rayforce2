@@ -198,7 +198,7 @@
       <h3>Access Errors (Restricted Mode)</h3>
       <p>In restricted evaluation mode (used for IPC), certain functions are blocked:</p>
       <pre><code><span class="hl-comment">; on a restricted server connection:</span>
-(<span class="hl-fn">system</span> <span class="hl-str">"rm -rf /"</span>)
+(<span class="hl-fn">.sys.exec</span> <span class="hl-str">"rm -rf /"</span>)
 <span class="hl-comment">; error: access — restricted</span></code></pre>
 
       <h3>How Errors Display in the REPL</h3>
@@ -324,7 +324,7 @@ rf&gt; (<span class="hl-fn">+</span> <span class="hl-num">1</span> <span class="
       <pre><code><span class="hl-comment">;; safely load a CSV, return empty table on failure</span>
 (<span class="hl-kw">set</span> data
   (<span class="hl-kw">try</span>
-    (<span class="hl-fn">read-csv</span> <span class="hl-str">"data.csv"</span>)
+    (<span class="hl-fn">.csv.read</span> <span class="hl-str">"data.csv"</span>)
     (<span class="hl-kw">fn</span> [e]
       (<span class="hl-fn">println</span> <span class="hl-str">"failed to load:"</span> e)
       (<span class="hl-fn">table</span> [<span class="hl-sym">x</span>] (<span class="hl-fn">list</span> [])))))
@@ -379,7 +379,7 @@ rf&gt; (<span class="hl-fn">+</span> <span class="hl-num">1</span> <span class="
 (<span class="hl-kw">set</span> result
   (<span class="hl-kw">try</span>
     (<span class="hl-kw">do</span>
-      (<span class="hl-kw">set</span> raw (<span class="hl-fn">read-csv</span> <span class="hl-str">"input.csv"</span>))
+      (<span class="hl-kw">set</span> raw (<span class="hl-fn">.csv.read</span> <span class="hl-str">"input.csv"</span>))
       (<span class="hl-kw">set</span> clean (<span class="hl-fn">select</span> {<span class="hl-sym">from</span>: raw <span class="hl-sym">where</span>: (<span class="hl-fn">></span> <span class="hl-sym">price</span> <span class="hl-num">0</span>)}))
       (<span class="hl-fn">select</span> {<span class="hl-sym">from:</span> clean <span class="hl-sym">by:</span> {<span class="hl-sym">sym:</span> sym} <span class="hl-sym">cols:</span> {<span class="hl-sym">p:</span> (<span class="hl-fn">avg</span> price)}}))
     (<span class="hl-kw">fn</span> [e]
@@ -392,10 +392,10 @@ rf&gt; (<span class="hl-fn">+</span> <span class="hl-num">1</span> <span class="
   (<span class="hl-kw">do</span>
     (<span class="hl-kw">set</span> data
       (<span class="hl-kw">try</span>
-        (<span class="hl-fn">read-csv</span> <span class="hl-str">"primary.csv"</span>)
+        (<span class="hl-fn">.csv.read</span> <span class="hl-str">"primary.csv"</span>)
         (<span class="hl-kw">fn</span> [e]
           (<span class="hl-fn">println</span> <span class="hl-str">"primary failed, trying backup"</span>)
-          (<span class="hl-fn">read-csv</span> <span class="hl-str">"backup.csv"</span>))))
+          (<span class="hl-fn">.csv.read</span> <span class="hl-str">"backup.csv"</span>))))
     (<span class="hl-fn">select</span> {<span class="hl-sym">from:</span> data <span class="hl-sym">by:</span> {<span class="hl-sym">sym:</span> sym} <span class="hl-sym">cols:</span> {<span class="hl-sym">total:</span> (<span class="hl-fn">sum</span> qty)}}))
   (<span class="hl-kw">fn</span> [e] (<span class="hl-fn">println</span> <span class="hl-str">"all attempts failed:"</span> e)))</code></pre>
 

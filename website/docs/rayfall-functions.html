@@ -479,10 +479,8 @@
           <tr><td><code>parse</code></td><td>unary</td><td>Parse string into Rayfall expression</td><td><code>(parse "(+ 1 2)")</code></td></tr>
           <tr><td><code>.sys.gc</code></td><td>unary</td><td>Trigger garbage collection</td><td><code>(.sys.gc 0)</code></td></tr>
           <tr><td><code>.sys.exec</code></td><td>unary</td><td>Execute shell command</td><td><code>(.sys.exec "ls -la")</code></td></tr>
-          <tr><td><code>getenv</code></td><td>unary</td><td>Get environment variable</td><td><code>(getenv "HOME")</code></td></tr>
-          <tr><td><code>setenv</code></td><td>binary</td><td>Set environment variable</td><td><code>(setenv "KEY" "value")</code></td></tr>
-          <tr><td><code>os-get-var</code></td><td>unary</td><td>Alias for getenv</td><td><code>(os-get-var "PATH")</code></td></tr>
-          <tr><td><code>os-set-var</code></td><td>binary</td><td>Alias for setenv</td><td><code>(os-set-var "KEY" "val")</code></td></tr>
+          <tr><td><code>.os.getenv</code></td><td>unary</td><td>Get environment variable</td><td><code>(.os.getenv "HOME")</code></td></tr>
+          <tr><td><code>.os.setenv</code></td><td>binary</td><td>Set environment variable</td><td><code>(.os.setenv "KEY" "value")</code></td></tr>
           <tr><td><code>exit</code></td><td>unary</td><td>Exit with status code</td><td><code>(exit 0)</code></td></tr>
           <tr><td><code>timeit</code></td><td>variadic, special</td><td>Benchmark an expression</td><td><code>(timeit (sum (til 1000000)))</code></td></tr>
           <tr><td><code>timer</code></td><td>unary</td><td>High-resolution monotonic nanosecond clock</td><td><code>(timer 0)</code></td></tr>

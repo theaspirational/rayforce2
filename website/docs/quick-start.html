@@ -210,7 +210,7 @@ make test
 
       <h2>Load a CSV File</h2>
       <p>Load data from CSV files with automatic type inference, parallel parsing, and null handling:</p>
-      <pre><code><span class="hl-comment">‣</span> (<span class="hl-kw">set</span> data (<span class="hl-fn">read-csv</span> <span class="hl-str">"trades.csv"</span>))
+      <pre><code><span class="hl-comment">‣</span> (<span class="hl-kw">set</span> data (<span class="hl-fn">.csv.read</span> <span class="hl-str">"trades.csv"</span>))
 <span class="hl-comment">‣</span> (<span class="hl-kw">select</span> {<span class="hl-sym">from:</span>data <span class="hl-sym">where:</span> (<span class="hl-fn">&gt;</span> price <span class="hl-num">100</span>)})</code></pre>
 
       <h2>Run a Script</h2>

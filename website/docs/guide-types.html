@@ -412,7 +412,7 @@
       <h3>CSV Type Fixing</h3>
       <p>After loading a CSV, columns often arrive as strings. Cast them to proper types:</p>
       <pre><code><span class="hl-comment">; Load CSV (all columns as strings by default)</span>
-(<span class="hl-kw">set</span> raw (<span class="hl-fn">read-csv</span> <span class="hl-str">"trades.csv"</span>))
+(<span class="hl-kw">set</span> raw (<span class="hl-fn">.csv.read</span> <span class="hl-str">"trades.csv"</span>))
 
 <span class="hl-comment">; Cast columns to proper types</span>
 (<span class="hl-kw">set</span> trades

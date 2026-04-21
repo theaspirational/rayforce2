@@ -269,22 +269,22 @@
       <!-- Step 7 -->
       <h2 id="loading-csv">7. Loading CSV Files</h2>
       <p>Load a CSV file with automatic type inference and parallel parsing:</p>
-      <pre><code>(<span class="hl-kw">set</span> data (<span class="hl-fn">read-csv</span> <span class="hl-str">"trades.csv"</span>))</code></pre>
+      <pre><code>(<span class="hl-kw">set</span> data (<span class="hl-fn">.csv.read</span> <span class="hl-str">"trades.csv"</span>))</code></pre>
       <p>The first row is treated as column headers. Types are inferred from the data: integers, floats, dates, times, timestamps, and symbols are all detected automatically.</p>
 
       <!-- Step 8 -->
       <h2 id="saving-csv">8. Saving Results to CSV</h2>
-      <p>Write any table to a CSV file with <code>write-csv</code>:</p>
+      <p>Write any table to a CSV file with <code>.csv.write</code>:</p>
       <pre><code>(<span class="hl-kw">set</span> data (<span class="hl-fn">table</span> [<span class="hl-sym">Symbol</span> <span class="hl-sym">Price</span> <span class="hl-sym">Qty</span>]
   (<span class="hl-fn">list</span> [<span class="hl-sym">AAPL</span> <span class="hl-sym">GOOG</span> <span class="hl-sym">MSFT</span>]
         [<span class="hl-num">150.0</span> <span class="hl-num">280.0</span> <span class="hl-num">420.0</span>]
         [<span class="hl-num">100</span> <span class="hl-num">200</span> <span class="hl-num">50</span>])))
 
 <span class="hl-comment">; Save to CSV</span>
-(<span class="hl-fn">write-csv</span> data <span class="hl-str">"/tmp/trades.csv"</span>)
+(<span class="hl-fn">.csv.write</span> data <span class="hl-str">"/tmp/trades.csv"</span>)
 
 <span class="hl-comment">; Load it back to verify</span>
-(<span class="hl-fn">read-csv</span> <span class="hl-str">"/tmp/trades.csv"</span>)</code></pre>
+(<span class="hl-fn">.csv.read</span> <span class="hl-str">"/tmp/trades.csv"</span>)</code></pre>
       <pre><code>┌────────┬───────┬────────────────────┐
 │ Symbol │ Price │        Qty         │
 │  sym   │  i64  │        i64         │
