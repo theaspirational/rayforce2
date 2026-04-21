@@ -27,6 +27,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #ifdef RAY_OS_WINDOWS
 #include <windows.h>
 #else
@@ -157,24 +158,17 @@ void ray_error_clear(void) {
 
 /* ===== Lifecycle ===== */
 
-static ray_runtime_t* runtime_create_impl(const char* sym_path) {
+static ray_runtime_t* runtime_create_impl(const char* sym_path,
+                                           ray_err_t* out_sym_err) {
+    if (out_sym_err) *out_sym_err = RAY_OK;
+
     /* Init subsystems */
     ray_heap_init();
     ray_sym_init();
 
-    /* Load persisted symbol table BEFORE any interning (builtins, env).
-     * This ensures symbol IDs from prior sessions keep their slots,
-     * and new builtins get appended with fresh IDs.  NULL means skip. */
-    if (sym_path) {
-        ray_err_t sym_err = ray_sym_load(sym_path);
-        if (sym_err != RAY_OK && sym_err != RAY_ERR_CORRUPT) {
-            /* I/O error — surface it; caller decides policy */
-        }
-        /* RAY_ERR_CORRUPT is non-fatal: proceed with empty table,
-         * caller rebuilds from authoritative source. */
-    }
-
-    /* Allocate runtime via system allocator */
+    /* Allocate runtime and set __VM + mem_budget BEFORE any file I/O so
+     * that ray_error() has a live VM to record diagnostics against and
+     * allocations are bounded by the budget. */
     ray_runtime_t* rt = (ray_runtime_t*)ray_sys_alloc(sizeof(ray_runtime_t));
     if (!rt) return NULL;
     memset(rt, 0, sizeof(*rt));
@@ -206,22 +200,59 @@ static ray_runtime_t* runtime_create_impl(const char* sym_path) {
         rt->mem_budget = (int64_t)(4ULL << 30);
 #endif
 
-    /* Init language (env + builtins) — must be after __VM is set.
-     * Builtins intern their names; with sym_path loaded above, those
-     * names land after any persisted slots. */
+    /* __RUNTIME must be visible before ray_sym_load so mem_budget checks
+     * and ray_error() both operate against the live runtime. */
+    __RUNTIME = rt;
+
+    /* Load persisted symbol table BEFORE ray_lang_init interns builtins.
+     * Ordering: __VM + mem_budget are live so file I/O errors surface via
+     * ray_error() and allocations are budget-bounded.  Still before
+     * ray_lang_init so persisted user symbol IDs keep their slots and
+     * builtins append afterwards. */
+    if (sym_path) {
+        /* Pre-flight size check: reject files that would blow past the
+         * memory budget before ever touching ray_col_load. */
+        struct stat st;
+        if (stat(sym_path, &st) == 0) {
+            /* Allow the sym file itself plus some working headroom (2x).
+             * A well-formed sym file is a list of interned strings; the
+             * in-memory footprint is bounded by file size within a small
+             * constant factor. */
+            if (st.st_size > 0 &&
+                (int64_t)st.st_size > rt->mem_budget / 2) {
+                if (out_sym_err) *out_sym_err = RAY_ERR_OOM;
+                /* Continue startup with empty sym table; caller decides
+                 * whether to treat this as fatal. */
+            } else {
+                ray_err_t sym_err = ray_sym_load(sym_path);
+                if (out_sym_err) *out_sym_err = sym_err;
+                /* RAY_ERR_CORRUPT and I/O errors are non-fatal here:
+                 * caller inspects out_sym_err to decide recovery. */
+            }
+        }
+        /* ENOENT and other stat failures: leave out_sym_err = RAY_OK;
+         * an absent sym file is the normal first-run case. */
+    }
+
+    /* Init language (env + builtins) — must be after __VM is set and
+     * after sym_load so persisted user IDs keep their slots. */
     ray_lang_init();
 
-    __RUNTIME = rt;
     return rt;
 }
 
 ray_runtime_t* ray_runtime_create(int argc, char** argv) {
     (void)argc; (void)argv;
-    return runtime_create_impl(NULL);
+    return runtime_create_impl(NULL, NULL);
 }
 
 ray_runtime_t* ray_runtime_create_with_sym(const char* sym_path) {
-    return runtime_create_impl(sym_path);
+    return runtime_create_impl(sym_path, NULL);
+}
+
+ray_runtime_t* ray_runtime_create_with_sym_err(const char* sym_path,
+                                               ray_err_t* out_sym_err) {
+    return runtime_create_impl(sym_path, out_sym_err);
 }
 
 /* ===== Memory Budget API ===== */
