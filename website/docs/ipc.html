@@ -188,7 +188,7 @@
 <span class="hl-comment">;; =&gt; 3  (queries still work)</span></code></pre>
 
       <div class="info-box">
-        <strong>Security note.</strong> Restriction applies to all dispatch paths including higher-order functions. <code>(map system ["echo hi"])</code> is also blocked in restricted mode.
+        <strong>Security note.</strong> Restriction applies to all dispatch paths including higher-order functions. <code>(map .sys.exec ["echo hi"])</code> is also blocked in restricted mode.
       </div>
 
       <h2 id="client-builtins">Client Builtins</h2>
