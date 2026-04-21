@@ -1397,6 +1397,194 @@ static MunitResult test_rule_body_const_surface_syntax(const void* params, void*
     return MUNIT_OK;
 }
 
+/* Grouped MIN: user_min(?u, ?m) :- min(?m, weight_by_user col 1) by (?u, col 0)
+ * Data: user 1 -> {50,60}, user 2 -> {75,85}.  Expected: (1,50), (2,75). */
+static MunitResult test_agg_min_grouped(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t users[]   = {1, 1, 2, 2};
+    int64_t weights[] = {50, 60, 75, 85};
+    ray_t* u_col = ray_vec_from_raw(RAY_I64, users, 4);
+    ray_t* w_col = ray_vec_from_raw(RAY_I64, weights, 4);
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("wbu__c0", 7), u_col);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("wbu__c1", 7), w_col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "wbu", tbl, 2);
+
+    dl_rule_t r; dl_rule_init(&r, "user_min", 2);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_head_var(&r, 1, 1);
+    int idx = dl_rule_add_agg(&r, DL_AGG_MIN, 1, "wbu", 2, 1);
+    int key_vars[] = { 0 };
+    int key_cols[] = { 0 };
+    munit_assert_int(dl_rule_agg_set_group(&r, idx, key_vars, key_cols, 1), ==, 0);
+    r.n_vars = 2;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "user_min");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 2);
+
+    int64_t* uo = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    int64_t* mo = (int64_t*)ray_data(ray_table_get_col_idx(out, 1));
+    int seen_u1 = 0, seen_u2 = 0;
+    for (int i = 0; i < 2; i++) {
+        if (uo[i] == 1) { munit_assert_int((int)mo[i], ==, 50); seen_u1 = 1; }
+        else if (uo[i] == 2) { munit_assert_int((int)mo[i], ==, 75); seen_u2 = 1; }
+    }
+    munit_assert_int(seen_u1 && seen_u2, ==, 1);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(u_col); ray_release(w_col);
+    return MUNIT_OK;
+}
+
+/* Grouped MAX: Expected: (1,60), (2,85). */
+static MunitResult test_agg_max_grouped(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t users[]   = {1, 1, 2, 2};
+    int64_t weights[] = {50, 60, 75, 85};
+    ray_t* u_col = ray_vec_from_raw(RAY_I64, users, 4);
+    ray_t* w_col = ray_vec_from_raw(RAY_I64, weights, 4);
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("wbu__c0", 7), u_col);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("wbu__c1", 7), w_col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "wbu", tbl, 2);
+
+    dl_rule_t r; dl_rule_init(&r, "user_max", 2);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_head_var(&r, 1, 1);
+    int idx = dl_rule_add_agg(&r, DL_AGG_MAX, 1, "wbu", 2, 1);
+    int key_vars[] = { 0 };
+    int key_cols[] = { 0 };
+    munit_assert_int(dl_rule_agg_set_group(&r, idx, key_vars, key_cols, 1), ==, 0);
+    r.n_vars = 2;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "user_max");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 2);
+
+    int64_t* uo = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    int64_t* mo = (int64_t*)ray_data(ray_table_get_col_idx(out, 1));
+    int seen_u1 = 0, seen_u2 = 0;
+    for (int i = 0; i < 2; i++) {
+        if (uo[i] == 1) { munit_assert_int((int)mo[i], ==, 60); seen_u1 = 1; }
+        else if (uo[i] == 2) { munit_assert_int((int)mo[i], ==, 85); seen_u2 = 1; }
+    }
+    munit_assert_int(seen_u1 && seen_u2, ==, 1);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(u_col); ray_release(w_col);
+    return MUNIT_OK;
+}
+
+/* Grouped AVG: Expected: (1, 55.0), (2, 80.0).  AVG promotes to RAY_F64. */
+static MunitResult test_agg_avg_grouped(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t users[]   = {1, 1, 2, 2};
+    int64_t weights[] = {50, 60, 75, 85};
+    ray_t* u_col = ray_vec_from_raw(RAY_I64, users, 4);
+    ray_t* w_col = ray_vec_from_raw(RAY_I64, weights, 4);
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("wbu__c0", 7), u_col);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("wbu__c1", 7), w_col);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "wbu", tbl, 2);
+
+    dl_rule_t r; dl_rule_init(&r, "user_avg", 2);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_head_var(&r, 1, 1);
+    int idx = dl_rule_add_agg(&r, DL_AGG_AVG, 1, "wbu", 2, 1);
+    int key_vars[] = { 0 };
+    int key_cols[] = { 0 };
+    munit_assert_int(dl_rule_agg_set_group(&r, idx, key_vars, key_cols, 1), ==, 0);
+    r.n_vars = 2;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "user_avg");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 2);
+
+    int64_t* uo = (int64_t*)ray_data(ray_table_get_col_idx(out, 0));
+    ray_t* avg_col = ray_table_get_col_idx(out, 1);
+    munit_assert_int(avg_col->type, ==, RAY_F64);
+    double* ao = (double*)ray_data(avg_col);
+    int seen_u1 = 0, seen_u2 = 0;
+    for (int i = 0; i < 2; i++) {
+        if (uo[i] == 1) { munit_assert_double_equal(ao[i], 55.0, 4); seen_u1 = 1; }
+        else if (uo[i] == 2) { munit_assert_double_equal(ao[i], 80.0, 4); seen_u2 = 1; }
+    }
+    munit_assert_int(seen_u1 && seen_u2, ==, 1);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(u_col); ray_release(w_col);
+    return MUNIT_OK;
+}
+
+/* Auto-register env-bound EDB: bind a table as "extra" in the ray env,
+ * then run a query whose rule body references "extra" without explicit
+ * dl_add_edb — ray_query_fn should auto-discover it.
+ *
+ * Setup: eav has (1, attr, 100). env has extra(10, 20).
+ * Rule: result(?x, ?a) :- (eav ?x ?_ ?_) (extra ?a ?_)
+ * Expected: one row (1, 10) — the cross-product constrained to 1 eav row. */
+static MunitResult test_env_bound_edb_auto_register(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Build a 1-row EAV table and bind it in the env as "mydb" */
+    int64_t es[] = {1}, as[] = {42}, vs[] = {100};
+    ray_t* ec = ray_vec_from_raw(RAY_I64, es, 1);
+    ray_t* ac = ray_vec_from_raw(RAY_I64, as, 1);
+    ray_t* vc = ray_vec_from_raw(RAY_I64, vs, 1);
+    ray_t* eav = ray_table_new(3);
+    eav = ray_table_add_col(eav, ray_sym_intern("e", 1), ec);
+    eav = ray_table_add_col(eav, ray_sym_intern("a", 1), ac);
+    eav = ray_table_add_col(eav, ray_sym_intern("v", 1), vc);
+    int64_t db_sym = ray_sym_intern("mydb", 4);
+    ray_env_set(db_sym, eav);
+
+    /* Build a 1-row "extra" table and bind it in the env */
+    int64_t x0[] = {10}, x1[] = {20};
+    ray_t* xc0 = ray_vec_from_raw(RAY_I64, x0, 1);
+    ray_t* xc1 = ray_vec_from_raw(RAY_I64, x1, 1);
+    ray_t* extra = ray_table_new(2);
+    extra = ray_table_add_col(extra, ray_sym_intern("extra__c0", 9), xc0);
+    extra = ray_table_add_col(extra, ray_sym_intern("extra__c1", 9), xc1);
+    int64_t extra_sym = ray_sym_intern("extra", 5);
+    ray_env_set(extra_sym, extra);
+
+    /* Run query through ray_eval_str which invokes ray_query_fn internally.
+     * "mydb" resolves to the EAV table via env lookup.
+     * The rule body references "extra" which is only in the env, not pre-registered
+     * as an EDB — ray_query_fn should auto-discover it. */
+    ray_t* result = ray_eval_str(
+        "(query mydb (find ?x ?a) (where (eav ?x ?p ?v) (extra ?a ?b)))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int((int)ray_table_nrows(result), ==, 1);
+
+    int64_t* r0 = (int64_t*)ray_data(ray_table_get_col_idx(result, 0));
+    int64_t* r1 = (int64_t*)ray_data(ray_table_get_col_idx(result, 1));
+    munit_assert_int((int)r0[0], ==, 1);
+    munit_assert_int((int)r1[0], ==, 10);
+
+    ray_release(result);
+    ray_env_set(extra_sym, NULL);
+    ray_env_set(db_sym, NULL);
+    ray_release(extra); ray_release(xc0); ray_release(xc1);
+    ray_release(eav); ray_release(ec); ray_release(ac); ray_release(vc);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -1418,6 +1606,9 @@ static MunitTest datalog_tests[] = {
     { "/agg_count_empty",            test_agg_count_empty,            datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_count_grouped",          test_agg_count_grouped,          datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_sum_grouped",            test_agg_sum_grouped,            datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_min_grouped",            test_agg_min_grouped,            datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_max_grouped",            test_agg_max_grouped,            datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_avg_grouped",            test_agg_avg_grouped,            datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_parse_count_scalar",     test_agg_parse_count_scalar,     datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_parse_sum_scalar",       test_agg_parse_sum_scalar,       datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_parse_count_grouped",    test_agg_parse_count_grouped,    datalog_rf_setup, datalog_rf_teardown, 0, NULL },
@@ -1435,6 +1626,7 @@ static MunitTest datalog_tests[] = {
     { "/rule_head_const_stratification", test_rule_head_const_stratification, datalog_setup, datalog_teardown, 0, NULL },
     { "/rule_head_const_surface_syntax", test_rule_head_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/rule_body_const_surface_syntax", test_rule_body_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/env_bound_edb_auto_register",   test_env_bound_edb_auto_register,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
