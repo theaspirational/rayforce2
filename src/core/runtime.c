@@ -157,12 +157,22 @@ void ray_error_clear(void) {
 
 /* ===== Lifecycle ===== */
 
-ray_runtime_t* ray_runtime_create(int argc, char** argv) {
-    (void)argc; (void)argv;
-
+static ray_runtime_t* runtime_create_impl(const char* sym_path) {
     /* Init subsystems */
     ray_heap_init();
     ray_sym_init();
+
+    /* Load persisted symbol table BEFORE any interning (builtins, env).
+     * This ensures symbol IDs from prior sessions keep their slots,
+     * and new builtins get appended with fresh IDs.  NULL means skip. */
+    if (sym_path) {
+        ray_err_t sym_err = ray_sym_load(sym_path);
+        if (sym_err != RAY_OK && sym_err != RAY_ERR_CORRUPT) {
+            /* I/O error — surface it; caller decides policy */
+        }
+        /* RAY_ERR_CORRUPT is non-fatal: proceed with empty table,
+         * caller rebuilds from authoritative source. */
+    }
 
     /* Allocate runtime via system allocator */
     ray_runtime_t* rt = (ray_runtime_t*)ray_sys_alloc(sizeof(ray_runtime_t));
@@ -196,11 +206,22 @@ ray_runtime_t* ray_runtime_create(int argc, char** argv) {
         rt->mem_budget = (int64_t)(4ULL << 30);
 #endif
 
-    /* Init language (env + builtins) — must be after __VM is set */
+    /* Init language (env + builtins) — must be after __VM is set.
+     * Builtins intern their names; with sym_path loaded above, those
+     * names land after any persisted slots. */
     ray_lang_init();
 
     __RUNTIME = rt;
     return rt;
+}
+
+ray_runtime_t* ray_runtime_create(int argc, char** argv) {
+    (void)argc; (void)argv;
+    return runtime_create_impl(NULL);
+}
+
+ray_runtime_t* ray_runtime_create_with_sym(const char* sym_path) {
+    return runtime_create_impl(sym_path);
 }
 
 /* ===== Memory Budget API ===== */
