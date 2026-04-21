@@ -179,8 +179,12 @@ static void dl_idb_align_head_const_types(dl_program_t* prog, const dl_rule_t* r
         int8_t cur = col ? col->type : RAY_I64;
         int8_t want = rule->head_const_types[c];
         if (want == 0) {
-            /* No constant hint for this slot — keep current type. */
             desired[c] = cur;
+        } else if (cur != RAY_I64 && cur != want) {
+            /* Slot already typed by a prior rule to a different type. */
+            fprintf(stderr, "dl: head-const type conflict at slot %d: "
+                    "existing %d vs rule %d\n", c, cur, want);
+            return;
         } else {
             desired[c] = want;
             if (want != cur) any_change = true;
@@ -194,9 +198,10 @@ static void dl_idb_align_head_const_types(dl_program_t* prog, const dl_rule_t* r
     for (int c = 0; c < rel->arity; c++) {
         ray_t* empty_col = ray_vec_new(desired[c], 0);
         if (!empty_col || RAY_IS_ERR(empty_col)) { ray_release(fresh); return; }
+        ray_t* prev = fresh;
         fresh = ray_table_add_col(fresh, rel->col_names[c], empty_col);
         ray_release(empty_col);
-        if (RAY_IS_ERR(fresh)) return;
+        if (RAY_IS_ERR(fresh)) { ray_release(prev); return; }
     }
     ray_release(rel->table);
     rel->table = fresh;
@@ -629,9 +634,9 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
         int ci = var_col[expr->var_idx];
         ray_t* src = ray_table_get_col_idx(accum, ci);
         if (!src) return NULL;
-        int8_t t = (src->type == RAY_F64) ? RAY_F64 : RAY_I64;
-        size_t elem = (t == RAY_F64) ? sizeof(double) : sizeof(int64_t);
-        ray_t* dst = ray_vec_new(t, nrows);
+        if (src->type != RAY_I64 && src->type != RAY_F64) return NULL;
+        size_t elem = (src->type == RAY_F64) ? sizeof(double) : sizeof(int64_t);
+        ray_t* dst = ray_vec_new(src->type, nrows);
         if (!dst || RAY_IS_ERR(dst)) return NULL;
         dst->len = nrows;
         memcpy(ray_data(dst), ray_data(src), (size_t)nrows * elem);
@@ -1263,7 +1268,9 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
 
                 ray_op_t* keys_ops[DL_AGG_MAX_KEYS];
                 for (int i = 0; i < nk; i++) {
-                    int64_t sym = src_rel->col_names[body->agg_group_key_cols[i]];
+                    int kc = body->agg_group_key_cols[i];
+                    if (kc < 0 || kc >= src_rel->arity) { ray_release(accum); return NULL; }
+                    int64_t sym = src_rel->col_names[kc];
                     ray_t* s = ray_sym_str(sym);
                     keys_ops[i] = ray_scan(gg, ray_str_ptr(s));
                 }
