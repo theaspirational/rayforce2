@@ -405,7 +405,7 @@
 09:31:00.000</code></pre>
 
       <h3>RAY_TIMESTAMP</h3>
-      <p>Stored as a 64-bit signed integer counting <strong>nanoseconds since the Unix epoch</strong> (1970.01.01). Nanosecond precision covers the range from ~1677 to ~2262.</p>
+      <p>Stored as a 64-bit signed integer counting <strong>nanoseconds since 2000-01-01</strong> (the kdb+ convention — matches the CSV loader's parser and the runtime's arithmetic lifts). Nanosecond precision covers roughly the range 1707 &ndash; 2292.</p>
       <pre><code><span class="hl-comment">ray&gt;</span> <span class="hl-num">2024.01.15D09:30:00.000000000</span>
 2024.01.15D09:30:00.000000000</code></pre>
 

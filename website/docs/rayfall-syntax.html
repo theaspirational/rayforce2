@@ -151,7 +151,7 @@
 <span class="hl-str">"a longer string"</span>   <span class="hl-comment">; pool-allocated</span></code></pre>
 
       <h3>Dates</h3>
-      <p>Date literals use dot-separated year.month.day format. Stored as days since epoch (i32).</p>
+      <p>Date literals use dot-separated year.month.day format. Stored as days since 2000-01-01 (i32).</p>
       <pre><code><span class="hl-num">2024.01.15</span>  <span class="hl-comment">; January 15, 2024</span>
 <span class="hl-num">2023.12.31</span>  <span class="hl-comment">; December 31, 2023</span></code></pre>
 
@@ -161,8 +161,9 @@
 <span class="hl-num">14:15:30.500</span>  <span class="hl-comment">; 2:15:30.5 PM</span></code></pre>
 
       <h3>Timestamps</h3>
-      <p>Full date+time with nanosecond precision. Stored as nanoseconds since epoch (i64).</p>
-      <pre><code><span class="hl-num">2024.01.15T09:30:00.000000000</span>  <span class="hl-comment">; date + time</span></code></pre>
+      <p>Full date+time with nanosecond precision. Stored as nanoseconds since 2000-01-01 (i64). Literal form uses <code>D</code> as the date/time separator and requires a fractional-seconds suffix:</p>
+      <pre><code><span class="hl-num">2024.01.15D09:30:00.000</span>            <span class="hl-comment">; date + time (ms)</span>
+<span class="hl-num">2024.01.15D09:30:00.000000000</span>      <span class="hl-comment">; date + time (ns)</span></code></pre>
 
       <h3>GUIDs</h3>
       <p>128-bit globally unique identifiers.</p>
@@ -327,6 +328,18 @@ ds.doy           <span class="hl-comment">; [1 167 366]</span>
 (<span class="hl-kw">select</span> {<span class="hl-sym">from:</span> trades <span class="hl-sym">by:</span> Ts.hh})     <span class="hl-comment">; group by hour of day</span></code></pre>
 
       <p>Recognised temporal segments: <code>yyyy</code>, <code>mm</code>, <code>dd</code>, <code>hh</code>, <code>minute</code>, <code>ss</code>, <code>dow</code>, <code>doy</code>, plus the two truncations <code>date</code> (drop time-of-day) and <code>time</code> (drop date). Null input rows propagate to null output rows — the null sentinel bit pattern is not decoded as a bogus calendar value.</p>
+
+      <h3 id="reserved-namespace">Reserved <code>.*</code> Namespace</h3>
+      <p>Symbols whose name starts with <code>.</code> are a reserved system namespace populated at startup by builtin registration. Typing one of these at the REPL returns the namespace dict for introspection:</p>
+      <pre><code>.sys     <span class="hl-comment">; {gc:&lt;.sys.gc&gt; exec:&lt;.sys.exec&gt; info:&lt;.sys.info&gt; mem:&lt;.sys.mem&gt; build:&lt;.sys.build&gt;}</span>
+.os      <span class="hl-comment">; {getenv:&lt;.os.getenv&gt; setenv:&lt;.os.setenv&gt;}</span>
+.ipc     <span class="hl-comment">; {open:&lt;.ipc.open&gt; close:&lt;.ipc.close&gt; send:&lt;.ipc.send&gt;}</span>
+.csv     <span class="hl-comment">; {read:&lt;.csv.read&gt; write:&lt;.csv.write&gt;}</span></code></pre>
+      <p>Every <code>.</code>-prefixed name is protected: <code>set</code>, <code>let</code>, lambda parameters, and <code>del</code> all refuse such names with <code>error: reserve</code>. This keeps user code from shadowing the builtin surface, regardless of where it's bound.</p>
+      <pre><code>(<span class="hl-kw">set</span> .os.foo <span class="hl-num">1</span>)        <span class="hl-comment">; error: reserve</span>
+(<span class="hl-kw">let</span> .sys.gc <span class="hl-num">99</span>)       <span class="hl-comment">; error: reserve</span>
+((<span class="hl-kw">fn</span> [.sys.gc] .sys.gc) <span class="hl-num">7</span>)  <span class="hl-comment">; error: reserve (lambda parameter name)</span>
+(<span class="hl-fn">del</span> .sys.gc)          <span class="hl-comment">; error: reserve: cannot delete reserved binding</span></code></pre>
 
       <h3>Error Handling: <code>try</code> / <code>raise</code></h3>
       <pre><code>(<span class="hl-kw">try</span>

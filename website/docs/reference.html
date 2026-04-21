@@ -596,16 +596,16 @@
         <tbody>
           <tr><td><code>eval</code></td><td>unary</td><td>&mdash;</td><td>Evaluate a parsed Rayfall expression</td><td><code>(eval (parse "(+ 1 2)"))</code> &rarr; <code>3</code></td></tr>
           <tr><td><code>parse</code></td><td>unary</td><td>&mdash;</td><td>Parse a string into a Rayfall expression tree</td><td><code>(parse "(+ 1 2)")</code></td></tr>
-          <tr><td><code>.sys.gc</code></td><td>unary</td><td>&mdash;</td><td>Trigger garbage collection / heap flush</td><td><code>(.sys.gc 0)</code></td></tr>
-          <tr><td><code>.sys.exec</code></td><td>unary</td><td>restricted</td><td>Execute a shell command, return output as string</td><td><code>(.sys.exec "ls -la")</code></td></tr>
+          <tr><td><code>.sys.gc</code></td><td>variadic</td><td>&mdash;</td><td>Trigger GC / heap flush, returns <code>0</code></td><td><code>(.sys.gc)</code></td></tr>
+          <tr><td><code>.sys.exec</code></td><td>unary</td><td>restricted</td><td>Execute a shell command, return exit code</td><td><code>(.sys.exec "ls -la")</code></td></tr>
           <tr><td><code>.os.getenv</code></td><td>unary</td><td>restricted</td><td>Get environment variable value</td><td><code>(.os.getenv "HOME")</code></td></tr>
           <tr><td><code>.os.setenv</code></td><td>binary</td><td>restricted</td><td>Set environment variable</td><td><code>(.os.setenv "KEY" "value")</code></td></tr>
           <tr><td><code>args</code></td><td>unary</td><td>&mdash;</td><td>Get command-line arguments as vector</td><td><code>(args 0)</code></td></tr>
           <tr><td><code>env</code></td><td>unary</td><td>&mdash;</td><td>List all global environment bindings</td><td><code>(env 0)</code></td></tr>
           <tr><td><code>timer</code></td><td>unary</td><td>&mdash;</td><td>High-resolution monotonic nanosecond clock</td><td><code>(timer 0)</code></td></tr>
-          <tr><td><code>.sys.build</code></td><td>unary</td><td>&mdash;</td><td>Show internal representation of an object (debug)</td><td><code>(.sys.build [1 2 3])</code></td></tr>
-          <tr><td><code>.sys.mem</code></td><td>unary</td><td>&mdash;</td><td>Memory allocator statistics (heap usage)</td><td><code>(.sys.mem 0)</code></td></tr>
-          <tr><td><code>.sys.info</code></td><td>unary</td><td>&mdash;</td><td>System information (cores, page size, total memory)</td><td><code>(.sys.info 0)</code></td></tr>
+          <tr><td><code>.sys.build</code></td><td>variadic</td><td>&mdash;</td><td>Build metadata: <code>version</code>, <code>build-date</code>, git commit</td><td><code>(.sys.build)</code></td></tr>
+          <tr><td><code>.sys.mem</code></td><td>variadic</td><td>&mdash;</td><td>Memory allocator statistics (alloc / peak / slab hits)</td><td><code>(.sys.mem)</code></td></tr>
+          <tr><td><code>.sys.info</code></td><td>variadic</td><td>&mdash;</td><td>System information (cores, page size, total memory)</td><td><code>(.sys.info)</code></td></tr>
         </tbody>
       </table>
 

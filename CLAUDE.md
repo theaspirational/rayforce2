@@ -138,7 +138,7 @@ src/ops/cmp.c               Comparison builtins (>, <, >=, <=, ==, !=)
 src/ops/collection.c        Collection builtins (distinct, take, til, reverse, find, etc.)
 src/ops/strop.c             String builtins (upper/lower/trim/substr/replace/concat/like)
 src/ops/tblop.c             Table builtins (meta, cols, keys, xcols, xkey, rename, flip)
-src/ops/system.c            System builtins (gc, system, getenv, read/write files, serde)
+src/ops/system.c            System builtins (.sys.gc/.sys.info/.sys.mem/.sys.build/.sys.exec, .os.getenv/.os.setenv, .ipc.open/.ipc.close/.ipc.send, read/write files, serde)
 src/ops/datalog.{h,c}      Datalog engine + EAV builtins (rule, query, dl-eval)
 src/ops/lftj.{h,c}         Leapfrog Triejoin — iterator, search, enumeration
 src/ops/fvec.{h,c}         Factorized vectors — ray_fvec_t, ray_ftable_t

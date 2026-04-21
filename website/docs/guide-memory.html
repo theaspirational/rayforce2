@@ -193,7 +193,7 @@ sys-current     | 8388608</code></pre>
       <pre><code>838860800</code></pre>
       <p>In this example, loading 10 million rows consumed roughly 800 MB of heap memory.</p>
 
-      <!-- 3. gc -->
+      <!-- 3. .sys.gc -->
       <h2 id="gc">3. The <code>.sys.gc</code> Function</h2>
       <p>Call <code>(.sys.gc 0)</code> to signal that the runtime should reclaim unused memory. Currently this is a lightweight hook that returns <code>0</code> &mdash; Rayforce uses deterministic ref counting and eager page release via <code>madvise</code> during buddy coalescing, so most memory is reclaimed automatically when references are dropped.</p>
 
@@ -382,7 +382,7 @@ total-mem | 16777216000</code></pre>
 :timeit</code></pre>
 
       <h3>Pattern 4: Check Peak Memory After a Join</h3>
-      <pre><code><span class="hl-comment">;; Reset peak tracking with gc</span>
+      <pre><code><span class="hl-comment">;; Reset peak tracking with .sys.gc</span>
 (<span class="hl-fn">.sys.gc</span>)
 (<span class="hl-kw">set</span> before-peak ((.sys.mem 0) <span class="hl-sym">peak-bytes</span>))
 

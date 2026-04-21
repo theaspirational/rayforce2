@@ -477,8 +477,8 @@
         <tbody>
           <tr><td><code>eval</code></td><td>unary</td><td>Evaluate a parsed expression</td><td><code>(eval (parse "(+ 1 2)"))</code> &rarr; <code>3</code></td></tr>
           <tr><td><code>parse</code></td><td>unary</td><td>Parse string into Rayfall expression</td><td><code>(parse "(+ 1 2)")</code></td></tr>
-          <tr><td><code>.sys.gc</code></td><td>unary</td><td>Trigger garbage collection</td><td><code>(.sys.gc 0)</code></td></tr>
-          <tr><td><code>.sys.exec</code></td><td>unary</td><td>Execute shell command</td><td><code>(.sys.exec "ls -la")</code></td></tr>
+          <tr><td><code>.sys.gc</code></td><td>variadic</td><td>Trigger garbage collection, returns <code>0</code></td><td><code>(.sys.gc)</code></td></tr>
+          <tr><td><code>.sys.exec</code></td><td>unary</td><td>Execute shell command, return exit code</td><td><code>(.sys.exec "ls -la")</code></td></tr>
           <tr><td><code>.os.getenv</code></td><td>unary</td><td>Get environment variable</td><td><code>(.os.getenv "HOME")</code></td></tr>
           <tr><td><code>.os.setenv</code></td><td>binary</td><td>Set environment variable</td><td><code>(.os.setenv "KEY" "value")</code></td></tr>
           <tr><td><code>exit</code></td><td>unary</td><td>Exit with status code</td><td><code>(exit 0)</code></td></tr>
@@ -486,9 +486,9 @@
           <tr><td><code>timer</code></td><td>unary</td><td>High-resolution monotonic nanosecond clock</td><td><code>(timer 0)</code></td></tr>
           <tr><td><code>args</code></td><td>unary</td><td>Command-line arguments</td><td><code>(args 0)</code></td></tr>
           <tr><td><code>env</code></td><td>unary</td><td>List all global environment bindings</td><td><code>(env 0)</code></td></tr>
-          <tr><td><code>.sys.build</code></td><td>unary</td><td>Show internal representation of object</td><td><code>(.sys.build [1 2 3])</code></td></tr>
-          <tr><td><code>.sys.mem</code></td><td>unary</td><td>Memory allocator statistics</td><td><code>(.sys.mem 0)</code></td></tr>
-          <tr><td><code>.sys.info</code></td><td>unary</td><td>System information (OS, CPU, memory)</td><td><code>(.sys.info 0)</code></td></tr>
+          <tr><td><code>.sys.build</code></td><td>variadic</td><td>Build metadata: <code>version</code>, <code>build-date</code>, git commit</td><td><code>(.sys.build)</code></td></tr>
+          <tr><td><code>.sys.mem</code></td><td>variadic</td><td>Memory allocator statistics (alloc/peak/slab)</td><td><code>(.sys.mem)</code></td></tr>
+          <tr><td><code>.sys.info</code></td><td>variadic</td><td>System information (cores, page size, memory)</td><td><code>(.sys.info)</code></td></tr>
         </tbody>
       </table>
 
