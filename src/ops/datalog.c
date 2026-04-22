@@ -3343,7 +3343,7 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
                 pred_arity = bd->arity;
             } else if (bd->type == DL_AGG) {
                 pred_name = bd->agg_pred;
-                pred_arity = bd->arity;
+                pred_arity = bd->agg_arity;
             } else {
                 continue;
             }
