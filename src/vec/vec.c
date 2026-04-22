@@ -608,8 +608,17 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
         ? ((const char*)ray_data(vec->slice_parent) + (size_t)vec->slice_offset * esz)
         : (const char*)ray_data(vec);
 
-    /* Value source: atom bytes or vec row bytes */
-    const char* val_atom_bytes = (vals->type < 0) ? (const char*)&vals->u8 : NULL;
+    /* Value source: atom bytes or vec row bytes.
+     * GUID atoms keep their 16-byte payload in vals->obj, not inline. */
+    const char* val_atom_bytes = NULL;
+    if (vals->type < 0) {
+        if (vec->type == RAY_GUID) {
+            if (!vals->obj) { ray_release(pair_vec); return ray_error("type", NULL); }
+            val_atom_bytes = (const char*)ray_data(vals->obj);
+        } else {
+            val_atom_bytes = (const char*)&vals->u8;
+        }
+    }
     const char* val_vec_base = NULL;
     if (val_atom_bytes == NULL) {
         val_vec_base = (vals->attrs & RAY_ATTR_SLICE)

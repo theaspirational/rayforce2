@@ -3928,6 +3928,13 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
                 } else if (tt == RAY_SYM) {
                     int64_t s = val->i64;
                     tbl = ray_vec_append(tbl, &s);
+                } else if (tt == RAY_GUID) {
+                    /* GUID atom's 16-byte payload lives in val->obj, not inline */
+                    if (!val->obj) {
+                        ray_release(tbl); ray_release(val);
+                        return ray_error("type", NULL);
+                    }
+                    tbl = ray_vec_append(tbl, ray_data(val->obj));
                 } else {
                     tbl = ray_vec_append(tbl, &val->u8);
                 }
@@ -3985,6 +3992,13 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
                         } else if (tt == RAY_SYM) {
                             int64_t s = val->i64;
                             tbl = ray_vec_insert_at(tbl, i, &s);
+                            result = tbl;
+                        } else if (tt == RAY_GUID) {
+                            if (!val->obj) {
+                                ray_release(tbl); ray_release(idx_arg); ray_release(val);
+                                return ray_error("type", NULL);
+                            }
+                            tbl = ray_vec_insert_at(tbl, i, ray_data(val->obj));
                             result = tbl;
                         } else {
                             tbl = ray_vec_insert_at(tbl, i, &val->u8);

@@ -2507,6 +2507,25 @@ static MunitResult test_eval_insert_typed_null(const void* params, void* fixture
     return MUNIT_OK;
 }
 
+/* ---- Test: insert preserves GUID atom payload ---- */
+static MunitResult test_eval_insert_guid(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Arity-2 atom append: inserted atom equals source atom */
+    ASSERT_EQ("(do (set g (guid 3)) (set x (first (guid 1))) "
+              "    (insert 'g x) (== x (get g 3)))", "true");
+    /* Arity-3 scalar insert at head */
+    ASSERT_EQ("(do (set g (guid 3)) (set x (first (guid 1))) "
+              "    (insert 'g 0 x) (== x (get g 0)))", "true");
+    /* Multi-insert broadcast: same atom at two pre-positions */
+    ASSERT_EQ("(do (set g (guid 3)) (set x (first (guid 1))) "
+              "    (insert 'g [0 2] x) "
+              "    (and (== x (get g 0)) (== x (get g 3))))", "true");
+    /* Splice a same-typed vec */
+    ASSERT_EQ("(do (set g (guid 3)) (set v (guid 2)) "
+              "    (insert 'g 1 v) (count g))", "5");
+    return MUNIT_OK;
+}
+
 /* ---- Test: insert error paths ---- */
 static MunitResult test_eval_insert_positional_errors(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -4079,6 +4098,7 @@ static MunitTest lang_tests[] = {
     { "/eval/insert_list_positional",  test_eval_insert_list_positional,  lang_setup, lang_teardown, 0, NULL },
     { "/eval/insert_positional_multi", test_eval_insert_positional_multi, lang_setup, lang_teardown, 0, NULL },
     { "/eval/insert_typed_null",       test_eval_insert_typed_null,       lang_setup, lang_teardown, 0, NULL },
+    { "/eval/insert_guid",             test_eval_insert_guid,             lang_setup, lang_teardown, 0, NULL },
     { "/eval/insert_positional_errors", test_eval_insert_positional_errors, lang_setup, lang_teardown, 0, NULL },
     { "/eval/upsert",          test_eval_upsert,          lang_setup, lang_teardown, 0, NULL },
     { "/eval/upsert_f64_key",  test_eval_upsert_f64_key,  lang_setup, lang_teardown, 0, NULL },
