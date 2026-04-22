@@ -2523,6 +2523,45 @@ static MunitResult test_eval_insert_guid(const void* params, void* fixture) {
     /* Splice a same-typed vec */
     ASSERT_EQ("(do (set g (guid 3)) (set v (guid 2)) "
               "    (insert 'g 1 v) (count g))", "5");
+
+    /* Typed-null GUID atom (val->obj == NULL) — must be accepted and
+     * stored with the null bit set, not rejected with "type". */
+    ray_t* g = ray_vec_new(RAY_GUID, 2);
+    munit_assert_false(RAY_IS_ERR(g));
+    g->len = 2;
+    memset(ray_data(g), 0xAA, 2 * 16);
+
+    ray_t* null_atom = ray_typed_null(-RAY_GUID);
+    munit_assert_false(RAY_IS_ERR(null_atom));
+    munit_assert_ptr_equal(null_atom->obj, NULL);
+
+    g = ray_vec_insert_at(g, 1, null_atom->obj ? ray_data(null_atom->obj) : (const void*)"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+    munit_assert_false(RAY_IS_ERR(g));
+    munit_assert_int(g->len, ==, 3);
+    ray_release(null_atom);
+    ray_release(g);
+
+    /* Now exercise the dispatcher path end-to-end — construct a GUID vec,
+     * bind it, call ray_vec_insert_many directly with a typed-null broadcast. */
+    ray_t* h = ray_vec_new(RAY_GUID, 3);
+    munit_assert_false(RAY_IS_ERR(h));
+    h->len = 3;
+    memset(ray_data(h), 0xBB, 3 * 16);
+    ray_t* idxs = ray_vec_new(RAY_I64, 2);
+    idxs->len = 2;
+    ((int64_t*)ray_data(idxs))[0] = 0;
+    ((int64_t*)ray_data(idxs))[1] = 2;
+    ray_t* nval = ray_typed_null(-RAY_GUID);
+    ray_t* out = ray_vec_insert_many(h, idxs, nval);
+    munit_assert_false(RAY_IS_ERR(out));
+    munit_assert_int(out->len, ==, 5);
+    munit_assert_true(ray_vec_is_null(out, 0));
+    munit_assert_true(ray_vec_is_null(out, 3));
+    munit_assert_false(ray_vec_is_null(out, 1));
+    ray_release(nval);
+    ray_release(idxs);
+    ray_release(h);
+    ray_release(out);
     return MUNIT_OK;
 }
 

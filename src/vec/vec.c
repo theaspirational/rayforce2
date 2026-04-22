@@ -609,12 +609,16 @@ ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
         : (const char*)ray_data(vec);
 
     /* Value source: atom bytes or vec row bytes.
-     * GUID atoms keep their 16-byte payload in vals->obj, not inline. */
+     * GUID atoms keep their 16-byte payload in vals->obj, not inline; typed
+     * nulls carry obj==NULL and fall through to a zero buffer (null bit is
+     * then set below via RAY_ATOM_IS_NULL). */
+    static const uint8_t zero_guid[16] = {0};
     const char* val_atom_bytes = NULL;
     if (vals->type < 0) {
         if (vec->type == RAY_GUID) {
-            if (!vals->obj) { ray_release(pair_vec); return ray_error("type", NULL); }
-            val_atom_bytes = (const char*)ray_data(vals->obj);
+            val_atom_bytes = vals->obj
+                ? (const char*)ray_data(vals->obj)
+                : (const char*)zero_guid;
         } else {
             val_atom_bytes = (const char*)&vals->u8;
         }
