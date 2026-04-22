@@ -283,6 +283,9 @@ void* ray_vec_get(ray_t* vec, int64_t idx);
 ray_t* ray_vec_slice(ray_t* vec, int64_t offset, int64_t len);
 ray_t* ray_vec_concat(ray_t* a, ray_t* b);
 ray_t* ray_vec_from_raw(int8_t type, const void* data, int64_t count);
+ray_t* ray_vec_insert_at(ray_t* vec, int64_t idx, const void* elem);
+ray_t* ray_vec_insert_vec_at(ray_t* vec, int64_t idx, ray_t* src);
+ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals);
 
 /* Null bitmap ops */
 void     ray_vec_set_null(ray_t* vec, int64_t idx, bool is_null);
@@ -294,6 +297,7 @@ bool     ray_vec_is_null(ray_t* vec, int64_t idx);
 ray_t* ray_str_vec_append(ray_t* vec, const char* s, size_t len);
 const char* ray_str_vec_get(ray_t* vec, int64_t idx, size_t* out_len);
 ray_t* ray_str_vec_set(ray_t* vec, int64_t idx, const char* s, size_t len);
+ray_t* ray_str_vec_insert_at(ray_t* vec, int64_t idx, const char* s, size_t len);
 ray_t* ray_str_vec_compact(ray_t* vec);
 
 /* ===== String API ===== */
@@ -308,6 +312,8 @@ ray_t* ray_list_new(int64_t capacity);
 ray_t* ray_list_append(ray_t* list, ray_t* item);
 ray_t* ray_list_get(ray_t* list, int64_t idx);
 ray_t* ray_list_set(ray_t* list, int64_t idx, ray_t* item);
+ray_t* ray_list_insert_at(ray_t* list, int64_t idx, ray_t* item);
+ray_t* ray_list_insert_many(ray_t* list, ray_t* idxs, ray_t* vals);
 
 /* ===== Symbol Intern Table API ===== */
 

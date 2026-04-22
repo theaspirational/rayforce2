@@ -395,6 +395,278 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
 }
 
 /* --------------------------------------------------------------------------
+ * ray_vec_insert_at — insert a single element at position idx.
+ *
+ * idx is a pre-insertion position in [0, vec->len]. idx == vec->len is
+ * equivalent to append. Does not support RAY_STR (use ray_str_vec_insert_at).
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_vec_insert_at(ray_t* vec, int64_t idx, const void* elem) {
+    if (!vec || RAY_IS_ERR(vec)) return vec;
+    if (vec->type <= 0 || vec->type >= RAY_TYPE_COUNT)
+        return ray_error("type", NULL);
+    if (vec->type == RAY_STR) return ray_error("type", NULL);
+    if (idx < 0 || idx > vec->len) return ray_error("range", NULL);
+
+    /* COW: if shared, copy first */
+    ray_t* original = vec;
+    vec = ray_cow(vec);
+    if (!vec || RAY_IS_ERR(vec)) return vec;
+
+    uint8_t esz = ray_sym_elem_size(vec->type, vec->attrs);
+    int64_t cap = vec_capacity(vec);
+
+    /* Grow if needed */
+    if (vec->len >= cap) {
+        size_t new_data_size = (size_t)(vec->len + 1) * esz;
+        if (new_data_size < 32) new_data_size = 32;
+        else {
+            size_t s = 32;
+            while (s < new_data_size) {
+                if (s > SIZE_MAX / 2) goto fail_oom;
+                s *= 2;
+            }
+            new_data_size = s;
+        }
+        ray_t* new_vec = ray_scratch_realloc(vec, new_data_size);
+        if (!new_vec || RAY_IS_ERR(new_vec)) {
+            if (vec != original) ray_release(vec);
+            return new_vec ? new_vec : ray_error("oom", NULL);
+        }
+        vec = new_vec;
+    }
+
+    int64_t old_len = vec->len;
+    char* base = (char*)ray_data(vec);
+
+    /* Shift elements [idx..old_len) → [idx+1..old_len+1) */
+    if (idx < old_len) {
+        memmove(base + (size_t)(idx + 1) * esz,
+                base + (size_t)idx * esz,
+                (size_t)(old_len - idx) * esz);
+    }
+
+    /* Write the new element */
+    memcpy(base + (size_t)idx * esz, elem, esz);
+
+    vec->len = old_len + 1;
+
+    /* Shift null bitmap bits [idx..old_len) up by one; clear bit at idx.
+     * Walk from tail backward so we don't overwrite unread bits. */
+    if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+        for (int64_t i = old_len - 1; i >= idx; i--) {
+            bool was_null = ray_vec_is_null(vec, i);
+            if (was_null) {
+                ray_err_t err = ray_vec_set_null_checked(vec, i + 1, true);
+                if (err != RAY_OK) goto fail_oom;
+            } else {
+                ray_err_t err = ray_vec_set_null_checked(vec, i + 1, false);
+                if (err != RAY_OK) goto fail_oom;
+            }
+        }
+        /* New element is not null */
+        ray_err_t err = ray_vec_set_null_checked(vec, idx, false);
+        if (err != RAY_OK) goto fail_oom;
+    }
+
+    return vec;
+
+fail_oom:
+    if (vec != original) ray_release(vec);
+    return ray_error("oom", NULL);
+}
+
+/* --------------------------------------------------------------------------
+ * ray_vec_insert_vec_at — splice src into vec at position idx.
+ *
+ * Shares SYM-width widening, RAY_STR pool merge, and null-bit propagation
+ * with ray_vec_concat via the slice→concat→concat pattern. Always returns
+ * a fresh block; caller should release the input if no longer needed.
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_vec_insert_vec_at(ray_t* vec, int64_t idx, ray_t* src) {
+    if (!vec || RAY_IS_ERR(vec)) return vec;
+    if (!src || RAY_IS_ERR(src)) return src;
+    if (vec->type != src->type) return ray_error("type", NULL);
+    if (idx < 0 || idx > vec->len) return ray_error("range", NULL);
+
+    /* Fast path: idx == len is plain concat */
+    if (idx == vec->len) return ray_vec_concat(vec, src);
+    /* Fast path: idx == 0 is reversed concat */
+    if (idx == 0) return ray_vec_concat(src, vec);
+
+    ray_t* head = ray_vec_slice(vec, 0, idx);
+    if (!head || RAY_IS_ERR(head)) return head;
+
+    ray_t* tail = ray_vec_slice(vec, idx, vec->len - idx);
+    if (!tail || RAY_IS_ERR(tail)) { ray_release(head); return tail; }
+
+    ray_t* mid = ray_vec_concat(head, src);
+    ray_release(head);
+    if (!mid || RAY_IS_ERR(mid)) { ray_release(tail); return mid; }
+
+    ray_t* result = ray_vec_concat(mid, tail);
+    ray_release(mid);
+    ray_release(tail);
+    return result;
+}
+
+/* --------------------------------------------------------------------------
+ * ray_vec_insert_many — insert N values at N pre-insertion positions.
+ *
+ * idxs: I64 vec of length N, each idx in [0, vec->len].
+ * vals: either a matching atom (broadcast) or same-type vec of length N
+ *       (parallel) or length 1 (broadcast).
+ *
+ * For ties in idxs, the original input order is preserved (stable sort).
+ * Returns a fresh block; caller releases vec if no longer needed.
+ * RAY_STR targets are rejected — use ray_vec_insert_vec_at in a loop instead.
+ * For RAY_SYM, the source width must match the destination width.
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_vec_insert_many(ray_t* vec, ray_t* idxs, ray_t* vals) {
+    if (!vec || RAY_IS_ERR(vec)) return vec;
+    if (!idxs || RAY_IS_ERR(idxs)) return idxs;
+    if (!vals || RAY_IS_ERR(vals)) return vals;
+    if (vec->type <= 0 || vec->type >= RAY_TYPE_COUNT) return ray_error("type", NULL);
+    if (vec->type == RAY_STR) return ray_error("type", NULL);
+    if (idxs->type != RAY_I64) return ray_error("type", NULL);
+
+    int64_t N = idxs->len;
+    int64_t old_len = vec->len;
+    uint8_t esz = ray_sym_elem_size(vec->type, vec->attrs);
+
+    /* Fast path: N == 0 returns a fresh retain */
+    if (N == 0) { ray_retain(vec); return vec; }
+
+    /* Validate indices */
+    const int64_t* idx_arr = (const int64_t*)ray_data(idxs);
+    for (int64_t k = 0; k < N; k++) {
+        if (idx_arr[k] < 0 || idx_arr[k] > old_len)
+            return ray_error("range", NULL);
+    }
+
+    /* Classify vals: atom (broadcast) vs vec (parallel or singleton broadcast) */
+    int broadcast;
+    if (vals->type < 0) {
+        if (vals->type != -vec->type) return ray_error("type", NULL);
+        broadcast = 1;
+    } else if (vals->type == vec->type) {
+        /* SYM width must match — dispatcher should widen upstream */
+        if (vec->type == RAY_SYM &&
+            (vals->attrs & RAY_SYM_W_MASK) != (vec->attrs & RAY_SYM_W_MASK))
+            return ray_error("type", NULL);
+        if (vals->len == 1) broadcast = 1;
+        else if (vals->len == N) broadcast = 0;
+        else return ray_error("range", NULL);
+    } else {
+        return ray_error("type", NULL);
+    }
+
+    /* Build sort buffer as I64 vec of 2*N slots: [idx0, src0, idx1, src1, ...] */
+    ray_t* pair_vec = ray_vec_new(RAY_I64, 2 * N);
+    if (!pair_vec || RAY_IS_ERR(pair_vec)) return ray_error("oom", NULL);
+    pair_vec->len = 2 * N;
+    int64_t* pairs = (int64_t*)ray_data(pair_vec);
+    for (int64_t k = 0; k < N; k++) {
+        pairs[2 * k]     = idx_arr[k];
+        pairs[2 * k + 1] = k;
+    }
+
+    /* Stable insertion sort by idx */
+    for (int64_t i = 1; i < N; i++) {
+        int64_t ki = pairs[2 * i];
+        int64_t ks = pairs[2 * i + 1];
+        int64_t j = i - 1;
+        while (j >= 0 && pairs[2 * j] > ki) {
+            pairs[2 * (j + 1)]     = pairs[2 * j];
+            pairs[2 * (j + 1) + 1] = pairs[2 * j + 1];
+            j--;
+        }
+        pairs[2 * (j + 1)]     = ki;
+        pairs[2 * (j + 1) + 1] = ks;
+    }
+
+    /* Allocate result */
+    int64_t new_len = old_len + N;
+    if (new_len < old_len) { ray_release(pair_vec); return ray_error("oom", NULL); }
+    size_t data_size = (size_t)new_len * esz;
+    if (esz > 1 && data_size / esz != (size_t)new_len) {
+        ray_release(pair_vec);
+        return ray_error("oom", NULL);
+    }
+
+    ray_t* result = ray_alloc(data_size);
+    if (!result || RAY_IS_ERR(result)) { ray_release(pair_vec); return result ? result : ray_error("oom", NULL); }
+    result->type = vec->type;
+    result->len = new_len;
+    result->attrs = vec->attrs & RAY_SYM_W_MASK;
+    memset(result->nullmap, 0, 16);
+
+    /* Source pointers */
+    const char* src_base = (vec->attrs & RAY_ATTR_SLICE)
+        ? ((const char*)ray_data(vec->slice_parent) + (size_t)vec->slice_offset * esz)
+        : (const char*)ray_data(vec);
+
+    /* Value source: atom bytes or vec row bytes */
+    const char* val_atom_bytes = (vals->type < 0) ? (const char*)&vals->u8 : NULL;
+    const char* val_vec_base = NULL;
+    if (val_atom_bytes == NULL) {
+        val_vec_base = (vals->attrs & RAY_ATTR_SLICE)
+            ? ((const char*)ray_data(vals->slice_parent) + (size_t)vals->slice_offset * esz)
+            : (const char*)ray_data(vals);
+    }
+
+    char* dst_base = (char*)ray_data(result);
+
+    /* Walk: merge sorted inserts with original */
+    int64_t w = 0;   /* write cursor */
+    int64_t p = 0;   /* pair cursor */
+    for (int64_t r = 0; r <= old_len; r++) {
+        while (p < N && pairs[2 * p] == r) {
+            int64_t src_pos = pairs[2 * p + 1];
+            if (val_atom_bytes) {
+                /* Broadcast atom */
+                memcpy(dst_base + (size_t)w * esz, val_atom_bytes, esz);
+                /* Atom-level null propagation */
+                if (RAY_ATOM_IS_NULL(vals)) {
+                    ray_err_t e = ray_vec_set_null_checked(result, w, true);
+                    if (e != RAY_OK) { ray_release(result); ray_release(pair_vec); return ray_error("oom", NULL); }
+                }
+            } else if (broadcast) {
+                /* Single-element vec broadcast — always row 0 */
+                memcpy(dst_base + (size_t)w * esz, val_vec_base, esz);
+                if (ray_vec_is_null(vals, 0)) {
+                    ray_err_t e = ray_vec_set_null_checked(result, w, true);
+                    if (e != RAY_OK) { ray_release(result); ray_release(pair_vec); return ray_error("oom", NULL); }
+                }
+            } else {
+                /* Parallel: use src_pos into vals */
+                memcpy(dst_base + (size_t)w * esz,
+                       val_vec_base + (size_t)src_pos * esz, esz);
+                if (ray_vec_is_null(vals, src_pos)) {
+                    ray_err_t e = ray_vec_set_null_checked(result, w, true);
+                    if (e != RAY_OK) { ray_release(result); ray_release(pair_vec); return ray_error("oom", NULL); }
+                }
+            }
+            w++;
+            p++;
+        }
+        if (r < old_len) {
+            memcpy(dst_base + (size_t)w * esz, src_base + (size_t)r * esz, esz);
+            if (ray_vec_is_null(vec, r)) {
+                ray_err_t e = ray_vec_set_null_checked(result, w, true);
+                if (e != RAY_OK) { ray_release(result); ray_release(pair_vec); return ray_error("oom", NULL); }
+            }
+            w++;
+        }
+    }
+
+    ray_release(pair_vec);
+    return result;
+}
+
+/* --------------------------------------------------------------------------
  * ray_vec_from_raw
  * -------------------------------------------------------------------------- */
 
@@ -770,6 +1042,29 @@ fail_oom:
 fail_range:
     if (vec != original) ray_release(vec);
     return ray_error("range", NULL);
+}
+
+/* --------------------------------------------------------------------------
+ * ray_str_vec_insert_at — insert a single string at position idx.
+ *
+ * Wraps (s, len) into a 1-element RAY_STR vector and delegates to
+ * ray_vec_insert_vec_at, which handles pool merging via ray_vec_concat.
+ * -------------------------------------------------------------------------- */
+
+ray_t* ray_str_vec_insert_at(ray_t* vec, int64_t idx, const char* s, size_t len) {
+    if (!vec || RAY_IS_ERR(vec)) return vec;
+    if (vec->type != RAY_STR) return ray_error("type", NULL);
+    if (idx < 0 || idx > vec->len) return ray_error("range", NULL);
+
+    ray_t* tmp = ray_vec_new(RAY_STR, 1);
+    if (!tmp || RAY_IS_ERR(tmp)) return tmp ? tmp : ray_error("oom", NULL);
+
+    ray_t* tmp2 = ray_str_vec_append(tmp, s, len);
+    if (!tmp2 || RAY_IS_ERR(tmp2)) { ray_release(tmp); return tmp2 ? tmp2 : ray_error("oom", NULL); }
+
+    ray_t* result = ray_vec_insert_vec_at(vec, idx, tmp2);
+    ray_release(tmp2);
+    return result;
 }
 
 /* --------------------------------------------------------------------------

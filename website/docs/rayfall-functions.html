@@ -299,7 +299,7 @@
         <tbody>
           <tr><td><code>select</code></td><td>variadic, special</td><td>Query table with optional filter, projection, grouping, and aggregation</td></tr>
           <tr><td><code>update</code></td><td>variadic, special</td><td>Add or modify columns in a table</td></tr>
-          <tr><td><code>insert</code></td><td>variadic, special</td><td>Insert rows into a table</td></tr>
+          <tr><td><code>insert</code></td><td>variadic, special</td><td>Append a row to a table, append to a vector/list, or insert at position(s)</td></tr>
           <tr><td><code>upsert</code></td><td>variadic, special</td><td>Insert or update rows (by key)</td></tr>
         </tbody>
       </table>
@@ -318,6 +318,21 @@
 <span class="hl-comment">; Update: add a column</span>
 (<span class="hl-kw">update</span> {<span class="hl-sym">from:</span> trades
           <span class="hl-sym">cols:</span> {<span class="hl-sym">notional:</span> (<span class="hl-fn">*</span> price size)}})</code></pre>
+
+      <p><code>insert</code> overloads on arity. With two arguments it appends; with three arguments it inserts at a position (or positions) given by the second argument. The first argument is a quoted symbol for in-place mutation, e.g. <code>'v</code>, or any expression that evaluates to a table/vector/list.</p>
+
+      <pre><code><span class="hl-comment">; Append a row to a table</span>
+(<span class="hl-kw">insert</span> <span class="hl-sym">'trades</span> (<span class="hl-fn">list</span> <span class="hl-sym">'AAPL</span> <span class="hl-num">150.0</span> <span class="hl-num">100</span>))
+
+<span class="hl-comment">; Vector / list operations</span>
+(<span class="hl-kw">def</span> v (<span class="hl-fn">til</span> <span class="hl-num">5</span>))               <span class="hl-comment">; [0 1 2 3 4]</span>
+(<span class="hl-kw">insert</span> <span class="hl-sym">'v</span> <span class="hl-num">99</span>)                  <span class="hl-comment">; append:    [0 1 2 3 4 99]</span>
+(<span class="hl-kw">insert</span> <span class="hl-sym">'v</span> <span class="hl-num">0</span> <span class="hl-num">-1</span>)                <span class="hl-comment">; head:      [-1 0 1 2 3 4 99]</span>
+(<span class="hl-kw">insert</span> <span class="hl-sym">'v</span> <span class="hl-num">3</span> [<span class="hl-num">100</span> <span class="hl-num">200</span>])         <span class="hl-comment">; splice:    [-1 0 1 100 200 2 3 4 99]</span>
+(<span class="hl-kw">insert</span> <span class="hl-sym">'v</span> [<span class="hl-num">0</span> <span class="hl-num">3</span>] <span class="hl-num">77</span>)             <span class="hl-comment">; broadcast 77 at pre-positions 0 and 3</span>
+(<span class="hl-kw">insert</span> <span class="hl-sym">'v</span> [<span class="hl-num">1</span> <span class="hl-num">3</span>] [<span class="hl-num">10</span> <span class="hl-num">30</span>])         <span class="hl-comment">; parallel: 10 at pos 1, 30 at pos 3</span></code></pre>
+
+      <p>Indices are <em>pre-insertion</em> positions in <code>[0, count]</code>; <code>idx == count</code> is equivalent to append. Vector positional inserts of a same-typed vector splice that vector in. List positional inserts always add the value as a single slot &mdash; use <code>concat</code> to splice. Multi-insert is stable on duplicate indices, preserving input order. Typed-null atoms (<code>0Nl</code>, <code>0Nf</code>, &hellip;) carry their null flag through &mdash; the inserted slot is marked null, not zero.</p>
 
       <!-- ════════════════════════════════════════ -->
       <h2 id="joins">Joins</h2>

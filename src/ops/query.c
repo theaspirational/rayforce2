@@ -3872,6 +3872,163 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
         if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : ray_error("type", NULL);
     }
 
+    /* ====================================================================
+     * Vec/list dispatch — n==2 append, n==3 positional insert.
+     * Tables with n==2 fall through to the legacy table-row append below.
+     * ==================================================================== */
+    if (tbl->type != RAY_TABLE) {
+        if (already_eval) { ray_release(tbl); return ray_error("type", NULL); }
+        if (tbl->attrs & RAY_ATTR_ARENA) { ray_release(tbl); return ray_error("type", NULL); }
+
+        /* Slice → materialise so cow can mutate. Lists never slice. */
+        if (tbl->attrs & RAY_ATTR_SLICE) {
+            if (tbl->type == RAY_LIST) { ray_release(tbl); return ray_error("type", NULL); }
+            ray_t* empty = ray_vec_new(tbl->type, 0);
+            if (!empty || RAY_IS_ERR(empty)) {
+                ray_release(tbl);
+                return empty ? empty : ray_error("oom", NULL);
+            }
+            ray_t* mat = ray_vec_concat(tbl, empty);
+            ray_release(empty);
+            ray_release(tbl);
+            if (!mat || RAY_IS_ERR(mat)) return mat ? mat : ray_error("oom", NULL);
+            tbl = mat;
+        }
+
+        bool is_target_list = (tbl->type == RAY_LIST && !(tbl->attrs & RAY_ATTR_DICT));
+        bool is_target_vec  = ray_is_vec(tbl);
+        if (!is_target_list && !is_target_vec) {
+            ray_release(tbl);
+            return ray_error("type", NULL);
+        }
+        if (n != 2 && n != 3) {
+            ray_release(tbl);
+            return ray_error("domain", NULL);
+        }
+
+        ray_t* result = NULL;
+        int8_t tt = tbl->type;
+
+        if (n == 2) {
+            /* APPEND */
+            ray_t* val = ray_eval(args[1]);
+            if (!val || RAY_IS_ERR(val)) {
+                ray_release(tbl);
+                return val ? val : ray_error("type", NULL);
+            }
+            if (is_target_list) {
+                /* Always one slot — never splice on append. */
+                tbl = ray_list_append(tbl, val);
+                result = tbl;
+            } else if (val->type == -tt) {
+                /* Atom of matching type → element append */
+                int64_t new_idx = tbl->len;
+                if (tt == RAY_STR) {
+                    tbl = ray_str_vec_append(tbl, ray_str_ptr(val), ray_str_len(val));
+                } else if (tt == RAY_SYM) {
+                    int64_t s = val->i64;
+                    tbl = ray_vec_append(tbl, &s);
+                } else {
+                    tbl = ray_vec_append(tbl, &val->u8);
+                }
+                if (tbl && !RAY_IS_ERR(tbl) && RAY_ATOM_IS_NULL(val))
+                    ray_vec_set_null(tbl, new_idx, true);
+                result = tbl;
+            } else if (val->type == tt) {
+                /* Same-type vec → splice at end */
+                result = ray_vec_concat(tbl, val);
+                ray_release(tbl);
+            } else {
+                ray_release(tbl);
+                ray_release(val);
+                return ray_error("type", NULL);
+            }
+            ray_release(val);
+        } else {
+            /* n == 3 — POSITIONAL */
+            ray_t* idx_arg = ray_eval(args[1]);
+            if (!idx_arg || RAY_IS_ERR(idx_arg)) {
+                ray_release(tbl);
+                return idx_arg ? idx_arg : ray_error("type", NULL);
+            }
+            ray_t* val = ray_eval(args[2]);
+            if (!val || RAY_IS_ERR(val)) {
+                ray_release(tbl);
+                ray_release(idx_arg);
+                return val ? val : ray_error("type", NULL);
+            }
+
+            if (is_target_list) {
+                if (idx_arg->type == -RAY_I64) {
+                    tbl = ray_list_insert_at(tbl, idx_arg->i64, val);
+                    result = tbl;
+                } else if (idx_arg->type == RAY_I64) {
+                    if (val->type != RAY_LIST) {
+                        ray_release(tbl); ray_release(idx_arg); ray_release(val);
+                        return ray_error("type", NULL);
+                    }
+                    result = ray_list_insert_many(tbl, idx_arg, val);
+                    ray_release(tbl);
+                } else {
+                    ray_release(tbl); ray_release(idx_arg); ray_release(val);
+                    return ray_error("type", NULL);
+                }
+            } else {
+                /* vec target */
+                if (idx_arg->type == -RAY_I64) {
+                    int64_t i = idx_arg->i64;
+                    if (val->type == -tt) {
+                        if (tt == RAY_STR) {
+                            result = ray_str_vec_insert_at(tbl, i,
+                                        ray_str_ptr(val), ray_str_len(val));
+                            ray_release(tbl);
+                        } else if (tt == RAY_SYM) {
+                            int64_t s = val->i64;
+                            tbl = ray_vec_insert_at(tbl, i, &s);
+                            result = tbl;
+                        } else {
+                            tbl = ray_vec_insert_at(tbl, i, &val->u8);
+                            result = tbl;
+                        }
+                        if (result && !RAY_IS_ERR(result) && RAY_ATOM_IS_NULL(val))
+                            ray_vec_set_null(result, i, true);
+                    } else if (val->type == tt) {
+                        result = ray_vec_insert_vec_at(tbl, i, val);
+                        ray_release(tbl);
+                    } else {
+                        ray_release(tbl); ray_release(idx_arg); ray_release(val);
+                        return ray_error("type", NULL);
+                    }
+                } else if (idx_arg->type == RAY_I64) {
+                    if (tt == RAY_STR) {
+                        ray_release(tbl); ray_release(idx_arg); ray_release(val);
+                        return ray_error("type", NULL);
+                    }
+                    if (val->type != tt && val->type != -tt) {
+                        ray_release(tbl); ray_release(idx_arg); ray_release(val);
+                        return ray_error("type", NULL);
+                    }
+                    result = ray_vec_insert_many(tbl, idx_arg, val);
+                    ray_release(tbl);
+                } else {
+                    ray_release(tbl); ray_release(idx_arg); ray_release(val);
+                    return ray_error("type", NULL);
+                }
+            }
+            ray_release(idx_arg);
+            ray_release(val);
+        }
+
+        if (inplace_sym >= 0 && result && !RAY_IS_ERR(result)) {
+            ray_env_set(inplace_sym, result);
+            ray_retain(result);
+        }
+        return result;
+    }
+
+    /* Table target: arity-3 positional row insert is not implemented. */
+    if (n != 2) { ray_release(tbl); return ray_error("nyi", NULL); }
+
     /* Evaluate the row argument (skip if already evaluated) */
     ray_t* row = already_eval ? (ray_retain(args[1]), args[1]) : ray_eval(args[1]);
     if (!row || RAY_IS_ERR(row)) { ray_release(tbl); return row ? row : ray_error("type", NULL); }

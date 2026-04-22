@@ -2421,6 +2421,109 @@ static MunitResult test_eval_insert(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* ---- Test: insert vec/list append (arity 2) ---- */
+static MunitResult test_eval_insert_vec_append(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ASSERT_EQ("(do (set v (til 5)) (insert 'v 99) v)", "[0 1 2 3 4 99]");
+    ASSERT_EQ("(do (set v (til 3)) (insert 'v [10 20 30]) v)", "[0 1 2 10 20 30]");
+    /* Return value mirrors the rebound v */
+    ASSERT_EQ("(do (set v (til 3)) (insert 'v 9))", "[0 1 2 9]");
+    return MUNIT_OK;
+}
+
+static MunitResult test_eval_insert_list_append(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l 42) l)", "(list 1 2 3 42)");
+    /* Append a list as a single nested slot — never splice on append */
+    ASSERT_EQ("(do (set l (list 1 2)) (insert 'l (list 9 8)) (count l))", "3");
+    return MUNIT_OK;
+}
+
+/* ---- Test: insert positional (arity 3, scalar idx) ---- */
+static MunitResult test_eval_insert_vec_positional(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Head, middle, tail (== append) */
+    ASSERT_EQ("(do (set v (til 5)) (insert 'v 0 99) v)", "[99 0 1 2 3 4]");
+    ASSERT_EQ("(do (set v (til 5)) (insert 'v 2 99) v)", "[0 1 99 2 3 4]");
+    ASSERT_EQ("(do (set v (til 5)) (insert 'v 5 99) v)", "[0 1 2 3 4 99]");
+    /* Splice a same-typed vec at position */
+    ASSERT_EQ("(do (set v (til 5)) (insert 'v 2 [10 20]) v)", "[0 1 10 20 2 3 4]");
+    /* Empty target */
+    ASSERT_EQ("(do (set v (til 0)) (insert 'v 0 7) v)", "[7]");
+    /* Type mismatch: insert string atom into I64 vec */
+    ASSERT_ER("(do (set v (til 3)) (insert 'v 1 \"x\"))", "type");
+    /* Out of range */
+    ASSERT_ER("(do (set v (til 3)) (insert 'v -1 9))", "range");
+    ASSERT_ER("(do (set v (til 3)) (insert 'v 4 9))", "range");
+    return MUNIT_OK;
+}
+
+static MunitResult test_eval_insert_list_positional(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l 0 99) l)", "(list 99 1 2 3)");
+    ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l 1 99) l)", "(list 1 99 2 3)");
+    ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l 3 99) l)", "(list 1 2 3 99)");
+    /* Insert a list as a single slot — no splice, count grows by one */
+    ASSERT_EQ("(do (set l (list 1 2)) (insert 'l 1 (list 9 8)) (count l))", "3");
+    /* Out of range */
+    ASSERT_ER("(do (set l (list 1 2)) (insert 'l -1 9))", "range");
+    ASSERT_ER("(do (set l (list 1 2)) (insert 'l 3 9))", "range");
+    return MUNIT_OK;
+}
+
+/* ---- Test: insert positional multi (arity 3, vec idx) ---- */
+static MunitResult test_eval_insert_positional_multi(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Broadcast a single value across N pre-positions */
+    ASSERT_EQ("(do (set v (til 5)) (insert 'v [0 2 4] 99) v)",
+              "[99 0 1 99 2 3 99 4]");
+    /* Parallel insertion */
+    ASSERT_EQ("(do (set v (til 5)) (insert 'v [1 3] [10 30]) v)",
+              "[0 10 1 2 30 3 4]");
+    /* Length mismatch */
+    ASSERT_ER("(do (set v (til 5)) (insert 'v [0 2] [10 20 30]))", "range");
+    /* Stable order on duplicate indices: both go to same pre-position
+     * in original input order */
+    ASSERT_EQ("(do (set v (til 3)) (insert 'v [1 1] [10 20]) v)",
+              "[0 10 20 1 2]");
+    /* List multi-insert */
+    ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l [0 2] (list 10 30)) (count l))",
+              "5");
+    return MUNIT_OK;
+}
+
+/* ---- Test: insert preserves typed-null semantics ---- */
+static MunitResult test_eval_insert_typed_null(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Arity-2 atom append: null bit must carry through */
+    ASSERT_EQ("(do (set v [1 2 3]) (insert 'v 0Nl) v)", "[1 2 3 0Nl]");
+    /* Arity-3 scalar insert: null bit must carry through */
+    ASSERT_EQ("(do (set v [1 2 3]) (insert 'v 1 0Nl) v)", "[1 0Nl 2 3]");
+    /* Float null */
+    ASSERT_EQ("(do (set v [1.0 2.0]) (insert 'v 0 0Nf) v)", "[0Nf 1.0 2.0]");
+    /* Multi-insert broadcast of typed null */
+    ASSERT_EQ("(do (set v [1 2 3 4 5]) (insert 'v [0 3] 0Nl) v)",
+              "[0Nl 1 2 3 0Nl 4 5]");
+    return MUNIT_OK;
+}
+
+/* ---- Test: insert error paths ---- */
+static MunitResult test_eval_insert_positional_errors(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    /* Unbound symbol */
+    ASSERT_ER("(insert 'nope 0 9)", "domain");
+    /* Vec target with non-I64 idx */
+    ASSERT_ER("(do (set v (til 3)) (insert 'v 1.0 9))", "type");
+    /* List multi-insert with non-list val */
+    ASSERT_ER("(do (set l (list 1 2 3)) (insert 'l [0 1] 99))", "type");
+    /* RAY_STR multi-insert is rejected */
+    ASSERT_ER("(do (set s [\"a\" \"b\"]) (insert 's [0 1] \"c\"))", "type");
+    /* Slice target materializes and succeeds */
+    ASSERT_EQ("(do (set v (til 5)) (set s (take v 3)) (insert 's 0 99) s)",
+              "[99 0 1 2]");
+    return MUNIT_OK;
+}
+
 /* ---- Test: upsert (update existing row) ---- */
 static MunitResult test_eval_upsert(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -3970,6 +4073,13 @@ static MunitTest lang_tests[] = {
     { "/eval/update_str_type_mismatch", test_eval_update_str_type_mismatch, lang_setup, lang_teardown, 0, NULL },
     { "/eval/select_empty_const", test_eval_select_empty_const, lang_setup, lang_teardown, 0, NULL },
     { "/eval/insert",          test_eval_insert,          lang_setup, lang_teardown, 0, NULL },
+    { "/eval/insert_vec_append",       test_eval_insert_vec_append,       lang_setup, lang_teardown, 0, NULL },
+    { "/eval/insert_list_append",      test_eval_insert_list_append,      lang_setup, lang_teardown, 0, NULL },
+    { "/eval/insert_vec_positional",   test_eval_insert_vec_positional,   lang_setup, lang_teardown, 0, NULL },
+    { "/eval/insert_list_positional",  test_eval_insert_list_positional,  lang_setup, lang_teardown, 0, NULL },
+    { "/eval/insert_positional_multi", test_eval_insert_positional_multi, lang_setup, lang_teardown, 0, NULL },
+    { "/eval/insert_typed_null",       test_eval_insert_typed_null,       lang_setup, lang_teardown, 0, NULL },
+    { "/eval/insert_positional_errors", test_eval_insert_positional_errors, lang_setup, lang_teardown, 0, NULL },
     { "/eval/upsert",          test_eval_upsert,          lang_setup, lang_teardown, 0, NULL },
     { "/eval/upsert_f64_key",  test_eval_upsert_f64_key,  lang_setup, lang_teardown, 0, NULL },
     { "/eval/upsert_str_key",  test_eval_upsert_str_key,  lang_setup, lang_teardown, 0, NULL },
