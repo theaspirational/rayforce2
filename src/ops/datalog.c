@@ -1346,10 +1346,26 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 ray_release(accum);
                 return NULL;
             }
-            ray_t* src_table = prog->rels[src_idx].table;
+            dl_rel_t* src_rel_s = &prog->rels[src_idx];
+            ray_t* src_table = src_rel_s->table;
             int64_t src_nrows = (src_table && !RAY_IS_ERR(src_table))
                 ? ray_table_nrows(src_table)
                 : 0;
+
+            /* Bounds-check value column up front for every value-taking op
+             * (SUM/MIN/MAX/AVG).  Must happen before the empty-source early
+             * returns below, otherwise an out-of-range index on an empty
+             * source would silently emit the SUM identity 0 / 0.0. */
+            bool need_value_col = (body->agg_op == DL_AGG_SUM
+                                   || body->agg_op == DL_AGG_MIN
+                                   || body->agg_op == DL_AGG_MAX
+                                   || body->agg_op == DL_AGG_AVG);
+            if (need_value_col &&
+                (body->agg_value_col < 0 ||
+                 body->agg_value_col >= src_rel_s->arity)) {
+                ray_release(accum);
+                return NULL;
+            }
 
             if (src_nrows == 0 && (body->agg_op == DL_AGG_MIN
                      || body->agg_op == DL_AGG_MAX
@@ -1369,10 +1385,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
              * the column type so the identity (0 / 0.0) is emitted in the
              * correct result type. */
             bool    is_float = is_avg;
-            if (body->agg_op == DL_AGG_SUM ||
-                body->agg_op == DL_AGG_MIN ||
-                body->agg_op == DL_AGG_MAX ||
-                body->agg_op == DL_AGG_AVG) {
+            if (need_value_col) {
                 ray_t* vc0 = ray_table_get_col_idx(src_table, body->agg_value_col);
                 if (vc0) {
                     if (vc0->type == RAY_F64) {
