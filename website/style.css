@@ -616,3 +616,13 @@ code {
   .arch-core-rect { animation: none; }
   .term-cursor { animation: none; opacity: 1; }
 }
+
+/* ── About page: fullscreen promo iframe with floating pill nav on top ─── */
+body.about-page { margin: 0; overflow: hidden; }
+.promo-frame {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  border: 0;
+  background: #0a0a0a;
+}
