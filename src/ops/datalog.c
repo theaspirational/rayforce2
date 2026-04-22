@@ -3397,7 +3397,7 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
                 }
                 clean = next_clean;
             }
-            if (dl_add_edb(prog, pred_name, clean, pred_arity) != 0) {
+            if (dl_add_edb(prog, pred_name, clean, pred_arity) < 0) {
                 ray_release(clean);
                 dl_program_free(prog);
                 ray_release(db);
