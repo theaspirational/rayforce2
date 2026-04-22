@@ -1577,6 +1577,40 @@ static MunitResult test_agg_scalar_f64(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* Empty-source SUM over an RAY_F64 column must still emit a RAY_F64 result
+ * column (value 0.0), not RAY_I64 0.  Regression from the scalar-agg F64
+ * fix: is_float was only flipped inside the src_nrows > 0 branch, so an
+ * empty f64 SUM fell through to the i64 path. */
+static MunitResult test_agg_scalar_f64_sum_empty(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    ray_t* vcol = ray_vec_new(RAY_F64, 0);
+    munit_assert_ptr_not_null(vcol);
+    vcol->len = 0;
+    ray_t* tbl = ray_table_new(1);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("m__c0", 5), vcol);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "m", tbl, 1);
+
+    dl_rule_t rs; dl_rule_init(&rs, "total_sum", 1);
+    dl_rule_head_var(&rs, 0, 0);
+    dl_rule_add_agg(&rs, DL_AGG_SUM, 0, "m", 1, 0);
+    rs.n_vars = 1;
+    dl_add_rule(prog, &rs);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "total_sum");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 1);
+    ray_t* sc = ray_table_get_col_idx(out, 0);
+    munit_assert_int(sc->type, ==, RAY_F64);
+    munit_assert_double_equal(((double*)ray_data(sc))[0], 0.0, 4);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(vcol);
+    return MUNIT_OK;
+}
+
 /* Grouped aggregate with an out-of-range group-key column must be rejected
  * cleanly (no crash, no bogus rows).  Regression: the grouped path indexed
  * src_rel->col_names[key_col] without bounds-checking. */
@@ -1772,6 +1806,7 @@ static MunitTest datalog_tests[] = {
     { "/rule_body_const_surface_syntax", test_rule_body_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/env_bound_edb_auto_register",   test_env_bound_edb_auto_register,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_scalar_f64",                 test_agg_scalar_f64,                 datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_scalar_f64_sum_empty",       test_agg_scalar_f64_sum_empty,       datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_grouped_key_col_oor",        test_agg_grouped_key_col_oor,        datalog_setup, datalog_teardown, 0, NULL },
     { "/project_narrow_sym",             test_project_narrow_sym,             datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },

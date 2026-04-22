@@ -1365,8 +1365,25 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             bool    is_avg   = (body->agg_op == DL_AGG_AVG);
             /* Float promotion: AVG always emits f64; SUM/MIN/MAX track their
              * source column type (i64 in -> i64 out; f64 in -> f64 out).
-             * COUNT is always i64. */
+             * COUNT is always i64.  For empty SUM, we still need to inspect
+             * the column type so the identity (0 / 0.0) is emitted in the
+             * correct result type. */
             bool    is_float = is_avg;
+            if (body->agg_op == DL_AGG_SUM ||
+                body->agg_op == DL_AGG_MIN ||
+                body->agg_op == DL_AGG_MAX ||
+                body->agg_op == DL_AGG_AVG) {
+                ray_t* vc0 = ray_table_get_col_idx(src_table, body->agg_value_col);
+                if (vc0) {
+                    if (vc0->type == RAY_F64) {
+                        is_float = true;
+                    } else if (vc0->type != RAY_I64) {
+                        /* Non-numeric source: reject regardless of row count. */
+                        ray_release(accum);
+                        return NULL;
+                    }
+                }
+            }
             switch (body->agg_op) {
             case DL_AGG_COUNT:
                 result_i = src_nrows;
