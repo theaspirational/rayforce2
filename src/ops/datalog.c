@@ -1009,11 +1009,15 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
         if (src_idx >= 0) {
             ray_t* src = ray_table_get_col_idx(tbl, src_idx);
             if (!src) continue;
-            ray_t* dst = ray_vec_new(src->type, nrows);
+            /* Preserve SYM index width: ray_vec_new(RAY_SYM, …) would always
+             * produce a W64 vec, so memcpy'ing with the source's narrower
+             * element size would leave the upper bytes of each W64 slot
+             * uninitialized.  ray_sym_vec_new mirrors src's attrs width. */
+            ray_t* dst = (src->type == RAY_SYM)
+                ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, nrows)
+                : ray_vec_new(src->type, nrows);
             if (!dst || RAY_IS_ERR(dst)) continue;
             dst->len = nrows;
-            /* Use element size from the source vec so SYM with any width,
-             * I64, and F64 all copy correctly. */
             uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
             if (esz == 0) { ray_release(dst); continue; }
             memcpy(ray_data(dst), ray_data(src), (size_t)nrows * (size_t)esz);
@@ -1269,15 +1273,27 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 ray_op_t* keys_ops[DL_AGG_MAX_KEYS];
                 for (int i = 0; i < nk; i++) {
                     int kc = body->agg_group_key_cols[i];
-                    if (kc < 0 || kc >= src_rel->arity) { ray_release(accum); return NULL; }
+                    if (kc < 0 || kc >= src_rel->arity) {
+                        ray_graph_free(gg);
+                        ray_release(accum);
+                        return NULL;
+                    }
                     int64_t sym = src_rel->col_names[kc];
                     ray_t* s = ray_sym_str(sym);
                     keys_ops[i] = ray_scan(gg, ray_str_ptr(s));
                 }
 
                 /* Agg input: value column (for COUNT we still pass a column; any
-                 * column works since COUNT only counts rows). */
+                 * column works since COUNT only counts rows).  Must be bounds-
+                 * checked — silently clamping to 0 would compute a valid-looking
+                 * but wrong result over an unrelated column. */
                 int value_col = body->agg_value_col;
+                if (body->agg_op != DL_AGG_COUNT &&
+                    (value_col < 0 || value_col >= src_rel->arity)) {
+                    ray_graph_free(gg);
+                    ray_release(accum);
+                    return NULL;
+                }
                 if (value_col < 0 || value_col >= src_rel->arity) value_col = 0;
                 ray_t* vs = ray_sym_str(src_rel->col_names[value_col]);
                 ray_op_t* agg_in = ray_scan(gg, ray_str_ptr(vs));
@@ -1344,12 +1360,16 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 return NULL;
             }
 
-            int64_t result = 0;
-            double  favg = 0.0;
-            bool    is_avg = (body->agg_op == DL_AGG_AVG);
+            int64_t result_i = 0;
+            double  result_f = 0.0;
+            bool    is_avg   = (body->agg_op == DL_AGG_AVG);
+            /* Float promotion: AVG always emits f64; SUM/MIN/MAX track their
+             * source column type (i64 in -> i64 out; f64 in -> f64 out).
+             * COUNT is always i64. */
+            bool    is_float = is_avg;
             switch (body->agg_op) {
             case DL_AGG_COUNT:
-                result = src_nrows;
+                result_i = src_nrows;
                 break;
             case DL_AGG_SUM:
             case DL_AGG_MIN:
@@ -1358,32 +1378,64 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 if (src_nrows > 0) {
                     ray_t* val_col =
                         ray_table_get_col_idx(src_table, body->agg_value_col);
-                    if (!val_col || val_col->type != RAY_I64) {
-                        result = 0;
-                    } else {
+                    if (!val_col) {
+                        ray_release(accum);
+                        return NULL;
+                    }
+                    if (val_col->type == RAY_I64) {
                         int64_t* vd = (int64_t*)ray_data(val_col);
                         if (body->agg_op == DL_AGG_SUM) {
-                            result = 0;
+                            result_i = 0;
                             for (int64_t i = 0; i < src_nrows; i++)
-                                result += vd[i];
+                                result_i += vd[i];
                         } else if (body->agg_op == DL_AGG_MIN) {
-                            result = vd[0];
+                            result_i = vd[0];
                             for (int64_t i = 1; i < src_nrows; i++) {
-                                if (vd[i] < result)
-                                    result = vd[i];
+                                if (vd[i] < result_i)
+                                    result_i = vd[i];
                             }
                         } else if (body->agg_op == DL_AGG_MAX) {
-                            result = vd[0];
+                            result_i = vd[0];
                             for (int64_t i = 1; i < src_nrows; i++) {
-                                if (vd[i] > result)
-                                    result = vd[i];
+                                if (vd[i] > result_i)
+                                    result_i = vd[i];
                             }
                         } else { /* DL_AGG_AVG */
                             int64_t acc = 0;
                             for (int64_t i = 0; i < src_nrows; i++)
                                 acc += vd[i];
-                            favg = (double)acc / (double)src_nrows;
+                            result_f = (double)acc / (double)src_nrows;
                         }
+                    } else if (val_col->type == RAY_F64) {
+                        is_float = true;  /* SUM/MIN/MAX promote to f64 */
+                        double* vd = (double*)ray_data(val_col);
+                        if (body->agg_op == DL_AGG_SUM) {
+                            result_f = 0.0;
+                            for (int64_t i = 0; i < src_nrows; i++)
+                                result_f += vd[i];
+                        } else if (body->agg_op == DL_AGG_MIN) {
+                            result_f = vd[0];
+                            for (int64_t i = 1; i < src_nrows; i++) {
+                                if (vd[i] < result_f)
+                                    result_f = vd[i];
+                            }
+                        } else if (body->agg_op == DL_AGG_MAX) {
+                            result_f = vd[0];
+                            for (int64_t i = 1; i < src_nrows; i++) {
+                                if (vd[i] > result_f)
+                                    result_f = vd[i];
+                            }
+                        } else { /* DL_AGG_AVG */
+                            double acc = 0.0;
+                            for (int64_t i = 0; i < src_nrows; i++)
+                                acc += vd[i];
+                            result_f = acc / (double)src_nrows;
+                        }
+                    } else {
+                        /* Non-numeric source column — reject loudly rather than
+                         * silently returning zero. */
+                        ray_release(accum);
+                        return NULL;
                     }
                 }
                 break;
@@ -1394,16 +1446,16 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             int64_t nrows = ray_table_nrows(accum);
             if (nrows == 0)
                 break;
-            ray_t* new_col = ray_vec_new(is_avg ? RAY_F64 : RAY_I64, nrows);
+            ray_t* new_col = ray_vec_new(is_float ? RAY_F64 : RAY_I64, nrows);
             if (!new_col || RAY_IS_ERR(new_col))
                 break;
             new_col->len = nrows;
-            if (is_avg) {
+            if (is_float) {
                 double* nd = (double*)ray_data(new_col);
-                for (int64_t r = 0; r < nrows; r++) nd[r] = favg;
+                for (int64_t r = 0; r < nrows; r++) nd[r] = result_f;
             } else {
                 int64_t* nd = (int64_t*)ray_data(new_col);
-                for (int64_t r = 0; r < nrows; r++) nd[r] = result;
+                for (int64_t r = 0; r < nrows; r++) nd[r] = result_i;
             }
 
             int new_col_idx = (int)ray_table_ncols(accum);

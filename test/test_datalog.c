@@ -1529,6 +1529,150 @@ static MunitResult test_agg_avg_grouped(const void* params, void* fixture) {
     return MUNIT_OK;
 }
 
+/* Scalar SUM/AVG over an RAY_F64 value column.
+ * Regression: the scalar aggregate path previously accepted only RAY_I64
+ * columns and silently returned 0 for RAY_F64, producing valid-looking but
+ * wrong results. */
+static MunitResult test_agg_scalar_f64(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    double vs[] = {1.5, 2.5, 3.0, 4.0};  /* sum = 11.0, avg = 2.75 */
+    ray_t* vcol = ray_vec_from_raw(RAY_F64, vs, 4);
+    ray_t* tbl = ray_table_new(1);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("m__c0", 5), vcol);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "m", tbl, 1);
+
+    /* total_sum(?s) :- (sum ?s m 0).  Target var 0, value col 0. */
+    dl_rule_t rs; dl_rule_init(&rs, "total_sum", 1);
+    dl_rule_head_var(&rs, 0, 0);
+    dl_rule_add_agg(&rs, DL_AGG_SUM, 0, "m", 1, 0);
+    rs.n_vars = 1;
+    dl_add_rule(prog, &rs);
+
+    /* total_avg(?a) :- (avg ?a m 0). */
+    dl_rule_t ra; dl_rule_init(&ra, "total_avg", 1);
+    dl_rule_head_var(&ra, 0, 0);
+    dl_rule_add_agg(&ra, DL_AGG_AVG, 0, "m", 1, 0);
+    ra.n_vars = 1;
+    dl_add_rule(prog, &ra);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+
+    ray_t* s_out = dl_query(prog, "total_sum");
+    munit_assert_ptr_not_null(s_out);
+    munit_assert_int((int)ray_table_nrows(s_out), ==, 1);
+    ray_t* s_col = ray_table_get_col_idx(s_out, 0);
+    munit_assert_int(s_col->type, ==, RAY_F64);
+    munit_assert_double_equal(((double*)ray_data(s_col))[0], 11.0, 4);
+
+    ray_t* a_out = dl_query(prog, "total_avg");
+    munit_assert_ptr_not_null(a_out);
+    ray_t* a_col = ray_table_get_col_idx(a_out, 0);
+    munit_assert_int(a_col->type, ==, RAY_F64);
+    munit_assert_double_equal(((double*)ray_data(a_col))[0], 2.75, 4);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(vcol);
+    return MUNIT_OK;
+}
+
+/* Grouped aggregate with an out-of-range group-key column must be rejected
+ * cleanly (no crash, no bogus rows).  Regression: the grouped path indexed
+ * src_rel->col_names[key_col] without bounds-checking. */
+static MunitResult test_agg_grouped_key_col_oor(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t us[] = {1, 2, 1}, ws[] = {10, 20, 30};
+    ray_t* uc = ray_vec_from_raw(RAY_I64, us, 3);
+    ray_t* wc = ray_vec_from_raw(RAY_I64, ws, 3);
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("wbu__c0", 7), uc);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("wbu__c1", 7), wc);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "wbu", tbl, 2);
+
+    dl_rule_t r; dl_rule_init(&r, "bad_group", 2);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_head_var(&r, 1, 1);
+    int idx = dl_rule_add_agg(&r, DL_AGG_SUM, 1, "wbu", 2, 1);
+    int key_vars[] = { 0 };
+    int key_cols[] = { 99 };  /* out-of-range: wbu has arity 2 */
+    munit_assert_int(dl_rule_agg_set_group(&r, idx, key_vars, key_cols, 1), ==, 0);
+    r.n_vars = 2;
+    dl_add_rule(prog, &r);
+
+    /* dl_eval must not crash; compile rejects the rule, producing 0 rows. */
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "bad_group");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 0);
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(uc); ray_release(wc);
+    return MUNIT_OK;
+}
+
+/* A rule that passes a narrow-width RAY_SYM body column through a head var
+ * must produce a correct SYM column.  Regression: dl_project allocated the
+ * destination with ray_vec_new(RAY_SYM, …), which always creates a W64 vec,
+ * then memcpy'd using the source's narrower element size — leaving the upper
+ * bytes of each W64 slot uninitialized and producing bogus sym IDs when read
+ * back. */
+static MunitResult test_project_narrow_sym(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Build a W8-width SYM column with 3 distinct sym IDs (all fit in one byte). */
+    int64_t ks[] = {7, 11, 13};
+    int64_t tag_syms[] = {
+        ray_sym_intern("a", 1),
+        ray_sym_intern("b", 1),
+        ray_sym_intern("c", 1),
+    };
+    /* Force narrow W8 storage — the fix path only matters when src is narrower
+     * than the default W64 ray_vec_new would pick. */
+    ray_t* tcol = ray_sym_vec_new(RAY_SYM_W8, 3);
+    munit_assert_ptr_not_null(tcol);
+    tcol->len = 3;
+    for (int i = 0; i < 3; i++)
+        ray_write_sym(ray_data(tcol), i, tag_syms[i], tcol->type, tcol->attrs);
+    ray_t* kcol = ray_vec_from_raw(RAY_I64, ks, 3);
+    ray_t* tbl = ray_table_new(2);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("e__c0", 5), kcol);
+    tbl = ray_table_add_col(tbl, ray_sym_intern("e__c1", 5), tcol);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "e", tbl, 2);
+
+    /* out(?k, ?t) :- (e ?k ?t) — passes the narrow-SYM column through. */
+    dl_rule_t r; dl_rule_init(&r, "out", 2);
+    dl_rule_head_var(&r, 0, 0);
+    dl_rule_head_var(&r, 1, 1);
+    int bidx = dl_rule_add_atom(&r, "e", 2);
+    dl_body_set_var(&r, bidx, 0, 0);
+    dl_body_set_var(&r, bidx, 1, 1);
+    r.n_vars = 2;
+    dl_add_rule(prog, &r);
+
+    munit_assert_int(dl_eval(prog), ==, 0);
+    ray_t* out = dl_query(prog, "out");
+    munit_assert_ptr_not_null(out);
+    munit_assert_int((int)ray_table_nrows(out), ==, 3);
+
+    ray_t* ok = ray_table_get_col_idx(out, 0);
+    ray_t* ot = ray_table_get_col_idx(out, 1);
+    munit_assert_int(ot->type, ==, RAY_SYM);
+    for (int i = 0; i < 3; i++) {
+        munit_assert_int(((int64_t*)ray_data(ok))[i], ==, ks[i]);
+        int64_t got = ray_read_sym(ray_data(ot), i, ot->type, ot->attrs);
+        munit_assert_int((int)got, ==, (int)tag_syms[i]);
+    }
+
+    dl_program_free(prog);
+    ray_release(tbl); ray_release(kcol); ray_release(tcol);
+    return MUNIT_OK;
+}
+
 /* Auto-register env-bound EDB: bind a table as "extra" in the ray env,
  * then run a query whose rule body references "extra" without explicit
  * dl_add_edb — ray_query_fn should auto-discover it.
@@ -1627,6 +1771,9 @@ static MunitTest datalog_tests[] = {
     { "/rule_head_const_surface_syntax", test_rule_head_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/rule_body_const_surface_syntax", test_rule_body_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/env_bound_edb_auto_register",   test_env_bound_edb_auto_register,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/agg_scalar_f64",                 test_agg_scalar_f64,                 datalog_setup, datalog_teardown, 0, NULL },
+    { "/agg_grouped_key_col_oor",        test_agg_grouped_key_col_oor,        datalog_setup, datalog_teardown, 0, NULL },
+    { "/project_narrow_sym",             test_project_narrow_sym,             datalog_setup, datalog_teardown, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
