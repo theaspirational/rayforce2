@@ -31,6 +31,8 @@
 #include "ops/datalog.h"
 #include "table/sym.h"     /* ray_read_sym for SYM column inspection */
 #include "lang/eval.h"
+#include <stdio.h>         /* fprintf in datalog_rf_setup */
+#include <stdlib.h>        /* abort in datalog_rf_setup */
 #include <string.h>
 
 /* Forward-declare runtime API used by the full-runtime fixtures.

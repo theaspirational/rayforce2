@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 /* Runtime API forward-declared here because core/runtime.h's `ray_vm_t`
@@ -119,16 +120,23 @@ static MunitResult test_create_with_sym_corrupt_file(const void* params, void* f
     snprintf(path, sizeof(path), "%s/corrupt.sym", dir);
     FILE* f = fopen(path, "wb");
     munit_assert_ptr_not_null(f);
-    /* Pre-pad past the ray_t header (32 bytes) with identifiable garbage. */
-    unsigned char garbage[128];
-    for (size_t i = 0; i < sizeof(garbage); i++) garbage[i] = (unsigned char)(i * 37 + 1);
-    fwrite(garbage, 1, sizeof(garbage), f);
+    /* Write STR_LIST_MAGIC ("STRL" little-endian) followed by a truncated
+     * payload — header-count byte count=999 but no body — ray_col_load
+     * will hit col_load_str_list's "corrupt" path, which maps to
+     * RAY_ERR_CORRUPT via ray_err_from_obj. */
+    uint32_t magic = 0x4C525453U;  /* STR_LIST_MAGIC */
+    int64_t count = 999;           /* claims 999 strings, none present */
+    fwrite(&magic, sizeof(magic), 1, f);
+    fwrite(&count, sizeof(count), 1, f);
     fclose(f);
 
     ray_err_t err = RAY_OK;
     ray_runtime_t* rt = ray_runtime_create_with_sym_err(path, &err);
     munit_assert_ptr_not_null(rt);
-    munit_assert_int((int)err, !=, (int)RAY_OK);
+    /* Pin the exact error code: the contract maps corrupted sym data
+     * to RAY_ERR_CORRUPT, distinct from I/O or OOM, so callers can
+     * decide recovery policy. */
+    munit_assert_int((int)err, ==, (int)RAY_ERR_CORRUPT);
 
     ray_runtime_destroy(rt);
     unlink(path);
@@ -181,12 +189,53 @@ static MunitResult test_create_with_sym_load_preserves_user_ids(const void* para
     return MUNIT_OK;
 }
 
+/* Sym file whose stat st_size exceeds mem_budget/2 must trigger the
+ * pre-flight OOM guard and surface RAY_ERR_OOM through out_sym_err.
+ * We use ftruncate to create a sparse file without actually allocating
+ * the backing bytes.  Budget auto-detects ~80% of RAM, so a sparse
+ * file ~10 EB guarantees tripping the half-budget ceiling on any
+ * realistic dev/CI host. */
+static MunitResult test_create_with_sym_oversized_file(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    char* dir = make_tmpdir();
+    munit_assert_ptr_not_null(dir);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/huge.sym", dir);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    munit_assert_int(fd, >=, 0);
+    /* 10 EB sparse — bigger than any plausible mem_budget/2. */
+    off_t huge = (off_t)1 << 62;
+    int rc = ftruncate(fd, huge);
+    close(fd);
+    if (rc != 0) {
+        /* Some filesystems (tmpfs on limited hosts) reject the giant
+         * ftruncate — skip rather than fail spuriously. */
+        unlink(path);
+        rmdir(dir);
+        free(dir);
+        return MUNIT_SKIP;
+    }
+
+    ray_err_t err = RAY_OK;
+    ray_runtime_t* rt = ray_runtime_create_with_sym_err(path, &err);
+    munit_assert_ptr_not_null(rt);
+    munit_assert_int((int)err, ==, (int)RAY_ERR_OOM);
+
+    ray_runtime_destroy(rt);
+    unlink(path);
+    rmdir(dir);
+    free(dir);
+    return MUNIT_OK;
+}
+
 static MunitTest runtime_tests[] = {
     { "/create_with_sym_absent_is_ok",     test_create_with_sym_absent_is_ok,     NULL, NULL, 0, NULL },
     { "/create_with_sym_io_error_surfaces", test_create_with_sym_io_error_surfaces, NULL, NULL, 0, NULL },
     { "/create_with_sym_plain_variant_absent", test_create_with_sym_plain_variant_absent, NULL, NULL, 0, NULL },
     { "/create_with_sym_corrupt_file",     test_create_with_sym_corrupt_file,     NULL, NULL, 0, NULL },
     { "/create_with_sym_load_preserves_user_ids", test_create_with_sym_load_preserves_user_ids, NULL, NULL, 0, NULL },
+    { "/create_with_sym_oversized_file",   test_create_with_sym_oversized_file,   NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 

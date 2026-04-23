@@ -977,13 +977,19 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
      * its source's element-size (via ray_sym_elem_size) so narrow-SYM
      * stays narrow rather than being silently widened to W64. */
     ray_t* out = ray_table_new((int)ncols);
+    if (!out) return ray_error("memory", "dl_filter_eq: table_new");
+    if (RAY_IS_ERR(out)) return out;
     for (int64_t c = 0; c < ncols; c++) {
         ray_t* src = ray_table_get_col_idx(tbl, c);
-        if (!src) continue;
+        if (!src) {
+            ray_release(out);
+            return ray_error("domain", "dl_filter_eq: missing source column");
+        }
         ray_t* dst = (src->type == RAY_SYM)
             ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, count)
             : ray_vec_new(src->type, count);
-        if (!dst || RAY_IS_ERR(dst)) continue;
+        if (!dst) { ray_release(out); return ray_error("memory", "dl_filter_eq: vec_new"); }
+        if (RAY_IS_ERR(dst)) { ray_error_free(dst); ray_release(out); return ray_error("memory", "dl_filter_eq: vec_new"); }
         dst->len = count;
         uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
         const uint8_t* src_b = (const uint8_t*)ray_data(src);
@@ -998,8 +1004,11 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
             }
         }
         if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
-        out = ray_table_add_col(out, ray_table_col_name(tbl, c), dst);
+        ray_t* next = ray_table_add_col(out, ray_table_col_name(tbl, c), dst);
         ray_release(dst);
+        if (!next) return ray_error("memory", "dl_filter_eq: add_col");
+        if (RAY_IS_ERR(next)) return next;
+        out = next;
     }
     return out;
 }
@@ -1274,16 +1283,36 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         if (!has_agg)
             return NULL;
         ray_t* one_val = ray_vec_new(RAY_I64, 1);
-        if (!one_val || RAY_IS_ERR(one_val))
+        if (!one_val) { prog->eval_err = true; return NULL; }
+        if (RAY_IS_ERR(one_val)) {
+            ray_error_free(one_val);
+            prog->eval_err = true;
             return NULL;
+        }
         one_val->len = 1;
         ((int64_t*)ray_data(one_val))[0] = 0;
         accum = ray_table_new(1);
-        int64_t unit_sym = ray_sym_intern("_unit", 5);
-        accum = ray_table_add_col(accum, unit_sym, one_val);
-        ray_release(one_val);
-        if (!accum || RAY_IS_ERR(accum))
+        if (!accum) {
+            ray_release(one_val);
+            prog->eval_err = true;
             return NULL;
+        }
+        if (RAY_IS_ERR(accum)) {
+            ray_error_free(accum);
+            ray_release(one_val);
+            prog->eval_err = true;
+            return NULL;
+        }
+        int64_t unit_sym = ray_sym_intern("_unit", 5);
+        ray_t* accum_unit = ray_table_add_col(accum, unit_sym, one_val);
+        ray_release(one_val);
+        if (!accum_unit) { prog->eval_err = true; return NULL; }
+        if (RAY_IS_ERR(accum_unit)) {
+            ray_error_free(accum_unit);
+            prog->eval_err = true;
+            return NULL;
+        }
+        accum = accum_unit;
     }
 
     if (!accum) return NULL;
@@ -1392,7 +1421,11 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 /* Build a sub-graph that SCANs src_table's columns by symbol name.
                  * ray_graph_new retains src_table internally; no extra retain needed. */
                 ray_graph_t* gg = ray_graph_new(src_table);
-                if (!gg) { ray_release(accum); return NULL; }
+                if (!gg) {
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
 
                 ray_op_t* keys_ops[DL_AGG_MAX_KEYS];
                 for (int i = 0; i < nk; i++) {
@@ -1405,7 +1438,19 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                     }
                     int64_t sym = src_rel->col_names[kc];
                     ray_t* s = ray_sym_str(sym);
+                    if (!s) {
+                        ray_graph_free(gg);
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
                     keys_ops[i] = ray_scan(gg, ray_str_ptr(s));
+                    if (!keys_ops[i]) {
+                        ray_graph_free(gg);
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
                 }
 
                 /* Agg input: value column (for COUNT we still pass a column; any
@@ -1422,7 +1467,19 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 }
                 if (value_col < 0 || value_col >= src_rel->arity) value_col = 0;
                 ray_t* vs = ray_sym_str(src_rel->col_names[value_col]);
+                if (!vs) {
+                    ray_graph_free(gg);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
                 ray_op_t* agg_in = ray_scan(gg, ray_str_ptr(vs));
+                if (!agg_in) {
+                    ray_graph_free(gg);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
 
                 uint16_t op_code;
                 switch (body->agg_op) {
@@ -1438,12 +1495,24 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
 
                 ray_op_t* ag_ins[1] = { agg_in };
                 ray_op_t* root = ray_group(gg, keys_ops, (uint8_t)nk, &op_code, ag_ins, 1);
+                if (!root) {
+                    ray_graph_free(gg);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
                 ray_t* group_tbl = ray_execute(gg, root);
                 ray_graph_free(gg);
 
-                if (!group_tbl || RAY_IS_ERR(group_tbl)) {
-                    if (group_tbl) ray_release(group_tbl);
+                if (!group_tbl) {
                     ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (RAY_IS_ERR(group_tbl)) {
+                    ray_error_free(group_tbl);
+                    ray_release(accum);
+                    prog->eval_err = true;
                     return NULL;
                 }
 
@@ -1689,44 +1758,65 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
 
             ray_t* lhs_evaled = NULL;
             ray_t* rhs_evaled = NULL;
-            int64_t* lhs_data;
-            int64_t* rhs_data;
+            ray_t* lhs_src = NULL;  /* borrowed reference for type inspection */
+            ray_t* rhs_src = NULL;
 
             if (body->cmp_lhs_expr) {
-                /* Expression-based LHS */
                 lhs_evaled = dl_eval_expr(body->cmp_lhs_expr, accum, var_col, nrows);
                 if (!lhs_evaled || RAY_IS_ERR(lhs_evaled)) break;
-                lhs_data = (int64_t*)ray_data(lhs_evaled);
+                lhs_src = lhs_evaled;
             } else {
-                /* Simple variable LHS */
                 int lhs_col = var_col[body->cmp_lhs];
-                ray_t* lhs_vec = ray_table_get_col_idx(accum, lhs_col);
-                if (!lhs_vec) break;
-                lhs_data = (int64_t*)ray_data(lhs_vec);
+                lhs_src = ray_table_get_col_idx(accum, lhs_col);
+                if (!lhs_src) break;
             }
 
             if (body->cmp_rhs_expr) {
-                /* Expression-based RHS */
                 rhs_evaled = dl_eval_expr(body->cmp_rhs_expr, accum, var_col, nrows);
                 if (!rhs_evaled || RAY_IS_ERR(rhs_evaled)) {
                     if (lhs_evaled) ray_release(lhs_evaled);
                     break;
                 }
-                rhs_data = (int64_t*)ray_data(rhs_evaled);
+                rhs_src = rhs_evaled;
             } else if (body->cmp_rhs != DL_CONST) {
-                /* Simple variable RHS */
                 int rhs_col = var_col[body->cmp_rhs];
-                ray_t* rhs_vec = ray_table_get_col_idx(accum, rhs_col);
-                if (!rhs_vec) {
+                rhs_src = ray_table_get_col_idx(accum, rhs_col);
+                if (!rhs_src) {
                     if (lhs_evaled) ray_release(lhs_evaled);
                     break;
                 }
-                rhs_data = (int64_t*)ray_data(rhs_vec);
-            } else {
-                rhs_data = NULL;  /* constant RHS */
+            }
+            /* else rhs is a constant i64 body->cmp_const */
+
+            /* Reject non-numeric sources — DL_CMP has no meaningful
+             * comparison for SYM/STR columns without an ordering hook. */
+            bool lhs_is_f64 = lhs_src && lhs_src->type == RAY_F64;
+            bool rhs_is_f64 = rhs_src && rhs_src->type == RAY_F64;
+            if (lhs_src && lhs_src->type != RAY_I64 && lhs_src->type != RAY_F64) {
+                if (lhs_evaled) ray_release(lhs_evaled);
+                if (rhs_evaled) ray_release(rhs_evaled);
+                prog->eval_err = true;
+                ray_release(accum);
+                return NULL;
+            }
+            if (rhs_src && rhs_src->type != RAY_I64 && rhs_src->type != RAY_F64) {
+                if (lhs_evaled) ray_release(lhs_evaled);
+                if (rhs_evaled) ray_release(rhs_evaled);
+                prog->eval_err = true;
+                ray_release(accum);
+                return NULL;
             }
 
-            /* Build boolean mask */
+            /* Promote to f64 iff either side is f64.  Otherwise stay in
+             * i64 arithmetic for speed and exact integer semantics. */
+            bool use_f64 = lhs_is_f64 || rhs_is_f64;
+            const int64_t* lhs_i = !use_f64 ? (const int64_t*)ray_data(lhs_src) : NULL;
+            const int64_t* rhs_i = !use_f64 && rhs_src ? (const int64_t*)ray_data(rhs_src) : NULL;
+            const double*  lhs_f = use_f64 && !lhs_is_f64 ? NULL
+                                 : (use_f64 ? (const double*)ray_data(lhs_src) : NULL);
+            const double*  rhs_f = use_f64 && rhs_src && rhs_is_f64
+                                 ? (const double*)ray_data(rhs_src) : NULL;
+
             ray_t* mask_block = ray_alloc((size_t)nrows * sizeof(bool));
             if (!mask_block) {
                 if (lhs_evaled) ray_release(lhs_evaled);
@@ -1736,16 +1826,37 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             bool* mask = (bool*)ray_data(mask_block);
             int64_t count = 0;
             for (int64_t r = 0; r < nrows; r++) {
-                int64_t rv = rhs_data ? rhs_data[r] : body->cmp_const;
                 bool pass = false;
-                switch (body->cmp_op) {
-                case DL_CMP_EQ: pass = (lhs_data[r] == rv); break;
-                case DL_CMP_NE: pass = (lhs_data[r] != rv); break;
-                case DL_CMP_LT: pass = (lhs_data[r] <  rv); break;
-                case DL_CMP_LE: pass = (lhs_data[r] <= rv); break;
-                case DL_CMP_GT: pass = (lhs_data[r] >  rv); break;
-                case DL_CMP_GE: pass = (lhs_data[r] >= rv); break;
+                if (use_f64) {
+                    /* Widen the non-f64 side — mixed arithmetic is already
+                     * supported by dl_eval_expr, and DL_CMP_const is i64. */
+                    double lv = lhs_is_f64 ? lhs_f[r] : (double)((const int64_t*)ray_data(lhs_src))[r];
+                    double rv;
+                    if (rhs_src)
+                        rv = rhs_is_f64 ? rhs_f[r] : (double)((const int64_t*)ray_data(rhs_src))[r];
+                    else
+                        rv = (double)body->cmp_const;
+                    switch (body->cmp_op) {
+                    case DL_CMP_EQ: pass = (lv == rv); break;
+                    case DL_CMP_NE: pass = (lv != rv); break;
+                    case DL_CMP_LT: pass = (lv <  rv); break;
+                    case DL_CMP_LE: pass = (lv <= rv); break;
+                    case DL_CMP_GT: pass = (lv >  rv); break;
+                    case DL_CMP_GE: pass = (lv >= rv); break;
+                    }
+                } else {
+                    int64_t lv = lhs_i[r];
+                    int64_t rv = rhs_i ? rhs_i[r] : body->cmp_const;
+                    switch (body->cmp_op) {
+                    case DL_CMP_EQ: pass = (lv == rv); break;
+                    case DL_CMP_NE: pass = (lv != rv); break;
+                    case DL_CMP_LT: pass = (lv <  rv); break;
+                    case DL_CMP_LE: pass = (lv <= rv); break;
+                    case DL_CMP_GT: pass = (lv >  rv); break;
+                    case DL_CMP_GE: pass = (lv >= rv); break;
+                    }
                 }
+                (void)lhs_f;  /* silence unused warnings in non-f64 paths */
                 mask[r] = pass;
                 if (pass) count++;
             }
@@ -1758,20 +1869,29 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 break;  /* all rows pass */
             }
 
-            /* Build filtered table */
+            /* Build filtered table — element-size-aware memcpy so f64
+             * columns and narrow-SYM columns survive the mask unchanged. */
             int64_t ncols = ray_table_ncols(accum);
             ray_t* out = ray_table_new((int)ncols);
             for (int64_t c = 0; c < ncols; c++) {
                 ray_t* src = ray_table_get_col_idx(accum, c);
                 if (!src) continue;
-                ray_t* dst = ray_vec_new(src->type, count);
-                if (!dst || RAY_IS_ERR(dst)) continue;
+                ray_t* dst = (src->type == RAY_SYM)
+                    ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, count)
+                    : ray_vec_new(src->type, count);
+                if (!dst) continue;
+                if (RAY_IS_ERR(dst)) { ray_error_free(dst); continue; }
                 dst->len = count;
-                int64_t* src_d = (int64_t*)ray_data(src);
-                int64_t* dst_d = (int64_t*)ray_data(dst);
+                uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
+                const uint8_t* sb = (const uint8_t*)ray_data(src);
+                uint8_t* db = (uint8_t*)ray_data(dst);
                 int64_t j = 0;
                 for (int64_t r = 0; r < nrows; r++)
-                    if (mask[r]) dst_d[j++] = src_d[r];
+                    if (mask[r]) {
+                        memcpy(db + (size_t)j * esz, sb + (size_t)r * esz, esz);
+                        j++;
+                    }
+                if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
                 out = ray_table_add_col(out, ray_table_col_name(accum, c), dst);
                 ray_release(dst);
             }
@@ -1938,10 +2058,16 @@ static ray_t* table_union(ray_t* a, ray_t* b) {
             return ray_error("domain", "table_union: missing column");
         }
         ray_t* merged = ray_vec_concat(col_a, col_b);
-        if (!merged || RAY_IS_ERR(merged)) {
-            if (merged) ray_release(merged);
+        if (!merged) {
             ray_release(out);
             return ray_error("memory", "table_union: concat");
+        }
+        if (RAY_IS_ERR(merged)) {
+            /* Propagate the original error (e.g. "type" for schema
+             * mismatch) so callers see the real diagnostic instead of
+             * a generic "memory". */
+            ray_release(out);
+            return merged;
         }
         ray_t* next = ray_table_add_col(out, ray_table_col_name(a, c), merged);
         ray_release(merged);
