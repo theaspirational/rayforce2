@@ -1004,11 +1004,16 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
     int64_t nrows = ray_table_nrows(tbl);
     ray_t* out = ray_table_new(n_out);
+    if (!out || RAY_IS_ERR(out))
+        return out ? out : ray_error("memory", "dl_project: table_new");
     for (int c = 0; c < n_out; c++) {
         int src_idx = col_indices[c];
         if (src_idx >= 0) {
             ray_t* src = ray_table_get_col_idx(tbl, src_idx);
-            if (!src) continue;
+            if (!src) {
+                ray_release(out);
+                return ray_error("domain", "dl_project: source column missing");
+            }
             /* Preserve SYM index width: ray_vec_new(RAY_SYM, …) would always
              * produce a W64 vec, so memcpy'ing with the source's narrower
              * element size would leave the upper bytes of each W64 slot
@@ -1016,21 +1021,44 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
             ray_t* dst = (src->type == RAY_SYM)
                 ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, nrows)
                 : ray_vec_new(src->type, nrows);
-            if (!dst || RAY_IS_ERR(dst)) continue;
+            if (!dst || RAY_IS_ERR(dst)) {
+                if (dst) ray_release(dst);
+                ray_release(out);
+                return ray_error("memory", "dl_project: vec_new");
+            }
             dst->len = nrows;
             uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
-            if (esz == 0) { ray_release(dst); continue; }
+            if (esz == 0) {
+                ray_release(dst);
+                ray_release(out);
+                return ray_error("type", "dl_project: unsupported column type");
+            }
             memcpy(ray_data(dst), ray_data(src), (size_t)nrows * (size_t)esz);
-            out = ray_table_add_col(out, head_rel->col_names[c], dst);
+            ray_t* next = ray_table_add_col(out, head_rel->col_names[c], dst);
             ray_release(dst);
+            /* ray_table_add_col consumes `out` via ray_cow on success.  On
+             * error it returns a fresh RAY_ERR object and `out` is no longer
+             * valid — surface the error to the caller as-is. */
+            if (!next) return ray_error("memory", "dl_project: add_col");
+            if (RAY_IS_ERR(next)) return next;
+            out = next;
         } else {
             /* Constant head slot: materialize an owned broadcast column. */
             int8_t ctype = head_const_types ? head_const_types[c] : 0;
-            if (ctype == 0) continue;  /* legacy/unset */
+            if (ctype == 0) {
+                ray_release(out);
+                return ray_error("domain", "dl_project: unset head-const type");
+            }
             ray_t* bcast = dl_broadcast_const_col(nrows, ctype, head_consts[c]);
-            if (!bcast || RAY_IS_ERR(bcast)) continue;
-            out = ray_table_add_col(out, head_rel->col_names[c], bcast);
+            if (!bcast || RAY_IS_ERR(bcast)) {
+                ray_release(out);
+                return bcast ? bcast : ray_error("memory", "dl_project: broadcast");
+            }
+            ray_t* next = ray_table_add_col(out, head_rel->col_names[c], bcast);
             ray_release(bcast);
+            if (!next) return ray_error("memory", "dl_project: add_col");
+            if (RAY_IS_ERR(next)) return next;
+            out = next;
         }
     }
     return out;
@@ -2996,7 +3024,12 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
             return ray_error("type", "aggregate: cannot resolve predicate name");
         const char* pred_name = ray_str_ptr(pred_sym);
 
-        int pred_arity = 1;
+        /* Record arity=0 as "unknown" when we can't resolve it against the
+         * program (prog=NULL or predicate not yet registered).  The compiler
+         * and env auto-register treat 0 as a wildcard and resolve against the
+         * source relation at evaluation time.  A hardcoded 1 would spuriously
+         * reject any env-bound table whose arity isn't 1. */
+        int pred_arity = 0;
         if (prog) {
             int ri = dl_find_rel(prog, pred_name);
             if (ri >= 0) pred_arity = prog->rels[ri].arity;
@@ -3438,6 +3471,11 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
             ray_t* env_val = ray_env_get(env_sym);
             if (!env_val || env_val->type != RAY_TABLE) continue;
             int64_t ncols = ray_table_ncols(env_val);
+            /* pred_arity == 0 is a "not yet known" sentinel used when the
+             * aggregate parser couldn't resolve the source predicate's arity
+             * at parse time (prog=NULL, surface syntax).  Resolve it from the
+             * env-bound table's column count now. */
+            if (pred_arity == 0) pred_arity = (int)ncols;
             if (ncols != pred_arity) continue;
 
             int64_t nrows_env = ray_table_nrows(env_val);

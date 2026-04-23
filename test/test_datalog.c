@@ -1795,6 +1795,55 @@ static MunitResult test_env_bound_edb_auto_register(const void* params, void* fi
     return MUNIT_OK;
 }
 
+/* Auto-register env-bound EDB for an aggregate source whose arity isn't 1.
+ * Regression: aggregate parsing used to hardcode pred_arity=1 when prog was
+ * NULL (surface syntax, globals), so env_val->ncols != 1 made the env auto-
+ * register skip the binding and the query later failed at compile time. */
+static MunitResult test_env_bound_agg_auto_register(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* EAV (as `mydb`): one row so the primary scan yields a single match. */
+    int64_t es[] = {1}, as[] = {42}, vs[] = {100};
+    ray_t* ec = ray_vec_from_raw(RAY_I64, es, 1);
+    ray_t* ac = ray_vec_from_raw(RAY_I64, as, 1);
+    ray_t* vc = ray_vec_from_raw(RAY_I64, vs, 1);
+    ray_t* eav = ray_table_new(3);
+    eav = ray_table_add_col(eav, ray_sym_intern("e", 1), ec);
+    eav = ray_table_add_col(eav, ray_sym_intern("a", 1), ac);
+    eav = ray_table_add_col(eav, ray_sym_intern("v", 1), vc);
+    int64_t db_sym = ray_sym_intern("mydb", 4);
+    ray_env_set(db_sym, eav);
+
+    /* Arity-2 env-bound source table named `salaries`.  The aggregate
+     * (sum ?s salaries 1) needs to auto-register this via the env at query
+     * time even though the surface-syntax parser didn't know its arity. */
+    int64_t sid[] = {1, 2, 3};
+    int64_t sal[] = {100, 200, 300};  /* sum = 600 */
+    ray_t* sidc = ray_vec_from_raw(RAY_I64, sid, 3);
+    ray_t* salc = ray_vec_from_raw(RAY_I64, sal, 3);
+    ray_t* salaries = ray_table_new(2);
+    salaries = ray_table_add_col(salaries, ray_sym_intern("salaries__c0", 12), sidc);
+    salaries = ray_table_add_col(salaries, ray_sym_intern("salaries__c1", 12), salc);
+    int64_t sal_sym = ray_sym_intern("salaries", 8);
+    ray_env_set(sal_sym, salaries);
+
+    ray_t* result = ray_eval_str(
+        "(query mydb (find ?s) (where (eav ?x ?p ?v))"
+        "  (rules ((total ?s) (sum ?s salaries 1))))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_false(RAY_IS_ERR(result));
+    /* The test shape doesn't exercise `total` directly; what we assert is
+     * that the query didn't error out — meaning `salaries` was auto-
+     * registered despite its arity being unknown at parse time. */
+
+    ray_release(result);
+    ray_env_set(sal_sym, NULL);
+    ray_env_set(db_sym, NULL);
+    ray_release(salaries); ray_release(sidc); ray_release(salc);
+    ray_release(eav); ray_release(ec); ray_release(ac); ray_release(vc);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -1837,6 +1886,7 @@ static MunitTest datalog_tests[] = {
     { "/rule_head_const_surface_syntax", test_rule_head_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/rule_body_const_surface_syntax", test_rule_body_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/env_bound_edb_auto_register",   test_env_bound_edb_auto_register,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/env_bound_agg_auto_register",    test_env_bound_agg_auto_register,    datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_scalar_f64",                 test_agg_scalar_f64,                 datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_scalar_f64_sum_empty",       test_agg_scalar_f64_sum_empty,       datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_scalar_value_col_oor_empty", test_agg_scalar_value_col_oor_empty, datalog_setup, datalog_teardown, 0, NULL },
