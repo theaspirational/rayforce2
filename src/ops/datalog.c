@@ -1813,8 +1813,13 @@ static ray_t* restore_names(ray_t* tbl, ray_t* src) {
 /* Create a table by concatenating all rows from tables a and b (same schema).
  * Uses column-wise ray_vec_concat. Returns new owned table with a's names. */
 static ray_t* table_union(ray_t* a, ray_t* b) {
-    if (!a || RAY_IS_ERR(a)) return b;
-    if (!b || RAY_IS_ERR(b)) return a;
+    /* Missing/error inputs: return an owned reference to the other side
+     * (retained so callers can release uniformly). */
+    if (!a || RAY_IS_ERR(a)) {
+        if (b && !RAY_IS_ERR(b)) ray_retain(b);
+        return b;
+    }
+    if (!b || RAY_IS_ERR(b)) { ray_retain(a); return a; }
     if (ray_table_nrows(a) == 0) { ray_retain(b); return b; }
     if (ray_table_nrows(b) == 0) { ray_retain(a); return a; }
 
@@ -1823,15 +1828,28 @@ static ray_t* table_union(ray_t* a, ray_t* b) {
     int64_t ncols = ncols_a < ncols_b ? ncols_a : ncols_b;
 
     ray_t* out = ray_table_new((int)ncols);
+    if (!out || RAY_IS_ERR(out))
+        return out ? out : ray_error("memory", "table_union: table_new");
     for (int64_t c = 0; c < ncols; c++) {
         ray_t* col_a = ray_table_get_col_idx(a, c);
         ray_t* col_b = ray_table_get_col_idx(b, c);
-        if (!col_a || !col_b) continue;
-        ray_t* merged = ray_vec_concat(col_a, col_b);
-        if (merged && !RAY_IS_ERR(merged)) {
-            out = ray_table_add_col(out, ray_table_col_name(a, c), merged);
-            ray_release(merged);
+        if (!col_a || !col_b) {
+            /* Silently dropping a column would produce a schema-incomplete
+             * result that the caller mistakes for a successful union. */
+            ray_release(out);
+            return ray_error("domain", "table_union: missing column");
         }
+        ray_t* merged = ray_vec_concat(col_a, col_b);
+        if (!merged || RAY_IS_ERR(merged)) {
+            if (merged) ray_release(merged);
+            ray_release(out);
+            return ray_error("memory", "table_union: concat");
+        }
+        ray_t* next = ray_table_add_col(out, ray_table_col_name(a, c), merged);
+        ray_release(merged);
+        if (!next) return ray_error("memory", "table_union: add_col");
+        if (RAY_IS_ERR(next)) return next;
+        out = next;
     }
     return out;
 }
@@ -1846,9 +1864,14 @@ static ray_t* table_distinct(ray_t* tbl) {
     if (ncols <= 0) { ray_retain(tbl); return tbl; }
 
     ray_t* canonical = canonicalize(tbl);
+    if (!canonical || RAY_IS_ERR(canonical))
+        return canonical ? canonical : ray_error("memory", "table_distinct: canonicalize");
 
     ray_graph_t* g = ray_graph_new(canonical);
-    if (!g) { ray_release(canonical); ray_retain(tbl); return tbl; }
+    if (!g) {
+        ray_release(canonical);
+        return ray_error("memory", "table_distinct: graph_new");
+    }
 
     ray_op_t* keys[DL_MAX_ARITY];
     for (int64_t c = 0; c < ncols && c < DL_MAX_ARITY; c++) {
@@ -1883,10 +1906,20 @@ static ray_t* table_antijoin(ray_t* left, ray_t* right) {
     if (ncols <= 0) { ray_retain(left); return left; }
 
     ray_t* cl = canonicalize(left);
+    if (!cl || RAY_IS_ERR(cl))
+        return cl ? cl : ray_error("memory", "table_antijoin: canonicalize left");
     ray_t* cr = canonicalize(right);
+    if (!cr || RAY_IS_ERR(cr)) {
+        ray_release(cl);
+        return cr ? cr : ray_error("memory", "table_antijoin: canonicalize right");
+    }
 
     ray_graph_t* g = ray_graph_new(NULL);
-    if (!g) { ray_release(cl); ray_release(cr); ray_retain(left); return left; }
+    if (!g) {
+        ray_release(cl);
+        ray_release(cr);
+        return ray_error("memory", "table_antijoin: graph_new");
+    }
 
     ray_op_t* l = ray_const_table(g, cl);
     ray_op_t* r = ray_const_table(g, cr);
