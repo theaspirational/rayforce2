@@ -1200,8 +1200,14 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
             }
             ray_t* next = ray_table_add_col(out, head_rel->col_names[c], bcast);
             ray_release(bcast);
-            if (!next) return ray_error("memory", "dl_project: add_col");
-            if (RAY_IS_ERR(next)) return next;
+            if (!next) {
+                ray_release(out);
+                return ray_error("memory", "dl_project: add_col");
+            }
+            if (RAY_IS_ERR(next)) {
+                ray_release(out);
+                return next;
+            }
             out = next;
         }
     }
