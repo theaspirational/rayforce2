@@ -196,23 +196,33 @@ static void dl_idb_align_head_const_types(dl_program_t* prog, const dl_rule_t* r
     }
     if (!any_change) return;
 
-    /* Rebuild the table with typed empty columns.  ray_release() is a
-     * deliberate no-op for RAY_ERROR objects (see src/mem/cow.c), so every
-     * failure path here must pair ray_release() for the valid survivor
-     * with ray_error_free() for the freshly-returned error block — else
-     * repeated align calls would silently leak one error block each time. */
+    /* Rebuild the table with typed empty columns.  Alignment is required
+     * for later evaluation to produce type-matching table_union inputs,
+     * so any failure here must also set prog->eval_err = true — silently
+     * returning would leave the IDB schema unaligned and dl_eval would
+     * later hit a ray_vec_concat type mismatch without any error signal. */
     ray_t* fresh = ray_table_new(rel->arity);
-    if (!fresh) return;
-    if (RAY_IS_ERR(fresh)) { ray_error_free(fresh); return; }
+    if (!fresh) { prog->eval_err = true; return; }
+    if (RAY_IS_ERR(fresh)) { prog->eval_err = true; ray_error_free(fresh); return; }
     for (int c = 0; c < rel->arity; c++) {
         ray_t* empty_col = ray_vec_new(desired[c], 0);
-        if (!empty_col) { ray_release(fresh); return; }
-        if (RAY_IS_ERR(empty_col)) { ray_error_free(empty_col); ray_release(fresh); return; }
+        if (!empty_col) { prog->eval_err = true; ray_release(fresh); return; }
+        if (RAY_IS_ERR(empty_col)) {
+            prog->eval_err = true;
+            ray_error_free(empty_col);
+            ray_release(fresh);
+            return;
+        }
         ray_t* prev = fresh;
         fresh = ray_table_add_col(fresh, rel->col_names[c], empty_col);
         ray_release(empty_col);
-        if (!fresh) { ray_release(prev); return; }
-        if (RAY_IS_ERR(fresh)) { ray_release(prev); ray_error_free(fresh); return; }
+        if (!fresh) { prog->eval_err = true; ray_release(prev); return; }
+        if (RAY_IS_ERR(fresh)) {
+            prog->eval_err = true;
+            ray_release(prev);
+            ray_error_free(fresh);
+            return;
+        }
     }
     ray_release(rel->table);
     rel->table = fresh;
@@ -1006,8 +1016,16 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
         if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
         ray_t* next = ray_table_add_col(out, ray_table_col_name(tbl, c), dst);
         ray_release(dst);
-        if (!next) return ray_error("memory", "dl_filter_eq: add_col");
-        if (RAY_IS_ERR(next)) return next;
+        /* ray_table_add_col does not release `out` on failure, so we
+         * must release the partially-built table before bailing out. */
+        if (!next) {
+            ray_release(out);
+            return ray_error("memory", "dl_filter_eq: add_col");
+        }
+        if (RAY_IS_ERR(next)) {
+            ray_release(out);
+            return next;
+        }
         out = next;
     }
     return out;
@@ -1023,18 +1041,22 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
  * onto rule-local scratch — so that the IDB relation table can outlive the
  * per-iteration scratch that built it.  Cross-IDB reads at subsequent
  * strata borrow from this column via ray_table_get_col_idx. */
-static ray_t* dl_broadcast_const_col(int64_t nrows, int8_t type, int64_t val) {
+/* sym_width_hint: when type == RAY_SYM, pass the desired RAY_SYM_W* value
+ * so the broadcast column matches the IDB relation's existing width
+ * (otherwise ray_vec_new defaults to W64 and later table_union would
+ * hit a ray_vec_concat width mismatch).  Pass 0 for the default. */
+static ray_t* dl_broadcast_const_col(int64_t nrows, int8_t type, int64_t val,
+                                      uint8_t sym_width_hint) {
     if (type != RAY_I64 && type != RAY_SYM && type != RAY_F64) {
         return ray_error("type", NULL);
     }
-    ray_t* v = ray_vec_new(type, nrows);
+    ray_t* v = (type == RAY_SYM)
+        ? ray_sym_vec_new(sym_width_hint & RAY_SYM_W_MASK, nrows)
+        : ray_vec_new(type, nrows);
     if (!v || RAY_IS_ERR(v)) return v;
     v->len = nrows;
 
     if (type == RAY_SYM) {
-        /* Default sym width from ray_vec_new is W64 → 8-byte entries. */
-        uint8_t esz = ray_sym_elem_size(v->type, v->attrs);
-        (void)esz;
         /* Use the generic writer so it handles any adaptive width. */
         void* data = ray_data(v);
         for (int64_t i = 0; i < nrows; i++) {
@@ -1097,8 +1119,14 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
                     }
                     ray_t* next = ray_table_add_col(out, head_rel->col_names[c], ecol);
                     ray_release(ecol);
-                    if (!next) return ray_error("memory", "dl_project: add_col");
-                    if (RAY_IS_ERR(next)) return next;
+                    if (!next) {
+                        ray_release(out);
+                        return ray_error("memory", "dl_project: add_col");
+                    }
+                    if (RAY_IS_ERR(next)) {
+                        ray_release(out);
+                        return next;
+                    }
                     out = next;
                     continue;
                 }
@@ -1137,11 +1165,16 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
             if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
             ray_t* next = ray_table_add_col(out, head_rel->col_names[c], dst);
             ray_release(dst);
-            /* ray_table_add_col consumes `out` via ray_cow on success.  On
-             * error it returns a fresh RAY_ERR object and `out` is no longer
-             * valid — surface the error to the caller as-is. */
-            if (!next) return ray_error("memory", "dl_project: add_col");
-            if (RAY_IS_ERR(next)) return next;
+            /* Release the partial `out` on failure — ray_table_add_col
+             * does not free its input on error. */
+            if (!next) {
+                ray_release(out);
+                return ray_error("memory", "dl_project: add_col");
+            }
+            if (RAY_IS_ERR(next)) {
+                ray_release(out);
+                return next;
+            }
             out = next;
         } else {
             /* Constant head slot: materialize an owned broadcast column. */
@@ -1150,7 +1183,17 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
                 ray_release(out);
                 return ray_error("domain", "dl_project: unset head-const type");
             }
-            ray_t* bcast = dl_broadcast_const_col(nrows, ctype, head_consts[c]);
+            /* When the head relation's slot is an existing SYM column
+             * (from a prior aligned rule), match its width so
+             * table_union's ray_vec_concat doesn't reject a W64 vs
+             * narrow mismatch. */
+            uint8_t sym_w = 0;
+            if (ctype == RAY_SYM && head_rel && head_rel->table) {
+                ray_t* hc = ray_table_get_col_idx(head_rel->table, c);
+                if (hc && hc->type == RAY_SYM)
+                    sym_w = hc->attrs & RAY_SYM_W_MASK;
+            }
+            ray_t* bcast = dl_broadcast_const_col(nrows, ctype, head_consts[c], sym_w);
             if (!bcast || RAY_IS_ERR(bcast)) {
                 ray_release(out);
                 return bcast ? bcast : ray_error("memory", "dl_project: broadcast");
@@ -2096,8 +2139,14 @@ static ray_t* table_union(ray_t* a, ray_t* b) {
         }
         ray_t* next = ray_table_add_col(out, ray_table_col_name(a, c), merged);
         ray_release(merged);
-        if (!next) return ray_error("memory", "table_union: add_col");
-        if (RAY_IS_ERR(next)) return next;
+        if (!next) {
+            ray_release(out);
+            return ray_error("memory", "table_union: add_col");
+        }
+        if (RAY_IS_ERR(next)) {
+            ray_release(out);
+            return next;
+        }
         out = next;
     }
     return out;
