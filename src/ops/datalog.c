@@ -1825,7 +1825,13 @@ static ray_t* table_union(ray_t* a, ray_t* b) {
 
     int64_t ncols_a = ray_table_ncols(a);
     int64_t ncols_b = ray_table_ncols(b);
-    int64_t ncols = ncols_a < ncols_b ? ncols_a : ncols_b;
+    /* Refuse to silently narrow to the common prefix — a mismatched schema
+     * would otherwise produce a union table with fewer columns than either
+     * input, and callers (dl_eval's merge paths) would treat that partial
+     * table as a valid IDB state. */
+    if (ncols_a != ncols_b)
+        return ray_error("schema", "table_union: column count mismatch");
+    int64_t ncols = ncols_a;
 
     ray_t* out = ray_table_new((int)ncols);
     if (!out || RAY_IS_ERR(out))
