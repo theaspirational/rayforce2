@@ -1820,18 +1820,20 @@ static ray_t* table_union(ray_t* a, ray_t* b) {
         return b;
     }
     if (!b || RAY_IS_ERR(b)) { ray_retain(a); return a; }
-    if (ray_table_nrows(a) == 0) { ray_retain(b); return b; }
-    if (ray_table_nrows(b) == 0) { ray_retain(a); return a; }
 
+    /* Column-count check must run before the empty-rows short-circuit.
+     * Otherwise one side having 0 rows but a stripped schema (e.g. an
+     * antijoin result that collapsed to (0 rows, 0 cols)) would silently
+     * return the other side's schema and the caller would store a table
+     * whose arity differs from what it expected. */
     int64_t ncols_a = ray_table_ncols(a);
     int64_t ncols_b = ray_table_ncols(b);
-    /* Refuse to silently narrow to the common prefix — a mismatched schema
-     * would otherwise produce a union table with fewer columns than either
-     * input, and callers (dl_eval's merge paths) would treat that partial
-     * table as a valid IDB state. */
     if (ncols_a != ncols_b)
         return ray_error("schema", "table_union: column count mismatch");
     int64_t ncols = ncols_a;
+
+    if (ray_table_nrows(a) == 0) { ray_retain(b); return b; }
+    if (ray_table_nrows(b) == 0) { ray_retain(a); return a; }
 
     ray_t* out = ray_table_new((int)ncols);
     if (!out || RAY_IS_ERR(out))
