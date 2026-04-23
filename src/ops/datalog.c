@@ -931,38 +931,63 @@ static ray_t* dl_antijoin_tables(ray_t* left, ray_t* right,
 }
 
 /* Helper: filter a table to rows where column col_idx == value */
+/* Row-at-index read helper: read an I64 from either a RAY_I64 column
+ * or from a RAY_SYM column (of any adaptive width) as a sym ID.  Other
+ * types aren't supported by the constant-filter path and cause the
+ * caller to pass through the input table unchanged. */
+static bool dl_col_eq_row(ray_t* col, int64_t row, int64_t value) {
+    if (col->type == RAY_I64) return ((int64_t*)ray_data(col))[row] == value;
+    if (col->type == RAY_SYM)
+        return ray_read_sym(ray_data(col), row, col->type, col->attrs) == value;
+    return false;
+}
+
 static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
     if (!tbl || RAY_IS_ERR(tbl) || ray_table_nrows(tbl) == 0) return tbl;
 
     ray_t* col = ray_table_get_col_idx(tbl, col_idx);
     if (!col) return tbl;
+    /* Non-numeric, non-sym keys: not supported by this filter.  Match
+     * the existing pass-through convention used by the empty-rows
+     * early-return above (caller's retain covers us). */
+    if (col->type != RAY_I64 && col->type != RAY_SYM)
+        return tbl;
 
     int64_t nrows = ray_table_nrows(tbl);
     int64_t ncols = ray_table_ncols(tbl);
-    int64_t* data = (int64_t*)ray_data(col);
 
-    /* Count matching rows */
+    /* Count matching rows — type-aware read for RAY_SYM adaptive width. */
     int64_t count = 0;
     for (int64_t r = 0; r < nrows; r++)
-        if (data[r] == value) count++;
+        if (dl_col_eq_row(col, r, value)) count++;
 
     if (count == nrows) { ray_retain(tbl); return tbl; }
 
-    /* Build filtered table */
+    /* Build filtered table.  Each surviving column is allocated with
+     * its source's element-size (via ray_sym_elem_size) so narrow-SYM
+     * stays narrow rather than being silently widened to W64. */
     ray_t* out = ray_table_new((int)ncols);
     for (int64_t c = 0; c < ncols; c++) {
         ray_t* src = ray_table_get_col_idx(tbl, c);
         if (!src) continue;
-        ray_t* dst = ray_vec_new(src->type, count);
+        ray_t* dst = (src->type == RAY_SYM)
+            ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, count)
+            : ray_vec_new(src->type, count);
         if (!dst || RAY_IS_ERR(dst)) continue;
         dst->len = count;
-        int64_t* src_d = (int64_t*)ray_data(src);
-        int64_t* dst_d = (int64_t*)ray_data(dst);
+        uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
+        const uint8_t* src_b = (const uint8_t*)ray_data(src);
+        uint8_t* dst_b = (uint8_t*)ray_data(dst);
         int64_t j = 0;
         for (int64_t r = 0; r < nrows; r++) {
-            if (data[r] == value)
-                dst_d[j++] = src_d[r];
+            if (dl_col_eq_row(col, r, value)) {
+                memcpy(dst_b + (size_t)j * esz,
+                       src_b + (size_t)r * esz,
+                       (size_t)esz);
+                j++;
+            }
         }
+        if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
         out = ray_table_add_col(out, ray_table_col_name(tbl, c), dst);
         ray_release(dst);
     }
@@ -1034,7 +1059,14 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
                 if (empty_accum && head_rel && head_rel->table) {
                     ray_t* hcol = ray_table_get_col_idx(head_rel->table, c);
                     int8_t htype = hcol ? hcol->type : RAY_I64;
-                    ray_t* ecol = ray_vec_new(htype, 0);
+                    /* For SYM columns, preserve the head-relation's
+                     * adaptive-width attrs — ray_vec_new(RAY_SYM, …) would
+                     * force W64 and a later table_union onto a narrower
+                     * head-rel column would hit the column-count check,
+                     * or worse, produce a width-mismatched merge. */
+                    ray_t* ecol = (htype == RAY_SYM && hcol)
+                        ? ray_sym_vec_new(hcol->attrs & RAY_SYM_W_MASK, 0)
+                        : ray_vec_new(htype, 0);
                     if (!ecol) {
                         ray_release(out);
                         return ray_error("memory", "dl_project: empty col");
@@ -1560,8 +1592,20 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             if (nrows == 0)
                 break;
             ray_t* new_col = ray_vec_new(is_float ? RAY_F64 : RAY_I64, nrows);
-            if (!new_col || RAY_IS_ERR(new_col))
-                break;
+            /* Silent break would leave agg_target_var unbound and eval
+             * would keep running with a partially-constructed rule —
+             * surface the allocation failure so dl_eval returns -1. */
+            if (!new_col) {
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
+            if (RAY_IS_ERR(new_col)) {
+                ray_error_free(new_col);
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
             new_col->len = nrows;
             if (is_float) {
                 double* nd = (double*)ray_data(new_col);

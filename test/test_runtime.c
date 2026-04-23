@@ -76,7 +76,10 @@ static MunitResult test_create_with_sym_io_error_surfaces(const void* params, vo
     ray_err_t err = RAY_OK;
     ray_runtime_t* rt = ray_runtime_create_with_sym_err(path, &err);
     munit_assert_ptr_not_null(rt);
-    munit_assert_int((int)err, !=, (int)RAY_OK);
+    /* Pin the exact error code — the contract maps every non-ENOENT
+     * stat failure to RAY_ERR_IO, so drift in the mapping should fail
+     * this test loudly. */
+    munit_assert_int((int)err, ==, (int)RAY_ERR_IO);
 
     ray_runtime_destroy(rt);
     unlink(blocker);
@@ -103,10 +106,87 @@ static MunitResult test_create_with_sym_plain_variant_absent(const void* params,
     return MUNIT_OK;
 }
 
+/* Corrupt sym file must surface as RAY_ERR_CORRUPT via the _err variant
+ * (not silently downgraded to RAY_OK).  We fake a corrupt file by
+ * writing random bytes — ray_sym_load expects a serialized RAY_LIST of
+ * -RAY_STR entries, so arbitrary bytes will fail its header validation. */
+static MunitResult test_create_with_sym_corrupt_file(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    char* dir = make_tmpdir();
+    munit_assert_ptr_not_null(dir);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/corrupt.sym", dir);
+    FILE* f = fopen(path, "wb");
+    munit_assert_ptr_not_null(f);
+    /* Pre-pad past the ray_t header (32 bytes) with identifiable garbage. */
+    unsigned char garbage[128];
+    for (size_t i = 0; i < sizeof(garbage); i++) garbage[i] = (unsigned char)(i * 37 + 1);
+    fwrite(garbage, 1, sizeof(garbage), f);
+    fclose(f);
+
+    ray_err_t err = RAY_OK;
+    ray_runtime_t* rt = ray_runtime_create_with_sym_err(path, &err);
+    munit_assert_ptr_not_null(rt);
+    munit_assert_int((int)err, !=, (int)RAY_OK);
+
+    ray_runtime_destroy(rt);
+    unlink(path);
+    rmdir(dir);
+    free(dir);
+    return MUNIT_OK;
+}
+
+/* Load-before-builtins ordering is the whole reason
+ * ray_runtime_create_with_sym exists: after a save/destroy/load cycle,
+ * user-interned sym IDs must occupy exactly the slots they had before,
+ * while builtins append afterwards.  Intern a distinctive name, save,
+ * tear down, reload via the persistent-consumer entrypoint, and verify
+ * the same string interns to the same ID. */
+static MunitResult test_create_with_sym_load_preserves_user_ids(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    char* dir = make_tmpdir();
+    munit_assert_ptr_not_null(dir);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/ids.sym", dir);
+
+    /* Phase 1: intern a name then persist the sym table. */
+    ray_runtime_t* rt1 = ray_runtime_create(0, NULL);
+    munit_assert_ptr_not_null(rt1);
+    int64_t id_before = ray_sym_intern("rayforce-user-marker", 20);
+    munit_assert_int((int)ray_sym_save(path), ==, (int)RAY_OK);
+    ray_runtime_destroy(rt1);
+
+    /* Phase 2: bring up a fresh runtime via the _with_sym variant so the
+     * persisted table is loaded before builtins register. */
+    ray_err_t err = RAY_ERR_OOM;
+    ray_runtime_t* rt2 = ray_runtime_create_with_sym_err(path, &err);
+    munit_assert_ptr_not_null(rt2);
+    munit_assert_int((int)err, ==, (int)RAY_OK);
+
+    /* Same string must re-intern to the same ID (not shift because of
+     * builtins claiming the low slots first). */
+    int64_t id_after = ray_sym_intern("rayforce-user-marker", 20);
+    munit_assert_int((int)id_after, ==, (int)id_before);
+
+    ray_runtime_destroy(rt2);
+    unlink(path);
+    /* ray_sym_save may also create a lock file. */
+    char lock_path[320];
+    snprintf(lock_path, sizeof(lock_path), "%s.lk", path);
+    unlink(lock_path);
+    rmdir(dir);
+    free(dir);
+    return MUNIT_OK;
+}
+
 static MunitTest runtime_tests[] = {
     { "/create_with_sym_absent_is_ok",     test_create_with_sym_absent_is_ok,     NULL, NULL, 0, NULL },
     { "/create_with_sym_io_error_surfaces", test_create_with_sym_io_error_surfaces, NULL, NULL, 0, NULL },
     { "/create_with_sym_plain_variant_absent", test_create_with_sym_plain_variant_absent, NULL, NULL, 0, NULL },
+    { "/create_with_sym_corrupt_file",     test_create_with_sym_corrupt_file,     NULL, NULL, 0, NULL },
+    { "/create_with_sym_load_preserves_user_ids", test_create_with_sym_load_preserves_user_ids, NULL, NULL, 0, NULL },
     { NULL, NULL, NULL, NULL, 0, NULL },
 };
 
