@@ -7,28 +7,13 @@
 
 #include "munit.h"
 #include <rayforce.h>
+#include "core/runtime.h"   /* ray_runtime_t, ray_runtime_create*, __RUNTIME */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-
-/* Runtime API forward-declared here because core/runtime.h's `ray_vm_t`
- * definition collides with lang/eval.h's `ray_vm_t` when both are pulled
- * into the same TU (pre-existing duplication).  ray_err_t already comes
- * from <rayforce.h> above. */
-typedef struct ray_runtime_s ray_runtime_t;
-ray_runtime_t* ray_runtime_create(int argc, char** argv);
-ray_runtime_t* ray_runtime_create_with_sym(const char* sym_path);
-ray_runtime_t* ray_runtime_create_with_sym_err(const char* sym_path,
-                                               ray_err_t* out_sym_err);
-void           ray_runtime_destroy(ray_runtime_t* rt);
-extern ray_runtime_t* __RUNTIME;
-
-/* Import RAY_OK / RAY_ERR_IO enum values from rayforce.h -- they live in
- * the existing ray_err_t enum and are exposed via ray_err_from_obj /
- * ray_err_code_str; numeric values are part of the public surface. */
 
 static char* make_tmpdir(void) {
     char tmpl[] = "/tmp/rayforce-rt-test-XXXXXX";

@@ -1048,17 +1048,23 @@ static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
  * onto rule-local scratch — so that the IDB relation table can outlive the
  * per-iteration scratch that built it.  Cross-IDB reads at subsequent
  * strata borrow from this column via ray_table_get_col_idx. */
-/* sym_width_hint: when type == RAY_SYM, pass the desired RAY_SYM_W* value
- * so the broadcast column matches the IDB relation's existing width
- * (otherwise ray_vec_new defaults to W64 and later table_union would
- * hit a ray_vec_concat width mismatch).  Pass 0 for the default. */
+/* width_template: when type == RAY_SYM, this column is consulted for its
+ * SYM attrs/width so the broadcast matches the IDB relation's existing
+ * adaptive width (otherwise ray_vec_new would default to W64 and a
+ * later table_union would hit a ray_vec_concat width mismatch).  Pass
+ * NULL (no existing column) to get the W64 default.  Using a pointer
+ * here rather than a uint8_t hint avoids the W8=0 sentinel ambiguity
+ * of an "a zero hint means default" convention. */
 static ray_t* dl_broadcast_const_col(int64_t nrows, int8_t type, int64_t val,
-                                      uint8_t sym_width_hint) {
+                                      const ray_t* width_template) {
     if (type != RAY_I64 && type != RAY_SYM && type != RAY_F64) {
         return ray_error("type", NULL);
     }
+    uint8_t sym_w = RAY_SYM_W64;
+    if (type == RAY_SYM && width_template && width_template->type == RAY_SYM)
+        sym_w = width_template->attrs & RAY_SYM_W_MASK;
     ray_t* v = (type == RAY_SYM)
-        ? ray_sym_vec_new(sym_width_hint & RAY_SYM_W_MASK, nrows)
+        ? ray_sym_vec_new(sym_w, nrows)
         : ray_vec_new(type, nrows);
     if (!v || RAY_IS_ERR(v)) return v;
     v->len = nrows;
@@ -1194,13 +1200,10 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
              * (from a prior aligned rule), match its width so
              * table_union's ray_vec_concat doesn't reject a W64 vs
              * narrow mismatch. */
-            uint8_t sym_w = 0;
-            if (ctype == RAY_SYM && head_rel && head_rel->table) {
-                ray_t* hc = ray_table_get_col_idx(head_rel->table, c);
-                if (hc && hc->type == RAY_SYM)
-                    sym_w = hc->attrs & RAY_SYM_W_MASK;
-            }
-            ray_t* bcast = dl_broadcast_const_col(nrows, ctype, head_consts[c], sym_w);
+            const ray_t* width_tpl = NULL;
+            if (ctype == RAY_SYM && head_rel && head_rel->table)
+                width_tpl = ray_table_get_col_idx(head_rel->table, c);
+            ray_t* bcast = dl_broadcast_const_col(nrows, ctype, head_consts[c], width_tpl);
             if (!bcast || RAY_IS_ERR(bcast)) {
                 ray_release(out);
                 return bcast ? bcast : ray_error("memory", "dl_project: broadcast");
@@ -2196,15 +2199,26 @@ static ray_t* restore_names(ray_t* tbl, ray_t* src) {
 /* Create a table by concatenating all rows from tables a and b (same schema).
  * Uses column-wise ray_vec_concat. Returns new owned table with a's names. */
 static ray_t* table_union(ray_t* a, ray_t* b) {
-    /* Pass-through paths always return a retained reference whenever the
-     * returned pointer is non-NULL (even on RAY_ERROR), so callers can
-     * release the return value uniformly without risking use-after-free on
-     * the pass-through input. */
-    if (!a || RAY_IS_ERR(a)) {
+    /* Pass-through paths always return a retained non-NULL result so
+     * callers can release uniformly.  A NULL operand falls back to the
+     * other side; a RAY_ERROR operand is *propagated* (retained) rather
+     * than masked by the non-error side — otherwise a real failure on
+     * `b` would silently surface as `a` and the caller would never see
+     * the error.  ray_retain is a no-op on errors so the retain call is
+     * safe and keeps the contract "release is always valid". */
+    if (!a) {
         if (b) ray_retain(b);
         return b;
     }
-    if (!b || RAY_IS_ERR(b)) { ray_retain(a); return a; }
+    if (RAY_IS_ERR(a)) {
+        ray_retain(a);  /* no-op for errors; documents "owned return" */
+        return a;
+    }
+    if (!b) { ray_retain(a); return a; }
+    if (RAY_IS_ERR(b)) {
+        ray_retain(b);
+        return b;
+    }
 
     /* Column-count check must run before the empty-rows short-circuit.
      * Otherwise one side having 0 rows but a stripped schema (e.g. an
