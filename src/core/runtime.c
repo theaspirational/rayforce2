@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <errno.h>
 #ifdef RAY_OS_WINDOWS
 #include <windows.h>
 #else
@@ -226,7 +227,14 @@ static ray_runtime_t* runtime_create_impl(const char* sym_path,
      * builtins append afterwards. */
     if (sym_path) {
         /* Pre-flight size check: reject files that would blow past the
-         * memory budget before ever touching ray_col_load. */
+         * memory budget before ever touching ray_col_load.
+         *
+         * errno handling: ENOENT is the normal first-run case and stays
+         * RAY_OK; any *other* stat failure (EACCES, ENOTDIR, EIO, …) is
+         * a real problem and must be surfaced as RAY_ERR_IO, otherwise
+         * the caller would silently continue with an empty sym table
+         * and later hit the "divergence" class of bugs this entrypoint
+         * was added to avoid. */
         struct stat st;
         if (stat(sym_path, &st) == 0) {
             /* Allow the sym file itself plus some working headroom (2x).
@@ -244,9 +252,11 @@ static ray_runtime_t* runtime_create_impl(const char* sym_path,
                 /* RAY_ERR_CORRUPT and I/O errors are non-fatal here:
                  * caller inspects out_sym_err to decide recovery. */
             }
+        } else if (errno != ENOENT) {
+            if (out_sym_err) *out_sym_err = RAY_ERR_IO;
         }
-        /* ENOENT and other stat failures: leave out_sym_err = RAY_OK;
-         * an absent sym file is the normal first-run case. */
+        /* ENOENT: leave out_sym_err = RAY_OK — absent sym file is the
+         * normal first-run case. */
     }
 
     /* Init language (env + builtins) — must be after __VM is set and

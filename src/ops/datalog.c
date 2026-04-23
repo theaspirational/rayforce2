@@ -31,6 +31,7 @@
 #include "lang/env.h"
 #include "table/sym.h"
 #include "ops/ops.h"
+#include "ops/internal.h"      /* col_propagate_str_pool */
 #include <string.h>
 #include <stdio.h>
 
@@ -598,7 +599,8 @@ int dl_stratify(dl_program_t* prog) {
  * of src. If target==RAY_F64 and src is RAY_I64, promote. Returns new owned column. */
 static ray_t* dl_col_as_f64(ray_t* src, int64_t nrows) {
     ray_t* out = ray_vec_new(RAY_F64, nrows);
-    if (!out || RAY_IS_ERR(out)) return NULL;
+    if (!out) return NULL;
+    if (RAY_IS_ERR(out)) { ray_error_free(out); return NULL; }
     out->len = nrows;
     double* od = (double*)ray_data(out);
     if (src->type == RAY_F64) {
@@ -621,7 +623,8 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
     switch (expr->kind) {
     case DL_EXPR_CONST: {
         ray_t* col = ray_vec_new(RAY_I64, nrows);
-        if (!col || RAY_IS_ERR(col)) return NULL;
+        if (!col) return NULL;
+        if (RAY_IS_ERR(col)) { ray_error_free(col); return NULL; }
         col->len = nrows;
         int64_t* d = (int64_t*)ray_data(col);
         for (int64_t r = 0; r < nrows; r++)
@@ -630,7 +633,8 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
     }
     case DL_EXPR_CONST_F64: {
         ray_t* col = ray_vec_new(RAY_F64, nrows);
-        if (!col || RAY_IS_ERR(col)) return NULL;
+        if (!col) return NULL;
+        if (RAY_IS_ERR(col)) { ray_error_free(col); return NULL; }
         col->len = nrows;
         double* d = (double*)ray_data(col);
         for (int64_t r = 0; r < nrows; r++)
@@ -644,7 +648,8 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
         if (src->type != RAY_I64 && src->type != RAY_F64) return NULL;
         size_t elem = (src->type == RAY_F64) ? sizeof(double) : sizeof(int64_t);
         ray_t* dst = ray_vec_new(src->type, nrows);
-        if (!dst || RAY_IS_ERR(dst)) return NULL;
+        if (!dst) return NULL;
+        if (RAY_IS_ERR(dst)) { ray_error_free(dst); return NULL; }
         dst->len = nrows;
         memcpy(ray_data(dst), ray_data(src), (size_t)nrows * elem);
         return dst;
@@ -668,7 +673,9 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
                 return NULL;
             }
             ray_t* out = ray_vec_new(RAY_F64, nrows);
-            if (!out || RAY_IS_ERR(out)) {
+            if (!out) { ray_release(lf); ray_release(rf); return NULL; }
+            if (RAY_IS_ERR(out)) {
+                ray_error_free(out);
                 ray_release(lf); ray_release(rf); return NULL;
             }
             out->len = nrows;
@@ -688,7 +695,9 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
             return out;
         }
         ray_t* out = ray_vec_new(RAY_I64, nrows);
-        if (!out || RAY_IS_ERR(out)) {
+        if (!out) { ray_release(lv); ray_release(rv); return NULL; }
+        if (RAY_IS_ERR(out)) {
+            ray_error_free(out);
             ray_release(lv); ray_release(rv); return NULL;
         }
         out->len = nrows;
@@ -1069,6 +1078,12 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
                 return ray_error("type", "dl_project: unsupported column type");
             }
             memcpy(ray_data(dst), ray_data(src), (size_t)nrows * (size_t)esz);
+            /* RAY_STR stores 16-byte ray_str_t handles inline; strings >12
+             * bytes keep their bytes in a per-vector pool referenced via
+             * pool_off.  The memcpy above copies the handles but not the
+             * pool, so propagate the source's pool onto dst or later
+             * reads through pool_off would land in a NULL pool. */
+            if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
             ray_t* next = ray_table_add_col(out, head_rel->col_names[c], dst);
             ray_release(dst);
             /* ray_table_add_col consumes `out` via ray_cow on success.  On
