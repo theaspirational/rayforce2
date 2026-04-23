@@ -192,16 +192,23 @@ static void dl_idb_align_head_const_types(dl_program_t* prog, const dl_rule_t* r
     }
     if (!any_change) return;
 
-    /* Rebuild the table with typed empty columns. */
+    /* Rebuild the table with typed empty columns.  Every failure path must
+     * release both the surviving table reference and any RAY_ERROR object
+     * returned from ray_table_new / ray_vec_new / ray_table_add_col —
+     * otherwise repeated align calls slowly accumulate error-object blocks
+     * in the heap. */
     ray_t* fresh = ray_table_new(rel->arity);
-    if (!fresh || RAY_IS_ERR(fresh)) return;
+    if (!fresh) return;
+    if (RAY_IS_ERR(fresh)) { ray_release(fresh); return; }
     for (int c = 0; c < rel->arity; c++) {
         ray_t* empty_col = ray_vec_new(desired[c], 0);
-        if (!empty_col || RAY_IS_ERR(empty_col)) { ray_release(fresh); return; }
+        if (!empty_col) { ray_release(fresh); return; }
+        if (RAY_IS_ERR(empty_col)) { ray_release(empty_col); ray_release(fresh); return; }
         ray_t* prev = fresh;
         fresh = ray_table_add_col(fresh, rel->col_names[c], empty_col);
         ray_release(empty_col);
-        if (RAY_IS_ERR(fresh)) { ray_release(prev); return; }
+        if (!fresh) { ray_release(prev); return; }
+        if (RAY_IS_ERR(fresh)) { ray_release(prev); ray_release(fresh); return; }
     }
     ray_release(rel->table);
     rel->table = fresh;
@@ -1813,10 +1820,12 @@ static ray_t* restore_names(ray_t* tbl, ray_t* src) {
 /* Create a table by concatenating all rows from tables a and b (same schema).
  * Uses column-wise ray_vec_concat. Returns new owned table with a's names. */
 static ray_t* table_union(ray_t* a, ray_t* b) {
-    /* Missing/error inputs: return an owned reference to the other side
-     * (retained so callers can release uniformly). */
+    /* Pass-through paths always return a retained reference whenever the
+     * returned pointer is non-NULL (even on RAY_ERROR), so callers can
+     * release the return value uniformly without risking use-after-free on
+     * the pass-through input. */
     if (!a || RAY_IS_ERR(a)) {
-        if (b && !RAY_IS_ERR(b)) ray_retain(b);
+        if (b) ray_retain(b);
         return b;
     }
     if (!b || RAY_IS_ERR(b)) { ray_retain(a); return a; }
@@ -3615,7 +3624,15 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
             for (int c = 0; c < pred_arity; c++) {
                 ray_t* col = ray_table_get_col_idx(env_val, c);
                 ray_t* next_clean;
-                if (!col) continue;
+                if (!col) {
+                    /* Silently skipping would build `clean` with fewer than
+                     * pred_arity columns yet still register it via dl_add_edb
+                     * — the program would see a schema-inconsistent EDB. */
+                    ray_release(clean);
+                    dl_program_free(prog);
+                    ray_release(db);
+                    return ray_error("schema", "query: env-backed EDB table missing expected column");
+                }
                 if (col->type == RAY_SYM) {
                     ray_t* i64col = ray_vec_new(RAY_I64, nrows_env);
                     if (!i64col || RAY_IS_ERR(i64col)) {

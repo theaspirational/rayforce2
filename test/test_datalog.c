@@ -33,11 +33,13 @@
 #include "lang/eval.h"
 #include <string.h>
 
-struct ray_runtime_s;
+/* Forward-declare runtime API used by the full-runtime fixtures.
+ * (Test target doesn't pull in core/runtime.h because it redefines
+ * ray_vm_t, which clashes with lang/eval.h's definition — a pre-
+ * existing duplication kept out of scope for this PR.) */
 typedef struct ray_runtime_s ray_runtime_t;
-extern ray_runtime_t* ray_runtime_create(int argc, char** argv);
-extern void           ray_runtime_destroy(ray_runtime_t* rt);
-extern ray_runtime_t* __RUNTIME;
+ray_runtime_t* ray_runtime_create(int argc, char** argv);
+void           ray_runtime_destroy(ray_runtime_t* rt);
 
 static void* datalog_setup(const void* params, void* user_data) {
     (void)params; (void)user_data;
@@ -52,16 +54,21 @@ static void datalog_teardown(void* fixture) {
     ray_heap_destroy();
 }
 
-/* Full runtime — required for ray_eval_str("(rule ...)") surface-syntax tests. */
+/* Full runtime — required for ray_eval_str("(rule ...)") surface-syntax tests.
+ * Assertions from munit macros can't be used here (setup returns void*, not
+ * MunitResult) so we abort explicitly if runtime creation fails. */
 static void* datalog_rf_setup(const void* params, void* user_data) {
     (void)params; (void)user_data;
-    ray_runtime_create(0, NULL);
-    return NULL;
+    ray_runtime_t* rt = ray_runtime_create(0, NULL);
+    if (!rt) {
+        fprintf(stderr, "datalog_rf_setup: ray_runtime_create returned NULL\n");
+        abort();
+    }
+    return rt;
 }
 
 static void datalog_rf_teardown(void* fixture) {
-    (void)fixture;
-    ray_runtime_destroy(__RUNTIME);
+    ray_runtime_destroy((ray_runtime_t*)fixture);
 }
 
 /* Verify that dl_get_provenance_src_offsets and dl_get_provenance_src_data
