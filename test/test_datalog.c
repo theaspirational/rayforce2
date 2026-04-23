@@ -1374,6 +1374,45 @@ static MunitResult test_rule_head_const_stratification(const void* params, void*
     return MUNIT_OK;
 }
 
+/* Conflicting head-const types for the same IDB slot across rules must
+ * surface via dl_eval == -1 rather than a silent stderr print.  Rule A
+ * commits slot 1 to RAY_SYM; rule B tries to commit it to RAY_F64. */
+static MunitResult test_rule_head_const_type_conflict(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+    int64_t xs[] = {1};
+    ray_t* xc = ray_vec_from_raw(RAY_I64, xs, 1);
+    ray_t* src = ray_table_new(1);
+    src = ray_table_add_col(src, ray_sym_intern("src__c0", 7), xc);
+
+    dl_program_t* prog = dl_program_new();
+    dl_add_edb(prog, "src", src, 1);
+
+    /* Rule A: (tag ?x "sym") — slot 1 committed to RAY_SYM. */
+    dl_rule_t a; dl_rule_init(&a, "tag", 2);
+    dl_rule_head_var(&a, 0, 0);
+    dl_rule_head_const(&a, 1, ray_sym_intern("sym", 3), RAY_SYM);
+    int ab = dl_rule_add_atom(&a, "src", 1);
+    dl_body_set_var(&a, ab, 0, 0);
+    a.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &a), >=, 0);
+
+    /* Rule B: (tag ?x 3.14) — conflicting head-const type for slot 1. */
+    dl_rule_t b; dl_rule_init(&b, "tag", 2);
+    dl_rule_head_var(&b, 0, 0);
+    dl_rule_head_const_f64(&b, 1, 3.14);
+    int bb = dl_rule_add_atom(&b, "src", 1);
+    dl_body_set_var(&b, bb, 0, 0);
+    b.n_vars = 1;
+    munit_assert_int(dl_add_rule(prog, &b), >=, 0);
+
+    /* Conflict must surface as dl_eval == -1 (no stderr print). */
+    munit_assert_int(dl_eval(prog), ==, -1);
+
+    dl_program_free(prog);
+    ray_release(src); ray_release(xc);
+    return MUNIT_OK;
+}
+
 /* Surface syntax round-trip for head constants: (rule (foo "a" ?x) ...) */
 static MunitResult test_rule_head_const_surface_syntax(const void* params, void* fixture) {
     (void)params; (void)fixture;
@@ -1964,6 +2003,7 @@ static MunitTest datalog_tests[] = {
     { "/rule_head_const_with_agg",       test_rule_head_const_with_agg,       datalog_setup, datalog_teardown, 0, NULL },
     { "/rule_head_const_with_negation",  test_rule_head_const_with_negation,  datalog_setup, datalog_teardown, 0, NULL },
     { "/rule_head_const_stratification", test_rule_head_const_stratification, datalog_setup, datalog_teardown, 0, NULL },
+    { "/rule_head_const_type_conflict",  test_rule_head_const_type_conflict,  datalog_setup, datalog_teardown, 0, NULL },
     { "/rule_head_const_surface_syntax", test_rule_head_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/rule_body_const_surface_syntax", test_rule_body_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/env_bound_edb_auto_register",   test_env_bound_edb_auto_register,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },

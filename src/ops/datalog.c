@@ -182,9 +182,12 @@ static void dl_idb_align_head_const_types(dl_program_t* prog, const dl_rule_t* r
         if (want == 0) {
             desired[c] = cur;
         } else if (cur != RAY_I64 && cur != want) {
-            /* Slot already typed by a prior rule to a different type. */
-            fprintf(stderr, "dl: head-const type conflict at slot %d: "
-                    "existing %d vs rule %d\n", c, cur, want);
+            /* First-non-zero-wins policy: once a slot is committed to a
+             * non-default type by a prior rule, any later rule that
+             * disagrees is a program-level conflict.  Mark the program
+             * so dl_eval (which reads eval_err after evaluation) reports
+             * failure — no stderr write from a non-debug code path. */
+            prog->eval_err = true;
             return;
         } else {
             desired[c] = want;
@@ -1363,8 +1366,12 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                     if (rule->body[bi].type == DL_POS) { has_pos = true; break; }
                 }
                 if (has_pos) {
-                    fprintf(stderr, "dl: grouped aggregate with positive body atoms not yet supported\n");
+                    /* nyi: grouped aggregate + positive body atoms.
+                     * Surface via eval_err so dl_eval reports failure
+                     * instead of writing a warning to stderr in a
+                     * non-debug build. */
                     ray_release(accum);
+                    prog->eval_err = true;
                     return NULL;
                 }
 
@@ -2263,12 +2270,16 @@ static void dl_build_provenance(dl_program_t* prog) {
 int dl_eval(dl_program_t* prog) {
     if (!prog) return -1;
 
-    /* Reset the compile/eval error flag at the top of each eval.  Rule
-     * compilation or ray_execute paths may set it on unrecoverable failure
-     * (e.g. dl_project OOM); we return -1 at the end if it was raised so
-     * ray_query_fn and other callers can surface "evaluation failed" rather
-     * than silently returning an empty/partial result. */
-    prog->eval_err = false;
+    /* eval_err is sticky: it may have been raised at rule-add time (e.g.
+     * by a head-const type conflict in dl_idb_align_head_const_types) —
+     * resetting here would silently discard that signal.  Additional
+     * failures during stratify/compile/exec below keep setting the flag,
+     * and the final return honors it either way. */
+    if (prog->eval_err) {
+        /* Short-circuit: compile-time errors already stand; don't run
+         * a potentially broken fixpoint. */
+        return -1;
+    }
 
     /* Stratify if not already done */
     if (prog->n_strata == 0) {
