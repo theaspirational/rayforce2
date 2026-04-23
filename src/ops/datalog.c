@@ -2175,10 +2175,15 @@ int dl_eval(dl_program_t* prog) {
             dl_rel_t* head_rel = &prog->rels[head_idx];
 
             ray_graph_t* g = ray_graph_new(NULL);
-            if (!g) continue;
+            if (!g) { prog->eval_err = true; continue; }
 
             ray_op_t* output = dl_compile_rule(prog, rule, -1, stratum_rule_idx[ri], g);
-            if (!output) { ray_graph_free(g); continue; }
+            if (!output) {
+                /* dl_compile_rule marks eval_err on genuine failures; a bare
+                 * NULL means "rule has no rows this pass" — not a fault. */
+                ray_graph_free(g);
+                continue;
+            }
 
             ray_t* raw_tuples = ray_execute(g, output);
             ray_graph_free(g);
@@ -2279,12 +2284,19 @@ int dl_eval(dl_program_t* prog) {
                     prog->rels[body_rel].table = delta_tables[body_rel];
 
                     ray_graph_t* g = ray_graph_new(NULL);
-                    if (!g) { prog->rels[body_rel].table = saved; continue; }
+                    if (!g) {
+                        prog->rels[body_rel].table = saved;
+                        prog->eval_err = true;
+                        continue;
+                    }
 
                     ray_op_t* output = dl_compile_rule(prog, rule, b, stratum_rule_idx[ri], g);
                     if (!output) {
                         ray_graph_free(g);
                         prog->rels[body_rel].table = saved;
+                        /* dl_compile_rule sets eval_err itself on genuine
+                         * failures; NULL without the flag means "rule yields
+                         * no rows this iteration" and should not fault. */
                         continue;
                     }
 
@@ -2307,6 +2319,17 @@ int dl_eval(dl_program_t* prog) {
                         ray_t* u = table_union(new_tuples_per_rel[head_idx], result);
                         ray_release(new_tuples_per_rel[head_idx]);
                         ray_release(result);
+                        if (!u) {
+                            prog->eval_err = true;
+                            new_tuples_per_rel[head_idx] = NULL;
+                            continue;
+                        }
+                        if (RAY_IS_ERR(u)) {
+                            prog->eval_err = true;
+                            ray_release(u);
+                            new_tuples_per_rel[head_idx] = NULL;
+                            continue;
+                        }
                         new_tuples_per_rel[head_idx] = u;
                     } else {
                         new_tuples_per_rel[head_idx] = result;
@@ -2326,7 +2349,10 @@ int dl_eval(dl_program_t* prog) {
                 delta_tables[rel_idx] = NULL;
 
                 ray_t* new_tuples = new_tuples_per_rel[rel_idx];
-                if (!new_tuples || RAY_IS_ERR(new_tuples)) {
+                if (!new_tuples) { delta_tables[rel_idx] = NULL; continue; }
+                if (RAY_IS_ERR(new_tuples)) {
+                    prog->eval_err = true;
+                    ray_release(new_tuples);
                     delta_tables[rel_idx] = NULL;
                     continue;
                 }
@@ -2334,22 +2360,30 @@ int dl_eval(dl_program_t* prog) {
                 /* Deduplicate */
                 ray_t* deduped = table_distinct(new_tuples);
                 ray_release(new_tuples);
-                if (!deduped || RAY_IS_ERR(deduped)) continue;
+                if (!deduped) { prog->eval_err = true; continue; }
+                if (RAY_IS_ERR(deduped)) { prog->eval_err = true; ray_release(deduped); continue; }
 
                 /* Subtract existing relation to get true delta */
                 ray_t* delta = table_antijoin(deduped, rel->table);
                 ray_release(deduped);
-                if (!delta || RAY_IS_ERR(delta)) continue;
+                if (!delta) { prog->eval_err = true; continue; }
+                if (RAY_IS_ERR(delta)) { prog->eval_err = true; ray_release(delta); continue; }
 
                 delta_tables[rel_idx] = delta;
 
-                /* Merge delta into full relation */
+                /* Merge delta into full relation.  A merge failure here
+                 * leaves delta_tables set but rel->table stale — that would
+                 * desync the fixpoint, so treat it as a hard failure. */
                 if (ray_table_nrows(delta) > 0) {
                     ray_t* merged = table_union(rel->table, delta);
-                    if (merged && !RAY_IS_ERR(merged)) {
-                        ray_release(rel->table);
-                        rel->table = merged;
+                    if (!merged) { prog->eval_err = true; continue; }
+                    if (RAY_IS_ERR(merged)) {
+                        prog->eval_err = true;
+                        ray_release(merged);
+                        continue;
                     }
+                    ray_release(rel->table);
+                    rel->table = merged;
                 }
             }
 
