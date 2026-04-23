@@ -38,11 +38,9 @@
   <iframe class="promo-frame" src="promo.html" title="Rayforce — animated introduction" allow="autoplay" loading="eager"></iframe>
 
   <script>
-    // Embedded promo: hide the dev playback bar and override the canvas
-    // scale so it covers the full viewport. The bundled Stage uses Math.min
-    // (contain — pillar/letterboxes when aspect ratios don't match). CSS
-    // !important wins against React's inline style.transform, so we expose
-    // cover-scale via a CSS variable that we keep synced on resize.
+    // Embedded promo: hide the dev playback bar. Keep the Stage's own scaling
+    // (Math.min / contain) so nothing gets cropped — a few px of dark padding
+    // at the edges is preferable to text being clipped out of view.
     //
     // Poll for the canvas instead of listening on iframe.load: the promo's
     // loader calls document.documentElement.replaceWith(...) after load has
@@ -54,34 +52,16 @@
 
       function attach() {
         const doc = iframe.contentDocument;
-        const win = iframe.contentWindow;
         if (!doc || !doc.documentElement) return false;
-
-        const canvas = doc.querySelector('#root > div > div > div');
-        if (!canvas || !canvas.style.width) return false;
+        if (!doc.querySelector('#root > div > div > div')) return false;
 
         const style = doc.createElement('style');
-        style.textContent = `
-          #root > div > div:last-child { display: none !important; }
-          #root > div > div > div.cover-mode {
-            transform: scale(var(--cover-scale, 1)) !important;
-          }
-        `;
+        style.textContent =
+          '#root > div > div:last-child { display: none !important; }' +
+          // Stage outer defaults to #0a0a0a. Matching the scenes' own
+          // #04233b hides the tiny letterbox bars from contain-mode scaling.
+          '#root > div { background: #04233b !important; }';
         doc.head.appendChild(style);
-
-        canvas.classList.add('cover-mode');
-
-        const stageW = parseFloat(canvas.style.width)  || 1920;
-        const stageH = parseFloat(canvas.style.height) || 1080;
-
-        function updateScale() {
-          const r = canvas.parentElement.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0) return;
-          const cover = Math.max(r.width / stageW, r.height / stageH);
-          doc.documentElement.style.setProperty('--cover-scale', String(cover));
-        }
-        updateScale();
-        win.addEventListener('resize', updateScale);
         return true;
       }
 
