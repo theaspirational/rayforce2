@@ -43,13 +43,22 @@
     // (contain — pillar/letterboxes when aspect ratios don't match). CSS
     // !important wins against React's inline style.transform, so we expose
     // cover-scale via a CSS variable that we keep synced on resize.
+    //
+    // Poll for the canvas instead of listening on iframe.load: the promo's
+    // loader calls document.documentElement.replaceWith(...) after load has
+    // already fired, which would discard anything we attached to the old
+    // document. Canvas existence means React has mounted, so the final
+    // document is stable and our attachments will survive.
     (function () {
       const iframe = document.querySelector('iframe.promo-frame');
 
-      iframe.addEventListener('load', function () {
+      function attach() {
         const doc = iframe.contentDocument;
         const win = iframe.contentWindow;
-        if (!doc) return;
+        if (!doc || !doc.documentElement) return false;
+
+        const canvas = doc.querySelector('#root > div > div > div');
+        if (!canvas || !canvas.style.width) return false;
 
         const style = doc.createElement('style');
         style.textContent = `
@@ -60,30 +69,26 @@
         `;
         doc.head.appendChild(style);
 
-        // React hasn't mounted the canvas yet at iframe-load; poll briefly.
-        let tries = 0;
-        const find = setInterval(function () {
-          const canvas = doc.querySelector('#root > div > div > div');
-          if (!canvas || !canvas.style.width) {
-            if (++tries > 50) clearInterval(find);
-            return;
-          }
-          clearInterval(find);
-          canvas.classList.add('cover-mode');
+        canvas.classList.add('cover-mode');
 
-          const stageW = parseFloat(canvas.style.width)  || 1920;
-          const stageH = parseFloat(canvas.style.height) || 1080;
+        const stageW = parseFloat(canvas.style.width)  || 1920;
+        const stageH = parseFloat(canvas.style.height) || 1080;
 
-          function updateScale() {
-            const r = canvas.parentElement.getBoundingClientRect();
-            if (r.width <= 0 || r.height <= 0) return;
-            const cover = Math.max(r.width / stageW, r.height / stageH);
-            doc.documentElement.style.setProperty('--cover-scale', String(cover));
-          }
-          updateScale();
-          win.addEventListener('resize', updateScale);
-        }, 100);
-      });
+        function updateScale() {
+          const r = canvas.parentElement.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return;
+          const cover = Math.max(r.width / stageW, r.height / stageH);
+          doc.documentElement.style.setProperty('--cover-scale', String(cover));
+        }
+        updateScale();
+        win.addEventListener('resize', updateScale);
+        return true;
+      }
+
+      let tries = 0;
+      const iv = setInterval(function () {
+        if (attach() || ++tries > 100) clearInterval(iv);
+      }, 100);
     })();
   </script>
 
