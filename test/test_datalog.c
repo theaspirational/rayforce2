@@ -1041,7 +1041,7 @@ static MunitResult test_rule_head_const_single_rule(const void* params, void* fi
     dl_rule_t rule;
     dl_rule_init(&rule, "band", 1);
     int64_t sym_small = ray_sym_intern("small", 5);
-    dl_rule_head_const(&rule, 0, sym_small, RAY_SYM);
+    dl_rule_head_const_typed(&rule, 0, sym_small, RAY_SYM);
 
     int body = dl_rule_add_atom(&rule, "weight", 1);
     dl_body_set_var(&rule, body, 0, 0);  /* binds ?W = col 0 */
@@ -1088,7 +1088,7 @@ static MunitResult test_rule_head_const_i64(const void* params, void* fixture) {
     /* (rule (ev ?X 1) (pair ?X ?Y)) */
     dl_rule_t r; dl_rule_init(&r, "ev", 2);
     dl_rule_head_var(&r, 0, 0);
-    dl_rule_head_const(&r, 1, 1, RAY_I64);
+    dl_rule_head_const_typed(&r, 1, 1, RAY_I64);
     int bi = dl_rule_add_atom(&r, "pair", 2);
     dl_body_set_var(&r, bi, 0, 0);
     dl_body_set_var(&r, bi, 1, 1);
@@ -1134,7 +1134,7 @@ static MunitResult test_rule_head_const_cross_idb(const void* params, void* fixt
 
     /* R1: (foo "small") :- (edge ?U ?V) */
     dl_rule_t r1; dl_rule_init(&r1, "foo", 1);
-    dl_rule_head_const(&r1, 0, sym_small, RAY_SYM);
+    dl_rule_head_const_typed(&r1, 0, sym_small, RAY_SYM);
     int r1b = dl_rule_add_atom(&r1, "edge", 2);
     dl_body_set_var(&r1, r1b, 0, 0);
     dl_body_set_var(&r1, r1b, 1, 1);
@@ -1218,7 +1218,7 @@ static MunitResult test_rule_head_const_with_agg(const void* params, void* fixtu
     int64_t sym_total = ray_sym_intern("total", 5);
 
     dl_rule_t r; dl_rule_init(&r, "stat", 2);
-    dl_rule_head_const(&r, 0, sym_total, RAY_SYM);
+    dl_rule_head_const_typed(&r, 0, sym_total, RAY_SYM);
     dl_rule_head_var(&r, 1, 0);  /* ?N */
     dl_rule_add_agg(&r, DL_AGG_COUNT, 0, "weight", 1, 0);
     r.n_vars = 1;
@@ -1338,7 +1338,7 @@ static MunitResult test_rule_head_const_stratification(const void* params, void*
 
     dl_rule_t r1; dl_rule_init(&r1, "marker", 2);
     dl_rule_head_var(&r1, 0, 0);
-    dl_rule_head_const(&r1, 1, sym_seen, RAY_SYM);
+    dl_rule_head_const_typed(&r1, 1, sym_seen, RAY_SYM);
     int r1b = dl_rule_add_atom(&r1, "src", 1);
     dl_body_set_var(&r1, r1b, 0, 0);
     r1.n_vars = 1;
@@ -1392,7 +1392,7 @@ static MunitResult test_rule_head_const_type_conflict(const void* params, void* 
     /* Rule A: (tag ?x "sym") — slot 1 committed to RAY_SYM. */
     dl_rule_t a; dl_rule_init(&a, "tag", 2);
     dl_rule_head_var(&a, 0, 0);
-    dl_rule_head_const(&a, 1, ray_sym_intern("sym", 3), RAY_SYM);
+    dl_rule_head_const_typed(&a, 1, ray_sym_intern("sym", 3), RAY_SYM);
     int ab = dl_rule_add_atom(&a, "src", 1);
     dl_body_set_var(&a, ab, 0, 0);
     a.n_vars = 1;

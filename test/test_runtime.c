@@ -200,12 +200,23 @@ static MunitResult test_create_with_sym_oversized_file(const void* params, void*
     char* dir = make_tmpdir();
     munit_assert_ptr_not_null(dir);
 
+    /* Skip on platforms with 32-bit off_t — the sparse size we want
+     * (>> 4 GB) isn't representable and the shift in that case would
+     * be undefined. */
+    if (sizeof(off_t) < 8) {
+        free(dir);
+        return MUNIT_SKIP;
+    }
+
     char path[256];
     snprintf(path, sizeof(path), "%s/huge.sym", dir);
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     munit_assert_int(fd, >=, 0);
-    /* 10 EB sparse — bigger than any plausible mem_budget/2. */
-    off_t huge = (off_t)1 << 62;
+    /* 4 EB sparse — bigger than any plausible mem_budget/2 (<1 ZB of
+     * RAM).  Build via int64_t to keep the shift well-defined, then
+     * cast to off_t after the width guard above has passed. */
+    int64_t huge64 = (int64_t)1 << 62;
+    off_t huge = (off_t)huge64;
     int rc = ftruncate(fd, huge);
     close(fd);
     if (rc != 0) {

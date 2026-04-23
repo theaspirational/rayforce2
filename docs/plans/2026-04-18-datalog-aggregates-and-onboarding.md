@@ -672,7 +672,7 @@ Use `gh pr create --draft --base master --head theaspirational:feature/datalog-a
 
 ## Phase B — ray-exomem: declarative health derivations
 
-Phase B runs on a separate branch `feature/declarative-derivations` in `/Users/aspirational/Documents/code/lynx/Teide/ray-exomem`. It depends on Phase A's float support only if templates use float thresholds; the integer-only path can land first.
+Phase B runs on a separate branch `feature/declarative-derivations` in the consumer repo (`$WORKSPACE/ray-exomem`). It depends on Phase A's float support only if templates use float thresholds; the integer-only path can land first.
 
 **Note on dependency direction:** `ray-exomem` consumes `rayforce2` via the sibling checkout (`build.rs:97`). To use Phase A features locally, switch the rayforce2 checkout to `feature/datalog-aggregates` before building ray-exomem. To consume from the upstream merge, wait until the PR from Task A8 is merged into `RayforceDB/rayforce2:master` and the sibling is back on `master`.
 
@@ -684,7 +684,7 @@ Phase B runs on a separate branch `feature/declarative-derivations` in `/Users/a
 - [ ] **Step 1: Read the existing test**
 
 ```bash
-sed -n '810,860p' /Users/aspirational/Documents/code/lynx/Teide/ray-exomem/src/system_schema.rs
+sed -n '810,860p' "$WORKSPACE/ray-exomem/src/system_schema.rs"
 ```
 
 Note the inputs (age=30, height=175, weight=75) and the expected derived relations.
@@ -974,7 +974,7 @@ git commit -am "fix(onboarding): wire derived bands into recommended-* lookups"
 If Phase A features are needed (aggregates / float / between), the consumer must check out the matching rayforce2 branch.
 
 **Files:**
-- Modify: `/Users/aspirational/Documents/code/lynx/Teide/ray-exomem/CLAUDE.md` (Important gotchas section)
+- Modify: `$WORKSPACE/ray-exomem/CLAUDE.md` (Important gotchas section)
 
 - [ ] **Step 1: Add a note**
 

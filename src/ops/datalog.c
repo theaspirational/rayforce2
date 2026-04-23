@@ -270,7 +270,7 @@ void dl_rule_head_var(dl_rule_t* rule, int pos, int var_idx) {
     if (var_idx + 1 > rule->n_vars) rule->n_vars = var_idx + 1;
 }
 
-void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val, int8_t type) {
+void dl_rule_head_const_typed(dl_rule_t* rule, int pos, int64_t val, int8_t type) {
     if (pos < 0 || pos >= rule->head_arity) return;
     /* Default to RAY_I64 if an unrecognized type sneaks through; keeps
      * old-callers-with-no-type compat when writing to the slot. */
@@ -281,10 +281,17 @@ void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val, int8_t type) {
     rule->head_const_types[pos] = type;
 }
 
+/* Backward-compatible I64 wrapper.  Pre-aggregates-PR external callers
+ * used this 3-arg form; it now forwards to the typed variant with
+ * RAY_I64. */
+void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val) {
+    dl_rule_head_const_typed(rule, pos, val, RAY_I64);
+}
+
 void dl_rule_head_const_f64(dl_rule_t* rule, int pos, double val) {
     int64_t bits;
     memcpy(&bits, &val, sizeof(bits));
-    dl_rule_head_const(rule, pos, bits, RAY_F64);
+    dl_rule_head_const_typed(rule, pos, bits, RAY_F64);
 }
 
 int dl_rule_add_atom(dl_rule_t* rule, const char* pred, int arity) {
@@ -1369,9 +1376,16 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         int64_t unit_sym = ray_sym_intern("_unit", 5);
         ray_t* accum_unit = ray_table_add_col(accum, unit_sym, one_val);
         ray_release(one_val);
-        if (!accum_unit) { prog->eval_err = true; return NULL; }
+        /* ray_table_add_col doesn't free `accum` on error — release it
+         * ourselves so the partially-built table isn't leaked. */
+        if (!accum_unit) {
+            ray_release(accum);
+            prog->eval_err = true;
+            return NULL;
+        }
         if (RAY_IS_ERR(accum_unit)) {
             ray_error_free(accum_unit);
+            ray_release(accum);
             prog->eval_err = true;
             return NULL;
         }
@@ -1837,19 +1851,44 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
 
             if (body->cmp_lhs_expr) {
                 lhs_evaled = dl_eval_expr(body->cmp_lhs_expr, accum, var_col, nrows);
-                if (!lhs_evaled || RAY_IS_ERR(lhs_evaled)) break;
+                /* LHS evaluation failure can't be silently skipped — a
+                 * missing filter changes the query's answer. */
+                if (!lhs_evaled) {
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
+                }
+                if (RAY_IS_ERR(lhs_evaled)) {
+                    ray_error_free(lhs_evaled);
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
+                }
                 lhs_src = lhs_evaled;
             } else {
                 int lhs_col = var_col[body->cmp_lhs];
                 lhs_src = ray_table_get_col_idx(accum, lhs_col);
-                if (!lhs_src) break;
+                if (!lhs_src) {
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
+                }
             }
 
             if (body->cmp_rhs_expr) {
                 rhs_evaled = dl_eval_expr(body->cmp_rhs_expr, accum, var_col, nrows);
-                if (!rhs_evaled || RAY_IS_ERR(rhs_evaled)) {
+                if (!rhs_evaled) {
                     if (lhs_evaled) ray_release(lhs_evaled);
-                    break;
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
+                }
+                if (RAY_IS_ERR(rhs_evaled)) {
+                    ray_error_free(rhs_evaled);
+                    if (lhs_evaled) ray_release(lhs_evaled);
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
                 }
                 rhs_src = rhs_evaled;
             } else if (body->cmp_rhs != DL_CONST) {
@@ -1857,7 +1896,9 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 rhs_src = ray_table_get_col_idx(accum, rhs_col);
                 if (!rhs_src) {
                     if (lhs_evaled) ray_release(lhs_evaled);
-                    break;
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
                 }
             }
             /* else rhs is a constant i64 body->cmp_const */
@@ -1944,17 +1985,44 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             }
 
             /* Build filtered table — element-size-aware memcpy so f64
-             * columns and narrow-SYM columns survive the mask unchanged. */
+             * columns and narrow-SYM columns survive the mask unchanged.
+             * Silently `continue`-ing past missing columns would yield
+             * a table with fewer columns than accum, breaking schema
+             * invariants in downstream table_union.  Treat every such
+             * failure as unrecoverable. */
             int64_t ncols = ray_table_ncols(accum);
             ray_t* out = ray_table_new((int)ncols);
+            if (!out || RAY_IS_ERR(out)) {
+                if (out && RAY_IS_ERR(out)) ray_error_free(out);
+                ray_free(mask_block);
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
             for (int64_t c = 0; c < ncols; c++) {
                 ray_t* src = ray_table_get_col_idx(accum, c);
-                if (!src) continue;
+                if (!src) {
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
                 ray_t* dst = (src->type == RAY_SYM)
                     ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, count)
                     : ray_vec_new(src->type, count);
-                if (!dst) continue;
-                if (RAY_IS_ERR(dst)) { ray_error_free(dst); continue; }
+                if (!dst) {
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (RAY_IS_ERR(dst)) {
+                    ray_error_free(dst);
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
                 dst->len = count;
                 uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
                 const uint8_t* sb = (const uint8_t*)ray_data(src);
@@ -1966,8 +2034,22 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                         j++;
                     }
                 if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
-                out = ray_table_add_col(out, ray_table_col_name(accum, c), dst);
+                ray_t* next = ray_table_add_col(out, ray_table_col_name(accum, c), dst);
                 ray_release(dst);
+                if (!next) {
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (RAY_IS_ERR(next)) {
+                    ray_error_free(next);
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                out = next;
             }
             ray_free(mask_block);
             ray_release(accum);
@@ -3636,18 +3718,18 @@ static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
             int vi = dl_var_get_or_create(vars, harg->i64);
             dl_rule_head_var(out, i, vi);
         } else if (harg->type == -RAY_I64) {
-            dl_rule_head_const(out, i, harg->i64, RAY_I64);
+            dl_rule_head_const_typed(out, i, harg->i64, RAY_I64);
         } else if (harg->type == -RAY_SYM) {
-            dl_rule_head_const(out, i, harg->i64, RAY_SYM);
+            dl_rule_head_const_typed(out, i, harg->i64, RAY_SYM);
         } else if (harg->type == -RAY_F64) {
             int64_t bits;
             memcpy(&bits, &harg->f64, sizeof(bits));
-            dl_rule_head_const(out, i, bits, RAY_F64);
+            dl_rule_head_const_typed(out, i, bits, RAY_F64);
         } else if (harg->type == -RAY_STR) {
             /* Intern the string as a sym so it can be stored in a RAY_SYM
              * column.  Matches the body-literal parser convention. */
             int64_t sym = ray_sym_intern(ray_str_ptr(harg), ray_str_len(harg));
-            dl_rule_head_const(out, i, sym, RAY_SYM);
+            dl_rule_head_const_typed(out, i, sym, RAY_SYM);
         } else {
             return ray_error("type", "rule: head arguments must be ?variables or constants");
         }
