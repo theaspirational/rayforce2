@@ -943,15 +943,22 @@ static bool dl_col_eq_row(ray_t* col, int64_t row, int64_t value) {
 }
 
 static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
-    if (!tbl || RAY_IS_ERR(tbl) || ray_table_nrows(tbl) == 0) return tbl;
+    /* Contract: always return an owned reference (rc bumped) so the
+     * caller can release uniformly.  Every pass-through must therefore
+     * retain — else the caller's `ray_release(body_tbl); body_tbl =
+     * filtered;` pattern would leave body_tbl under-referenced and a
+     * later release could land on freed memory. */
+    if (!tbl || RAY_IS_ERR(tbl)) { if (tbl) ray_retain(tbl); return tbl; }
+    if (ray_table_nrows(tbl) == 0) { ray_retain(tbl); return tbl; }
 
     ray_t* col = ray_table_get_col_idx(tbl, col_idx);
-    if (!col) return tbl;
-    /* Non-numeric, non-sym keys: not supported by this filter.  Match
-     * the existing pass-through convention used by the empty-rows
-     * early-return above (caller's retain covers us). */
-    if (col->type != RAY_I64 && col->type != RAY_SYM)
+    if (!col) { ray_retain(tbl); return tbl; }
+    /* Non-numeric, non-sym keys: not supported by this filter — pass
+     * through (retained) rather than miscompare via raw memcpy. */
+    if (col->type != RAY_I64 && col->type != RAY_SYM) {
+        ray_retain(tbl);
         return tbl;
+    }
 
     int64_t nrows = ray_table_nrows(tbl);
     int64_t ncols = ray_table_ncols(tbl);
