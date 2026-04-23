@@ -192,23 +192,23 @@ static void dl_idb_align_head_const_types(dl_program_t* prog, const dl_rule_t* r
     }
     if (!any_change) return;
 
-    /* Rebuild the table with typed empty columns.  Every failure path must
-     * release both the surviving table reference and any RAY_ERROR object
-     * returned from ray_table_new / ray_vec_new / ray_table_add_col —
-     * otherwise repeated align calls slowly accumulate error-object blocks
-     * in the heap. */
+    /* Rebuild the table with typed empty columns.  ray_release() is a
+     * deliberate no-op for RAY_ERROR objects (see src/mem/cow.c), so every
+     * failure path here must pair ray_release() for the valid survivor
+     * with ray_error_free() for the freshly-returned error block — else
+     * repeated align calls would silently leak one error block each time. */
     ray_t* fresh = ray_table_new(rel->arity);
     if (!fresh) return;
-    if (RAY_IS_ERR(fresh)) { ray_release(fresh); return; }
+    if (RAY_IS_ERR(fresh)) { ray_error_free(fresh); return; }
     for (int c = 0; c < rel->arity; c++) {
         ray_t* empty_col = ray_vec_new(desired[c], 0);
         if (!empty_col) { ray_release(fresh); return; }
-        if (RAY_IS_ERR(empty_col)) { ray_release(empty_col); ray_release(fresh); return; }
+        if (RAY_IS_ERR(empty_col)) { ray_error_free(empty_col); ray_release(fresh); return; }
         ray_t* prev = fresh;
         fresh = ray_table_add_col(fresh, rel->col_names[c], empty_col);
         ray_release(empty_col);
         if (!fresh) { ray_release(prev); return; }
-        if (RAY_IS_ERR(fresh)) { ray_release(prev); ray_release(fresh); return; }
+        if (RAY_IS_ERR(fresh)) { ray_release(prev); ray_error_free(fresh); return; }
     }
     ray_release(rel->table);
     rel->table = fresh;
@@ -1026,8 +1026,12 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
                     ray_t* hcol = ray_table_get_col_idx(head_rel->table, c);
                     int8_t htype = hcol ? hcol->type : RAY_I64;
                     ray_t* ecol = ray_vec_new(htype, 0);
-                    if (!ecol || RAY_IS_ERR(ecol)) {
-                        if (ecol) ray_release(ecol);
+                    if (!ecol) {
+                        ray_release(out);
+                        return ray_error("memory", "dl_project: empty col");
+                    }
+                    if (RAY_IS_ERR(ecol)) {
+                        ray_error_free(ecol);
                         ray_release(out);
                         return ray_error("memory", "dl_project: empty col");
                     }
@@ -1048,8 +1052,12 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
             ray_t* dst = (src->type == RAY_SYM)
                 ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, nrows)
                 : ray_vec_new(src->type, nrows);
-            if (!dst || RAY_IS_ERR(dst)) {
-                if (dst) ray_release(dst);
+            if (!dst) {
+                ray_release(out);
+                return ray_error("memory", "dl_project: vec_new");
+            }
+            if (RAY_IS_ERR(dst)) {
+                ray_error_free(dst);
                 ray_release(out);
                 return ray_error("memory", "dl_project: vec_new");
             }
@@ -1740,7 +1748,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
      * output via the const_table/execute chain. */
     if (!projected) return NULL;
     if (RAY_IS_ERR(projected)) {
-        ray_release(projected);
+        ray_error_free(projected);
         prog->eval_err = true;
         return NULL;
     }
@@ -2239,23 +2247,23 @@ int dl_eval(dl_program_t* prog) {
             ray_graph_free(g);
 
             if (!raw_tuples) continue;
-            if (RAY_IS_ERR(raw_tuples)) { prog->eval_err = true; ray_release(raw_tuples); continue; }
+            if (RAY_IS_ERR(raw_tuples)) { prog->eval_err = true; ray_error_free(raw_tuples); continue; }
 
             /* Rename columns to match head relation's expected names */
             ray_t* new_tuples = table_rename_cols(raw_tuples, head_rel);
             ray_release(raw_tuples);
             if (!new_tuples) continue;
-            if (RAY_IS_ERR(new_tuples)) { prog->eval_err = true; ray_release(new_tuples); continue; }
+            if (RAY_IS_ERR(new_tuples)) { prog->eval_err = true; ray_error_free(new_tuples); continue; }
 
             /* Merge into the head relation's table */
             ray_t* merged = table_union(head_rel->table, new_tuples);
             ray_release(new_tuples);
             if (!merged) { prog->eval_err = true; continue; }
-            if (RAY_IS_ERR(merged)) { prog->eval_err = true; ray_release(merged); continue; }
+            if (RAY_IS_ERR(merged)) { prog->eval_err = true; ray_error_free(merged); continue; }
             ray_t* deduped = table_distinct(merged);
             ray_release(merged);
             if (!deduped) { prog->eval_err = true; continue; }
-            if (RAY_IS_ERR(deduped)) { prog->eval_err = true; ray_release(deduped); continue; }
+            if (RAY_IS_ERR(deduped)) { prog->eval_err = true; ray_error_free(deduped); continue; }
             ray_release(head_rel->table);
             head_rel->table = deduped;
         }
@@ -2355,14 +2363,14 @@ int dl_eval(dl_program_t* prog) {
                     prog->rels[body_rel].table = saved;
 
                     if (!raw_result) continue;
-                    if (RAY_IS_ERR(raw_result)) { prog->eval_err = true; ray_release(raw_result); continue; }
+                    if (RAY_IS_ERR(raw_result)) { prog->eval_err = true; ray_error_free(raw_result); continue; }
 
                     /* Rename columns to match head relation */
                     dl_rel_t* head_rel2 = &prog->rels[head_idx];
                     ray_t* result = table_rename_cols(raw_result, head_rel2);
                     ray_release(raw_result);
                     if (!result) continue;
-                    if (RAY_IS_ERR(result)) { prog->eval_err = true; ray_release(result); continue; }
+                    if (RAY_IS_ERR(result)) { prog->eval_err = true; ray_error_free(result); continue; }
 
                     /* Accumulate new tuples for this head */
                     if (new_tuples_per_rel[head_idx]) {
@@ -2376,7 +2384,7 @@ int dl_eval(dl_program_t* prog) {
                         }
                         if (RAY_IS_ERR(u)) {
                             prog->eval_err = true;
-                            ray_release(u);
+                            ray_error_free(u);
                             new_tuples_per_rel[head_idx] = NULL;
                             continue;
                         }
@@ -2402,7 +2410,7 @@ int dl_eval(dl_program_t* prog) {
                 if (!new_tuples) { delta_tables[rel_idx] = NULL; continue; }
                 if (RAY_IS_ERR(new_tuples)) {
                     prog->eval_err = true;
-                    ray_release(new_tuples);
+                    ray_error_free(new_tuples);
                     delta_tables[rel_idx] = NULL;
                     continue;
                 }
@@ -2411,13 +2419,13 @@ int dl_eval(dl_program_t* prog) {
                 ray_t* deduped = table_distinct(new_tuples);
                 ray_release(new_tuples);
                 if (!deduped) { prog->eval_err = true; continue; }
-                if (RAY_IS_ERR(deduped)) { prog->eval_err = true; ray_release(deduped); continue; }
+                if (RAY_IS_ERR(deduped)) { prog->eval_err = true; ray_error_free(deduped); continue; }
 
                 /* Subtract existing relation to get true delta */
                 ray_t* delta = table_antijoin(deduped, rel->table);
                 ray_release(deduped);
                 if (!delta) { prog->eval_err = true; continue; }
-                if (RAY_IS_ERR(delta)) { prog->eval_err = true; ray_release(delta); continue; }
+                if (RAY_IS_ERR(delta)) { prog->eval_err = true; ray_error_free(delta); continue; }
 
                 delta_tables[rel_idx] = delta;
 
@@ -2429,7 +2437,7 @@ int dl_eval(dl_program_t* prog) {
                     if (!merged) { prog->eval_err = true; continue; }
                     if (RAY_IS_ERR(merged)) {
                         prog->eval_err = true;
-                        ray_release(merged);
+                        ray_error_free(merged);
                         continue;
                     }
                     ray_release(rel->table);
@@ -3635,8 +3643,14 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
                 }
                 if (col->type == RAY_SYM) {
                     ray_t* i64col = ray_vec_new(RAY_I64, nrows_env);
-                    if (!i64col || RAY_IS_ERR(i64col)) {
-                        if (i64col) ray_release(i64col);
+                    if (!i64col) {
+                        ray_release(clean);
+                        dl_program_free(prog);
+                        ray_release(db);
+                        return ray_error("memory", "query: failed to convert env-backed SYM column");
+                    }
+                    if (RAY_IS_ERR(i64col)) {
+                        ray_error_free(i64col);
                         ray_release(clean);
                         dl_program_free(prog);
                         ray_release(db);
@@ -3651,8 +3665,14 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
                 } else {
                     next_clean = ray_table_add_col(clean, ray_table_col_name(env_val, c), col);
                 }
-                if (!next_clean || RAY_IS_ERR(next_clean)) {
-                    if (next_clean) ray_release(next_clean);
+                if (!next_clean) {
+                    ray_release(clean);
+                    dl_program_free(prog);
+                    ray_release(db);
+                    return ray_error("memory", "query: failed to build env-backed EDB table");
+                }
+                if (RAY_IS_ERR(next_clean)) {
+                    ray_error_free(next_clean);
                     ray_release(clean);
                     dl_program_free(prog);
                     ray_release(db);

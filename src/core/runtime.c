@@ -138,6 +138,21 @@ ray_t* ray_error(const char* code, const char* fmt, ...) {
     return err;
 }
 
+void ray_error_free(ray_t* err) {
+    /* Skip NULL and anything that isn't actually a RAY_ERROR — callers
+     * often pass a result that might be either an error or a real value. */
+    if (!err || !RAY_IS_ERR(err)) return;
+    /* Both ray_free and ray_release_owned_refs short-circuit on RAY_IS_ERR
+     * as a safety default (the refcount system deliberately does not track
+     * error objects).  Retype the block to a leaf atom (-RAY_I64) so those
+     * guards don't fire — an atom with no owned children is the safest
+     * shape to pass through the standard free path.  The rc was already
+     * 1 from ray_alloc, so ray_free will reclaim the block via the buddy
+     * allocator.  From this point the caller must not touch err again. */
+    err->type = -RAY_I64;
+    ray_free(err);
+}
+
 const char* ray_err_code(ray_t* err) {
     if (!err || err->type != RAY_ERROR) return NULL;
     /* sdata is 7 bytes and may not be null-terminated when full */

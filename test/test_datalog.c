@@ -1897,6 +1897,34 @@ static MunitResult test_eval_surfaces_compile_failure(const void* params, void* 
     return MUNIT_OK;
 }
 
+/* ray_release() is a deliberate no-op for RAY_ERROR objects, so callers
+ * that claim to be "releasing" an error under the refcount API actually
+ * leak the block.  ray_error_free() is the escape hatch that calls
+ * ray_free() directly.  This test watches bytes_allocated across a burst
+ * of create/free cycles: without a real free the counter would climb. */
+static MunitResult test_error_free_reclaims(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    ray_mem_stats_t before, after;
+    ray_mem_stats(&before);
+    for (int i = 0; i < 256; i++) {
+        ray_t* e = ray_error("test", "iter=%d", i);
+        munit_assert_ptr_not_null(e);
+        munit_assert_true(RAY_IS_ERR(e));
+        ray_error_free(e);
+    }
+    ray_mem_stats(&after);
+
+    /* alloc_count must have grown by at least the 256 we produced. */
+    munit_assert_size((size_t)(after.alloc_count - before.alloc_count), >=, 256);
+    /* free_count must have grown by the same amount — if ray_error_free
+     * was still a no-op, free_count would lag alloc_count by 256. */
+    munit_assert_size((size_t)(after.free_count - before.free_count), >=, 256);
+    /* Live-bytes must not have grown — the loop is steady-state. */
+    munit_assert_size(after.bytes_allocated, <=, before.bytes_allocated);
+    return MUNIT_OK;
+}
+
 static MunitTest datalog_tests[] = {
     { "/source_provenance",         test_source_provenance,         datalog_setup, datalog_teardown, 0, NULL },
     { "/source_prov_requires_flag", test_source_prov_requires_flag, datalog_setup, datalog_teardown, 0, NULL },
@@ -1941,6 +1969,7 @@ static MunitTest datalog_tests[] = {
     { "/env_bound_edb_auto_register",   test_env_bound_edb_auto_register,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/env_bound_agg_auto_register",    test_env_bound_agg_auto_register,    datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/eval_surfaces_compile_failure",  test_eval_surfaces_compile_failure,  datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/error_free_reclaims",            test_error_free_reclaims,            datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_scalar_f64",                 test_agg_scalar_f64,                 datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_scalar_f64_sum_empty",       test_agg_scalar_f64_sum_empty,       datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_scalar_value_col_oor_empty", test_agg_scalar_value_col_oor_empty, datalog_setup, datalog_teardown, 0, NULL },

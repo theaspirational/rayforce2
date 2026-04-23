@@ -116,6 +116,7 @@ ray_runtime_t* ray_runtime_create_with_sym_err(const char* sym_path,
 ray_t* ray_error(const char* code, const char* fmt, ...);
 /* Read error code from a RAY_ERROR object (returns pointer to sdata) */
 const char* ray_err_code(ray_t* err);
+/* ray_error_free() is published in include/rayforce.h */
 
 /* Read VM error detail message (NULL if empty) */
 const char* ray_error_msg(void);

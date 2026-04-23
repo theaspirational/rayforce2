@@ -156,6 +156,11 @@ ray_t* ray_error(const char* code, const char* fmt, ...);
 const char* ray_err_code_str(ray_err_t e);
 ray_err_t ray_err_from_obj(ray_t* err);
 const char* ray_err_code(ray_t* err);
+/* Free a RAY_ERROR object.  ray_release() is a deliberate no-op for
+ * error ray_t* (see src/mem/cow.c), so callers that hold the sole
+ * reference and want the block reclaimed must use this helper instead —
+ * otherwise the error leaks until heap teardown. */
+void ray_error_free(ray_t* err);
 
 /* ===== Accessor Macros ===== */
 
