@@ -1198,6 +1198,20 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             if (body->vars[c] == DL_CONST) {
                 ray_t* filtered = dl_filter_eq(body_tbl, c, body->const_vals[c]);
                 ray_release(body_tbl);
+                if (!filtered) {
+                    /* Treat as genuine failure — dl_filter_eq returns an
+                     * owned reference on every non-NULL path, so NULL
+                     * means something went wrong inside the helper. */
+                    if (accum) ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (RAY_IS_ERR(filtered)) {
+                    ray_error_free(filtered);
+                    if (accum) ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
                 body_tbl = filtered;
             }
         }
@@ -1338,6 +1352,17 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 if (body->vars[c] == DL_CONST) {
                     ray_t* filtered = dl_filter_eq(neg_tbl, c, body->const_vals[c]);
                     ray_release(neg_tbl);
+                    if (!filtered) {
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
+                    if (RAY_IS_ERR(filtered)) {
+                        ray_error_free(filtered);
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
                     neg_tbl = filtered;
                 }
             }
