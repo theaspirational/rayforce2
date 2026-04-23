@@ -1454,7 +1454,20 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         case DL_ASSIGN: {
             int64_t nrows = ray_table_nrows(accum);
             ray_t* new_col = dl_eval_expr(body->assign_expr, accum, var_col, nrows);
-            if (!new_col || RAY_IS_ERR(new_col)) break;
+            /* Silently breaking would leave assign_var unbound and let
+             * the rest of the rule keep compiling with stale bindings,
+             * producing a dl_eval == 0 return alongside wrong rows. */
+            if (!new_col) {
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
+            if (RAY_IS_ERR(new_col)) {
+                ray_error_free(new_col);
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
 
             int new_col_idx = (int)ray_table_ncols(accum);
             char colname[32];
@@ -1462,6 +1475,12 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             ray_t* new_accum = dl_table_add_computed_col(accum, new_col, colname);
             ray_release(new_col);
             ray_release(accum);
+            if (!new_accum) { prog->eval_err = true; return NULL; }
+            if (RAY_IS_ERR(new_accum)) {
+                ray_error_free(new_accum);
+                prog->eval_err = true;
+                return NULL;
+            }
             accum = new_accum;
 
             var_bound[body->assign_var] = true;
