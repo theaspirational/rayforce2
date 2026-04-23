@@ -174,6 +174,11 @@ typedef struct {
     int         strata_sizes[DL_MAX_STRATA];         /* number of predicates per stratum */
     int         n_strata;
     uint32_t    flags;                                /* DL_FLAG_* bitmask */
+    bool        eval_err;                             /* set by compile/eval on
+                                                         unrecoverable failure
+                                                         (distinct from "rule
+                                                         produced no rows"); read
+                                                         by dl_eval to return -1 */
 } dl_program_t;
 
 /* ===== Public API ===== */

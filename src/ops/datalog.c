@@ -1006,11 +1006,31 @@ static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
     ray_t* out = ray_table_new(n_out);
     if (!out || RAY_IS_ERR(out))
         return out ? out : ray_error("memory", "dl_project: table_new");
+    /* If accum collapsed to zero rows (e.g. antijoin removed everything),
+     * its schema may have been dropped too.  Fall back to the IDB's existing
+     * column types so downstream table_union sees a matching schema. */
+    bool empty_accum = (nrows == 0);
     for (int c = 0; c < n_out; c++) {
         int src_idx = col_indices[c];
         if (src_idx >= 0) {
             ray_t* src = ray_table_get_col_idx(tbl, src_idx);
             if (!src) {
+                if (empty_accum && head_rel && head_rel->table) {
+                    ray_t* hcol = ray_table_get_col_idx(head_rel->table, c);
+                    int8_t htype = hcol ? hcol->type : RAY_I64;
+                    ray_t* ecol = ray_vec_new(htype, 0);
+                    if (!ecol || RAY_IS_ERR(ecol)) {
+                        if (ecol) ray_release(ecol);
+                        ray_release(out);
+                        return ray_error("memory", "dl_project: empty col");
+                    }
+                    ray_t* next = ray_table_add_col(out, head_rel->col_names[c], ecol);
+                    ray_release(ecol);
+                    if (!next) return ray_error("memory", "dl_project: add_col");
+                    if (RAY_IS_ERR(next)) return next;
+                    out = next;
+                    continue;
+                }
                 ray_release(out);
                 return ray_error("domain", "dl_project: source column missing");
             }
@@ -1304,6 +1324,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                     if (kc < 0 || kc >= src_rel->arity) {
                         ray_graph_free(gg);
                         ray_release(accum);
+                        prog->eval_err = true;
                         return NULL;
                     }
                     int64_t sym = src_rel->col_names[kc];
@@ -1320,6 +1341,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                     (value_col < 0 || value_col >= src_rel->arity)) {
                     ray_graph_free(gg);
                     ray_release(accum);
+                    prog->eval_err = true;
                     return NULL;
                 }
                 if (value_col < 0 || value_col >= src_rel->arity) value_col = 0;
@@ -1392,6 +1414,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 (body->agg_value_col < 0 ||
                  body->agg_value_col >= src_rel_s->arity)) {
                 ray_release(accum);
+                prog->eval_err = true;
                 return NULL;
             }
 
@@ -1421,6 +1444,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                     } else if (vc0->type != RAY_I64) {
                         /* Non-numeric source: reject regardless of row count. */
                         ray_release(accum);
+                        prog->eval_err = true;
                         return NULL;
                     }
                 }
@@ -1493,6 +1517,7 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                         /* Non-numeric source column — reject loudly rather than
                          * silently returning zero. */
                         ray_release(accum);
+                        prog->eval_err = true;
                         return NULL;
                     }
                 }
@@ -1701,6 +1726,17 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
     ray_t* projected = dl_project(accum, proj_cols, rule->head_arity, head_rel,
                                    rule->head_consts, rule->head_const_types);
     ray_release(accum);
+
+    /* dl_project now surfaces hard failures (alloc OOM, type errors, add-col
+     * errors) as RAY_ERROR objects.  Catch those here and flag the program
+     * so dl_eval can return -1 instead of silently dropping the rule's
+     * output via the const_table/execute chain. */
+    if (!projected) return NULL;
+    if (RAY_IS_ERR(projected)) {
+        ray_release(projected);
+        prog->eval_err = true;
+        return NULL;
+    }
 
     /* Store result in the graph as a const_table so the caller can execute */
     ray_op_t* result_node = ray_const_table(g, projected);
@@ -2103,6 +2139,13 @@ static void dl_build_provenance(dl_program_t* prog) {
 int dl_eval(dl_program_t* prog) {
     if (!prog) return -1;
 
+    /* Reset the compile/eval error flag at the top of each eval.  Rule
+     * compilation or ray_execute paths may set it on unrecoverable failure
+     * (e.g. dl_project OOM); we return -1 at the end if it was raised so
+     * ray_query_fn and other callers can surface "evaluation failed" rather
+     * than silently returning an empty/partial result. */
+    prog->eval_err = false;
+
     /* Stratify if not already done */
     if (prog->n_strata == 0) {
         if (dl_stratify(prog) != 0) return -1;
@@ -2140,24 +2183,26 @@ int dl_eval(dl_program_t* prog) {
             ray_t* raw_tuples = ray_execute(g, output);
             ray_graph_free(g);
 
-            if (!raw_tuples || RAY_IS_ERR(raw_tuples)) continue;
+            if (!raw_tuples) continue;
+            if (RAY_IS_ERR(raw_tuples)) { prog->eval_err = true; ray_release(raw_tuples); continue; }
 
             /* Rename columns to match head relation's expected names */
             ray_t* new_tuples = table_rename_cols(raw_tuples, head_rel);
             ray_release(raw_tuples);
-            if (!new_tuples || RAY_IS_ERR(new_tuples)) continue;
+            if (!new_tuples) continue;
+            if (RAY_IS_ERR(new_tuples)) { prog->eval_err = true; ray_release(new_tuples); continue; }
 
             /* Merge into the head relation's table */
             ray_t* merged = table_union(head_rel->table, new_tuples);
             ray_release(new_tuples);
-            if (merged && !RAY_IS_ERR(merged)) {
-                ray_t* deduped = table_distinct(merged);
-                ray_release(merged);
-                if (deduped && !RAY_IS_ERR(deduped)) {
-                    ray_release(head_rel->table);
-                    head_rel->table = deduped;
-                }
-            }
+            if (!merged) { prog->eval_err = true; continue; }
+            if (RAY_IS_ERR(merged)) { prog->eval_err = true; ray_release(merged); continue; }
+            ray_t* deduped = table_distinct(merged);
+            ray_release(merged);
+            if (!deduped) { prog->eval_err = true; continue; }
+            if (RAY_IS_ERR(deduped)) { prog->eval_err = true; ray_release(deduped); continue; }
+            ray_release(head_rel->table);
+            head_rel->table = deduped;
         }
 
         /* Phase B: Semi-naive loop — iterate with delta relations */
@@ -2247,13 +2292,15 @@ int dl_eval(dl_program_t* prog) {
                     ray_graph_free(g);
                     prog->rels[body_rel].table = saved;
 
-                    if (!raw_result || RAY_IS_ERR(raw_result)) continue;
+                    if (!raw_result) continue;
+                    if (RAY_IS_ERR(raw_result)) { prog->eval_err = true; ray_release(raw_result); continue; }
 
                     /* Rename columns to match head relation */
                     dl_rel_t* head_rel2 = &prog->rels[head_idx];
                     ray_t* result = table_rename_cols(raw_result, head_rel2);
                     ray_release(raw_result);
-                    if (!result || RAY_IS_ERR(result)) continue;
+                    if (!result) continue;
+                    if (RAY_IS_ERR(result)) { prog->eval_err = true; ray_release(result); continue; }
 
                     /* Accumulate new tuples for this head */
                     if (new_tuples_per_rel[head_idx]) {
@@ -2330,7 +2377,11 @@ int dl_eval(dl_program_t* prog) {
     if (prog->flags & DL_FLAG_PROVENANCE)
         dl_build_provenance(prog);
 
-    return 0;
+    /* Any compile-time or runtime error surfaced by a rule causes dl_eval
+     * to report failure, so callers (notably ray_query_fn) can turn this
+     * into a user-visible "evaluation failed" error instead of shipping a
+     * silently-incomplete result. */
+    return prog->eval_err ? -1 : 0;
 }
 
 /* ========================================================================

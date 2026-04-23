@@ -1633,7 +1633,7 @@ static MunitResult test_agg_scalar_value_col_oor_empty(const void* params, void*
     rs.n_vars = 1;
     dl_add_rule(prog, &rs);
 
-    munit_assert_int(dl_eval(prog), ==, 0);
+    munit_assert_int(dl_eval(prog), ==, -1);
     ray_t* out = dl_query(prog, "bad_sum");
     munit_assert_ptr_not_null(out);
     munit_assert_int((int)ray_table_nrows(out), ==, 0);
@@ -1668,8 +1668,9 @@ static MunitResult test_agg_grouped_key_col_oor(const void* params, void* fixtur
     r.n_vars = 2;
     dl_add_rule(prog, &r);
 
-    /* dl_eval must not crash; compile rejects the rule, producing 0 rows. */
-    munit_assert_int(dl_eval(prog), ==, 0);
+    /* dl_eval must surface the compile-time rejection as failure rather
+     * than silently producing an empty result. */
+    munit_assert_int(dl_eval(prog), ==, -1);
     ray_t* out = dl_query(prog, "bad_group");
     munit_assert_ptr_not_null(out);
     munit_assert_int((int)ray_table_nrows(out), ==, 0);
@@ -1828,18 +1829,63 @@ static MunitResult test_env_bound_agg_auto_register(const void* params, void* fi
     ray_env_set(sal_sym, salaries);
 
     ray_t* result = ray_eval_str(
-        "(query mydb (find ?s) (where (eav ?x ?p ?v))"
+        "(query mydb (find ?s) (where (total ?s))"
         "  (rules ((total ?s) (sum ?s salaries 1))))");
     munit_assert_ptr_not_null(result);
     munit_assert_false(RAY_IS_ERR(result));
-    /* The test shape doesn't exercise `total` directly; what we assert is
-     * that the query didn't error out — meaning `salaries` was auto-
-     * registered despite its arity being unknown at parse time. */
+    munit_assert_int(result->type, ==, RAY_TABLE);
+    munit_assert_int((int)ray_table_nrows(result), ==, 1);
+    ray_t* sc = ray_table_get_col_idx(result, 0);
+    munit_assert_int(((int64_t*)ray_data(sc))[0], ==, 600);
 
     ray_release(result);
     ray_env_set(sal_sym, NULL);
     ray_env_set(db_sym, NULL);
     ray_release(salaries); ray_release(sidc); ray_release(salc);
+    ray_release(eav); ray_release(ec); ray_release(ac); ray_release(vc);
+    return MUNIT_OK;
+}
+
+/* A rule whose compile step deliberately fails (out-of-range value column
+ * on a SUM aggregate) must surface the failure all the way up through
+ * (query ...), not silently return an empty table.  Regression: dl_eval
+ * used to swallow dl_compile_rule NULL returns and unconditionally report
+ * success. */
+static MunitResult test_eval_surfaces_compile_failure(const void* params, void* fixture) {
+    (void)params; (void)fixture;
+
+    /* Need an EAV table bound in the env so `(query db …)` has a valid
+     * first argument. */
+    int64_t es[] = {1}, as[] = {42}, vs[] = {100};
+    ray_t* ec = ray_vec_from_raw(RAY_I64, es, 1);
+    ray_t* ac = ray_vec_from_raw(RAY_I64, as, 1);
+    ray_t* vc = ray_vec_from_raw(RAY_I64, vs, 1);
+    ray_t* eav = ray_table_new(3);
+    eav = ray_table_add_col(eav, ray_sym_intern("e", 1), ec);
+    eav = ray_table_add_col(eav, ray_sym_intern("a", 1), ac);
+    eav = ray_table_add_col(eav, ray_sym_intern("v", 1), vc);
+    int64_t db_sym = ray_sym_intern("mydb", 4);
+    ray_env_set(db_sym, eav);
+
+    /* Env-bound arity-1 source; (sum ?s broken 99) indexes a nonexistent
+     * value column. */
+    int64_t xs[] = {10, 20, 30};
+    ray_t* xc = ray_vec_from_raw(RAY_I64, xs, 3);
+    ray_t* broken = ray_table_new(1);
+    broken = ray_table_add_col(broken, ray_sym_intern("broken__c0", 10), xc);
+    int64_t broken_sym = ray_sym_intern("broken", 6);
+    ray_env_set(broken_sym, broken);
+
+    ray_t* result = ray_eval_str(
+        "(query mydb (find ?s) (where (bad ?s))"
+        "  (rules ((bad ?s) (sum ?s broken 99))))");
+    munit_assert_ptr_not_null(result);
+    munit_assert_true(RAY_IS_ERR(result));
+
+    ray_release(result);
+    ray_env_set(broken_sym, NULL);
+    ray_env_set(db_sym, NULL);
+    ray_release(broken); ray_release(xc);
     ray_release(eav); ray_release(ec); ray_release(ac); ray_release(vc);
     return MUNIT_OK;
 }
@@ -1887,6 +1933,7 @@ static MunitTest datalog_tests[] = {
     { "/rule_body_const_surface_syntax", test_rule_body_const_surface_syntax, datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/env_bound_edb_auto_register",   test_env_bound_edb_auto_register,   datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/env_bound_agg_auto_register",    test_env_bound_agg_auto_register,    datalog_rf_setup, datalog_rf_teardown, 0, NULL },
+    { "/eval_surfaces_compile_failure",  test_eval_surfaces_compile_failure,  datalog_rf_setup, datalog_rf_teardown, 0, NULL },
     { "/agg_scalar_f64",                 test_agg_scalar_f64,                 datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_scalar_f64_sum_empty",       test_agg_scalar_f64_sum_empty,       datalog_setup, datalog_teardown, 0, NULL },
     { "/agg_scalar_value_col_oor_empty", test_agg_scalar_value_col_oor_empty, datalog_setup, datalog_teardown, 0, NULL },
