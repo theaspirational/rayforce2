@@ -291,7 +291,7 @@ static test_result_t test_cancel(void) {
     ray_op_t* sum_op = ray_sum(g, scan);
     ray_t* result = ray_execute(g, sum_op);
     /* ray_execute() resets cancel flag at start — first query may succeed */
-    if (!RAY_IS_ERR(result)) ray_release(result);
+    if (result) { if (RAY_IS_ERR(result)) ray_error_free(result); else ray_release(result); }
 
     /* ray_execute() resets the flag, so this tests that the next query works */
     ray_graph_free(g);

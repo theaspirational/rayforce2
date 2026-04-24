@@ -25,19 +25,24 @@
     ray_t* _le = ray_eval_str(lhs);                                         \
     if (!_le || RAY_IS_ERR(_le)) {                                          \
         ray_t* _es = _le ? ray_fmt(_le, 0) : NULL;                          \
-        FAILF("eval error on %s: %.*s",                                     \
-              (lhs),                                                        \
-              (int)(_es ? ray_str_len(_es) : 0),                            \
-              _es ? ray_str_ptr(_es) : "");                                 \
+        /* capture the error string, then reclaim the error before FAILF */ \
+        char _em[512]; size_t _eml = _es ? ray_str_len(_es) : 0;            \
+        if (_eml > sizeof _em - 1) _eml = sizeof _em - 1;                   \
+        if (_es) { memcpy(_em, ray_str_ptr(_es), _eml); ray_release(_es); } \
+        _em[_eml] = '\0';                                                   \
+        if (_le) ray_error_free(_le);                                       \
+        FAILF("eval error on %s: %s", (lhs), _em);                          \
     }                                                                       \
     ray_t* _re = ray_eval_str(rhs);                                         \
     if (!_re || RAY_IS_ERR(_re)) {                                          \
         ray_t* _es = _re ? ray_fmt(_re, 0) : NULL;                          \
-        if (_le) ray_release(_le);                                          \
-        FAILF("eval error on RHS %s: %.*s",                                 \
-              (rhs),                                                        \
-              (int)(_es ? ray_str_len(_es) : 0),                            \
-              _es ? ray_str_ptr(_es) : "");                                 \
+        char _em[512]; size_t _eml = _es ? ray_str_len(_es) : 0;            \
+        if (_eml > sizeof _em - 1) _eml = sizeof _em - 1;                   \
+        if (_es) { memcpy(_em, ray_str_ptr(_es), _eml); ray_release(_es); } \
+        _em[_eml] = '\0';                                                   \
+        ray_release(_le);                                                   \
+        if (_re) ray_error_free(_re);                                       \
+        FAILF("eval error on RHS %s: %s", (rhs), _em);                      \
     }                                                                       \
     ray_t* _ls = ray_fmt(_le, 0);                                           \
     ray_t* _rs = ray_fmt(_re, 0);                                           \
@@ -69,26 +74,32 @@
 #define TEST_ASSERT_ER(src, substr) do {                                    \
     ray_t* _le = ray_eval_str(src);                                         \
     if (!_le || !RAY_IS_ERR(_le)) {                                         \
+        /* _le is a VALUE here (not an error) — ordinary ray_release. */    \
         ray_t* _s = _le ? ray_fmt(_le, 0) : NULL;                           \
-        if (_le && !RAY_IS_ERR(_le)) ray_release(_le);                      \
-        FAILF("expected error containing \"%s\", got: %.*s",                \
-              (substr),                                                     \
-              (int)(_s ? ray_str_len(_s) : 0),                              \
-              _s ? ray_str_ptr(_s) : "");                                   \
+        char _em[512]; size_t _eml = _s ? ray_str_len(_s) : 0;              \
+        if (_eml > sizeof _em - 1) _eml = sizeof _em - 1;                   \
+        if (_s) { memcpy(_em, ray_str_ptr(_s), _eml); ray_release(_s); }    \
+        _em[_eml] = '\0';                                                   \
+        if (_le) ray_release(_le);                                          \
+        FAILF("expected error containing \"%s\", got: %s", (substr), _em);  \
     }                                                                       \
+    /* _le IS an error beyond this point — reclaim via ray_error_free. */   \
     ray_t* _s = ray_fmt(_le, 0);                                            \
     const char* _sp = _s ? ray_str_ptr(_s) : "";                            \
-    if (!strstr(_sp, (substr))) {                                           \
-        char _fb[2048];                                                     \
+    int _hit = strstr(_sp, (substr)) != NULL;                               \
+    char _fb[2048] = "";                                                    \
+    if (!_hit) {                                                            \
         snprintf(_fb, sizeof _fb,                                           \
                  "error \"%s\" missing substring \"%s\"  -- expr: %s",      \
                  _sp, (substr), (src));                                     \
-        if (_s) ray_release(_s);                                            \
+    }                                                                       \
+    if (_s) ray_release(_s);                                                \
+    ray_error_free(_le);                                                    \
+    if (!_hit) {                                                            \
         snprintf(ray_test_fail_buf, sizeof ray_test_fail_buf,               \
                  "%s:%d: %s", __FILE__, __LINE__, _fb);                     \
         return (test_result_t){ TEST_FAIL, ray_test_fail_buf };             \
     }                                                                       \
-    if (_s) ray_release(_s);                                                \
 } while (0)
 
 #endif /* RAY_TEST_RFL_H */

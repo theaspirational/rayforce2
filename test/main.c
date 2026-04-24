@@ -266,7 +266,7 @@ static test_result_t run_rfl_file(const char* path) {
                 snprintf(ray_test_fail_buf, sizeof ray_test_fail_buf,
                          "%s:%d: LHS eval error: %s  -- src: %s",
                          path, line_no, buf, lhs);
-                if (le && !RAY_IS_ERR(le)) ray_release(le);
+                ray_error_free(le);  /* ray_release is a no-op on errors */
                 res = (test_result_t){ TEST_FAIL, ray_test_fail_buf };
                 goto done;
             }
@@ -276,8 +276,8 @@ static test_result_t run_rfl_file(const char* path) {
                 snprintf(ray_test_fail_buf, sizeof ray_test_fail_buf,
                          "%s:%d: RHS eval error: %s  -- src: %s",
                          path, line_no, buf, rhs);
-                ray_release(le);
-                if (re && !RAY_IS_ERR(re)) ray_release(re);
+                ray_release(le);          /* le is a value, not an error */
+                ray_error_free(re);       /* re is the error */
                 res = (test_result_t){ TEST_FAIL, ray_test_fail_buf };
                 goto done;
             }
@@ -300,6 +300,7 @@ static test_result_t run_rfl_file(const char* path) {
             char* substr = er + 4;
             ray_t* ev = ray_eval_str(expr);
             if (!RAY_IS_ERR(ev)) {
+                /* ev is a value here — we expected an error but got one. */
                 char buf[512]; fmt_into(ev, buf, sizeof buf);
                 snprintf(ray_test_fail_buf, sizeof ray_test_fail_buf,
                          "%s:%d: expected error containing \"%s\", got: %s  -- src: %s",
@@ -308,6 +309,7 @@ static test_result_t run_rfl_file(const char* path) {
                 res = (test_result_t){ TEST_FAIL, ray_test_fail_buf };
                 goto done;
             }
+            /* ev IS an error beyond this point — must use ray_error_free. */
             ray_t* es = ray_fmt(ev, 0);
             const char* ep = es ? ray_str_ptr(es) : "";
             if (!strstr(ep, substr)) {
@@ -315,10 +317,12 @@ static test_result_t run_rfl_file(const char* path) {
                          "%s:%d: error \"%s\" missing substr \"%s\"  -- src: %s",
                          path, line_no, ep, substr, expr);
                 if (es) ray_release(es);
+                ray_error_free(ev);
                 res = (test_result_t){ TEST_FAIL, ray_test_fail_buf };
                 goto done;
             }
             if (es) ray_release(es);
+            ray_error_free(ev);
         } else {
             /* Raw Rayfall code — eval; error is a test failure. */
             ray_t* ev = ray_eval_str(start);
@@ -327,6 +331,7 @@ static test_result_t run_rfl_file(const char* path) {
                 snprintf(ray_test_fail_buf, sizeof ray_test_fail_buf,
                          "%s:%d: eval error: %s  -- src: %s",
                          path, line_no, buf, start);
+                ray_error_free(ev);
                 res = (test_result_t){ TEST_FAIL, ray_test_fail_buf };
                 goto done;
             }
@@ -434,15 +439,34 @@ static int rfl_scan_at(const char* base_root, const char* cur_dir) {
             closedir(d);
             return -1;
         }
-        snprintf(g_rfl_paths[g_rfl_count], sizeof g_rfl_paths[0], "%s", full);
+        /* Copy full path into the path slot, bounds-checked. */
+        {
+            size_t flen = strlen(full);
+            if (flen >= sizeof g_rfl_paths[0]) {
+                fprintf(stderr, "test driver: .rfl path too long: %s\n", full);
+                closedir(d); return -1;
+            }
+            memcpy(g_rfl_paths[g_rfl_count], full, flen + 1);
+        }
 
         /* Name = path relative to BASE_ROOT (not cur_dir), ".rfl" stripped,
-         * prefixed "rfl/".  This preserves every category segment. */
+         * prefixed "rfl/".  This preserves every category segment.  Manual
+         * bounds-check avoids -Werror=format-truncation on stricter GCCs. */
         const char* rel      = full;
         size_t      base_len = strlen(base_root);
         if (strncmp(full, base_root, base_len) == 0 && full[base_len] == '/')
             rel = full + base_len + 1;
-        snprintf(g_rfl_names[g_rfl_count], sizeof g_rfl_names[0], "rfl/%s", rel);
+        {
+            char*  dst    = g_rfl_names[g_rfl_count];
+            size_t cap    = sizeof g_rfl_names[0];     /* includes trailing NUL */
+            size_t rellen = strlen(rel);
+            if (rellen + 5 > cap) {                    /* 4 for "rfl/" + NUL   */
+                fprintf(stderr, "test driver: .rfl test name too long: rfl/%s\n", rel);
+                closedir(d); return -1;
+            }
+            memcpy(dst, "rfl/", 4);
+            memcpy(dst + 4, rel, rellen + 1);
+        }
         char* dot = strrchr(g_rfl_names[g_rfl_count], '.');
         if (dot && strcmp(dot, ".rfl") == 0) *dot = '\0';
 

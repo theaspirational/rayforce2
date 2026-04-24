@@ -45,10 +45,17 @@ static void emb_teardown(void) {
 static double eval_f64(const char* expr) {
     ray_t* r = ray_eval_str(expr);
     if (!r || RAY_IS_ERR(r) || r->type != -RAY_F64) {
+        /* Capture formatted error into a local buffer, reclaim the ray_t
+         * error object (ray_release is a no-op on errors), then longjmp
+         * via ray_test_fatal — must free before the noreturn call. */
         ray_t*      fs = r ? ray_fmt(r, 0) : NULL;
-        const char* fp = fs ? ray_str_ptr(fs) : "<nil>";
-        size_t      fl = fs ? ray_str_len(fs) : 5;
-        ray_test_fatal("eval_f64 failed: %s  -> %.*s", expr, (int)fl, fp);
+        char em[256]; size_t fl = fs ? ray_str_len(fs) : 5;
+        if (fl > sizeof em - 1) fl = sizeof em - 1;
+        if (fs) { memcpy(em, ray_str_ptr(fs), fl); ray_release(fs); }
+        else    { memcpy(em, "<nil>", 5); fl = 5; }
+        em[fl] = '\0';
+        if (r && RAY_IS_ERR(r)) ray_error_free(r);
+        ray_test_fatal("eval_f64 failed: %s  -> %s", expr, em);
     }
     double v = r->f64;
     ray_release(r);
@@ -60,9 +67,13 @@ static int64_t eval_i64(const char* expr) {
     if (!r || RAY_IS_ERR(r)
         || (r->type != -RAY_I64 && r->type != -RAY_I32 && r->type != -RAY_I16)) {
         ray_t*      fs = r ? ray_fmt(r, 0) : NULL;
-        const char* fp = fs ? ray_str_ptr(fs) : "<nil>";
-        size_t      fl = fs ? ray_str_len(fs) : 5;
-        ray_test_fatal("eval_i64 failed: %s  -> %.*s", expr, (int)fl, fp);
+        char em[256]; size_t fl = fs ? ray_str_len(fs) : 5;
+        if (fl > sizeof em - 1) fl = sizeof em - 1;
+        if (fs) { memcpy(em, ray_str_ptr(fs), fl); ray_release(fs); }
+        else    { memcpy(em, "<nil>", 5); fl = 5; }
+        em[fl] = '\0';
+        if (r && RAY_IS_ERR(r)) ray_error_free(r);
+        ray_test_fatal("eval_i64 failed: %s  -> %s", expr, em);
     }
     int64_t v;
     switch (r->type) {

@@ -58,6 +58,7 @@ extern ray_runtime_t *__RUNTIME;
         fprintf(stderr, "  %s:%d: eval error: %.*s\n -- expr: %s\n", \
                 __FILE__, __LINE__, _en, _ep, expr); \
         if (_es) ray_release(_es); \
+        ray_error_free(_le); \
         FAIL("explicit MUNIT_FAIL"); \
     } \
     ray_t* _re = ray_eval_str(expected); \
@@ -68,7 +69,8 @@ extern ray_runtime_t *__RUNTIME;
         fprintf(stderr, "  %s:%d: RHS eval error: %.*s\n -- expected: %s\n", \
                 __FILE__, __LINE__, _en, _ep, expected); \
         if (_es) ray_release(_es); \
-        if (_le && !RAY_IS_ERR(_le)) ray_release(_le); \
+        ray_error_free(_re); \
+        if (_le) ray_release(_le); \
         FAIL("explicit MUNIT_FAIL"); \
     } \
     ray_t* _ls = _le ? ray_fmt(_le, 0) : NULL; \
@@ -77,34 +79,33 @@ extern ray_runtime_t *__RUNTIME;
     const char* _rp = _rs ? ray_str_ptr(_rs) : "null"; \
     int _ll = _ls ? (int)ray_str_len(_ls) : 4; \
     int _rl = _rs ? (int)ray_str_len(_rs) : 4; \
-    if (_ll != _rl || memcmp(_lp, _rp, (size_t)_rl) != 0) { \
-        fprintf(stderr, "  %s:%d: expected \"%.*s\", got \"%.*s\"\n -- expr: %s\n", \
-                __FILE__, __LINE__, _rl, _rp, _ll, _lp, expr); \
-        if (_le && !RAY_IS_ERR(_le)) ray_release(_le); \
-        if (_re && !RAY_IS_ERR(_re)) ray_release(_re); \
-        if (_ls) ray_release(_ls); \
-        if (_rs) ray_release(_rs); \
-        FAIL("explicit MUNIT_FAIL"); \
-    } \
-    if (_le && !RAY_IS_ERR(_le)) ray_release(_le); \
-    if (_re && !RAY_IS_ERR(_re)) ray_release(_re); \
+    int _same = (_ll == _rl) && (memcmp(_lp, _rp, (size_t)_rl) == 0); \
     if (_ls) ray_release(_ls); \
     if (_rs) ray_release(_rs); \
+    if (_le) ray_release(_le); \
+    if (_re) ray_release(_re); \
+    if (!_same) { \
+        fprintf(stderr, "  %s:%d: mismatch\n -- expr: %s\n", \
+                __FILE__, __LINE__, expr); \
+        FAIL("explicit MUNIT_FAIL"); \
+    } \
 } while(0)
 
-/* ASSERT_ER: evaluate expr, assert it produces an error */
+/* ASSERT_ER: evaluate expr, assert it produces an error. */
 #define ASSERT_ER(expr, err_substr) do { \
     ray_t* _le = ray_eval_str(expr); \
     if (!RAY_IS_ERR(_le)) { \
-        ray_t* _s = ray_fmt(_le, 0); \
+        ray_t* _s = _le ? ray_fmt(_le, 0) : NULL; \
         fprintf(stderr, "  %s:%d: expected error, got: %.*s\n -- expr: %s\n", \
                 __FILE__, __LINE__, \
                 (int)(_s ? ray_str_len(_s) : 0), \
                 _s ? ray_str_ptr(_s) : "", expr); \
         if (_s) ray_release(_s); \
-        ray_release(_le); \
+        if (_le) ray_release(_le); \
         FAIL("explicit MUNIT_FAIL"); \
     } \
+    /* _le IS an error — reclaim via ray_error_free (ray_release is a no-op). */ \
+    ray_error_free(_le); \
 } while(0)
 
 /* ---- Setup / Teardown ---- */
@@ -2594,7 +2595,7 @@ static test_result_t test_sort_decode_i64(void) {
     /* Random unsorted I64, large range (>2^24) → non-packed MSD radix → decode.
      * Verify: (1) every pair ordered, (2) sum preserved, (3) count preserved. */
     ray_t* tmp = ray_eval_str("(set _sv (rand 2000 100000000))");
-    if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
+    if (tmp) { if (RAY_IS_ERR(tmp)) ray_error_free(tmp); else ray_release(tmp); }
     ray_t* s = ray_eval_str("(asc _sv)");
     TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_sv");
@@ -2612,7 +2613,7 @@ static test_result_t test_sort_decode_i64(void) {
 static test_result_t test_sort_decode_f64(void) {
     /* Random unsorted F64 with negatives — always 8-byte keys → non-packed → decode. */
     ray_t* tmp = ray_eval_str("(set _sv (* 1.0 (- (rand 2000 2000000) 1000000)))");
-    if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
+    if (tmp) { if (RAY_IS_ERR(tmp)) ray_error_free(tmp); else ray_release(tmp); }
     ray_t* s = ray_eval_str("(asc _sv)");
     TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_sv");
@@ -2629,7 +2630,7 @@ static test_result_t test_sort_decode_f64(void) {
 static test_result_t test_sort_decode_desc(void) {
     /* Random unsorted I64 desc — large range → non-packed decode. */
     ray_t* tmp = ray_eval_str("(set _sv (rand 2000 100000000))");
-    if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
+    if (tmp) { if (RAY_IS_ERR(tmp)) ray_error_free(tmp); else ray_release(tmp); }
     ray_t* s = ray_eval_str("(desc _sv)");
     TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_sv");
@@ -2646,7 +2647,7 @@ static test_result_t test_sort_decode_desc(void) {
 static test_result_t test_sort_decode_f64_neg(void) {
     /* Random unsorted F64 desc with negatives — verify descending + sum. */
     ray_t* tmp = ray_eval_str("(set _sv (* 1.0 (- (rand 2000 2000000) 1000000)))");
-    if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
+    if (tmp) { if (RAY_IS_ERR(tmp)) ray_error_free(tmp); else ray_release(tmp); }
     ray_t* s = ray_eval_str("(desc _sv)");
     TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_sv");
@@ -2696,7 +2697,7 @@ static test_result_t test_sort_decode_radix_f64_desc(void) {
 static test_result_t test_sort_decode_radix_i64(void) {
     /* I64 with large range forces 8-byte radix keys → non-packed radix decode. */
     ray_t* tmp = ray_eval_str("(set _rv (rand 5000 100000000))");
-    if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
+    if (tmp) { if (RAY_IS_ERR(tmp)) ray_error_free(tmp); else ray_release(tmp); }
     ray_t* s = ray_eval_str("(asc _rv)");
     TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_rv");
