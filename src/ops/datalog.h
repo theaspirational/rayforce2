@@ -42,6 +42,7 @@
 #define DL_ASSIGN   3   /* assignment:    X = expr */
 #define DL_BUILTIN  4   /* builtin predicate */
 #define DL_INTERVAL 5   /* interval bind: F @[S, E] */
+#define DL_AGG      6   /* aggregate: (count ?N pred), (sum ?S ?expr pred), ... */
 
 /* ===== Comparison operators (for DL_CMP) ===== */
 #define DL_CMP_EQ   0
@@ -50,6 +51,15 @@
 #define DL_CMP_LE   3
 #define DL_CMP_GT   4
 #define DL_CMP_GE   5
+
+/* ===== Aggregate operators (for DL_AGG) ===== */
+#define DL_AGG_COUNT 0
+#define DL_AGG_SUM   1
+#define DL_AGG_MIN   2
+#define DL_AGG_MAX   3
+#define DL_AGG_AVG   4
+
+#define DL_AGG_MAX_KEYS 8
 
 /* ===== Assignment operators (for DL_ASSIGN) ===== */
 #define DL_OP_EQ    0   /* simple assignment: X = expr */
@@ -61,14 +71,16 @@
 
 /* ===== Expression AST for assignments ===== */
 typedef enum {
-    DL_EXPR_CONST,    /* integer constant */
-    DL_EXPR_VAR,      /* bound variable reference */
-    DL_EXPR_BINOP,    /* binary op: +, -, *, / */
+    DL_EXPR_CONST,        /* integer constant (back-compat) */
+    DL_EXPR_CONST_F64,    /* float constant */
+    DL_EXPR_VAR,          /* bound variable reference */
+    DL_EXPR_BINOP,        /* binary op: +, -, *, / */
 } dl_expr_kind_t;
 
 typedef struct dl_expr {
     dl_expr_kind_t  kind;
     int64_t         const_val;   /* for DL_EXPR_CONST */
+    double          const_f64;   /* for DL_EXPR_CONST_F64 */
     int             var_idx;     /* for DL_EXPR_VAR */
     int             binop;       /* for DL_EXPR_BINOP: OP_ADD, OP_SUB, etc. */
     struct dl_expr *left;        /* for DL_EXPR_BINOP */
@@ -115,6 +127,14 @@ typedef struct {
     int     interval_fact_var;     /* fact variable index (for DL_INTERVAL) */
     int     interval_start_var;    /* start variable index (for DL_INTERVAL) */
     int     interval_end_var;      /* end variable index (for DL_INTERVAL) */
+    int     agg_op;                /* aggregate operator (for DL_AGG) */
+    int     agg_target_var;        /* variable that receives the aggregate result */
+    char    agg_pred[64];          /* predicate name being aggregated over */
+    int     agg_arity;             /* arity of agg_pred */
+    int     agg_value_col;         /* column index inside agg_pred to aggregate (sum/min/max/avg) */
+    int     agg_n_group_keys;      /* 0 = scalar; >0 = grouped */
+    int     agg_group_key_vars[DL_AGG_MAX_KEYS];
+    int     agg_group_key_cols[DL_AGG_MAX_KEYS];
 } dl_body_t;
 
 /* ===== Datalog rule: head :- body ===== */
@@ -123,6 +143,9 @@ typedef struct {
     int     head_arity;
     int     head_vars[DL_MAX_ARITY]; /* variable indices in head */
     int64_t head_consts[DL_MAX_ARITY]; /* constants (when head_vars[i] == DL_CONST) */
+    int8_t  head_const_types[DL_MAX_ARITY]; /* ray type tag per head slot:
+                                             *   RAY_I64 / RAY_SYM / RAY_F64 when head_vars[i] == DL_CONST,
+                                             *   0 when head_vars[i] is a variable. */
     int     n_body;                 /* number of body literals */
     dl_body_t body[DL_MAX_BODY];
     int     n_vars;                 /* total distinct variable count in rule */
@@ -151,6 +174,11 @@ typedef struct {
     int         strata_sizes[DL_MAX_STRATA];         /* number of predicates per stratum */
     int         n_strata;
     uint32_t    flags;                                /* DL_FLAG_* bitmask */
+    bool        eval_err;                             /* set by compile/eval on
+                                                         unrecoverable failure
+                                                         (distinct from "rule
+                                                         produced no rows"); read
+                                                         by dl_eval to return -1 */
 } dl_program_t;
 
 /* ===== Public API ===== */
@@ -160,6 +188,9 @@ dl_program_t* dl_program_new(void);
 
 /* Free a Datalog program and release all owned tables */
 void dl_program_free(dl_program_t* prog);
+
+/** Append rules registered via the Rayfall (rule ...) special form into a program. */
+void dl_append_global_rules(dl_program_t* prog);
 
 /* Register an EDB (extensional) relation backed by an existing table.
  * Column names are auto-generated as "c0", "c1", ... unless the table
@@ -214,8 +245,19 @@ void dl_rule_init(dl_rule_t* rule, const char* head_pred, int head_arity);
 /* Set a head argument to a variable */
 void dl_rule_head_var(dl_rule_t* rule, int pos, int var_idx);
 
-/* Set a head argument to a constant */
+/* Set a head argument to an I64 constant — backward-compatible
+ * signature. Equivalent to dl_rule_head_const_typed(rule, pos, val,
+ * RAY_I64).  Prefer the typed variant for new code. */
 void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val);
+
+/* Set a head argument to a typed constant.
+ *   type must be RAY_I64, RAY_SYM, or RAY_F64.
+ *   For RAY_F64 callers should pass a double reinterpreted via memcpy/union
+ *   into val's int64 slot; dl_rule_head_const_f64 is the safe wrapper. */
+void dl_rule_head_const_typed(dl_rule_t* rule, int pos, int64_t val, int8_t type);
+
+/* Convenience wrapper: set a head argument to a RAY_F64 constant. */
+void dl_rule_head_const_f64(dl_rule_t* rule, int pos, double val);
 
 /* Add a positive body atom. Returns body literal index. */
 int dl_rule_add_atom(dl_rule_t* rule, const char* pred, int arity);
@@ -251,10 +293,31 @@ int dl_rule_add_cmp_expr(dl_rule_t* rule, int cmp_op, dl_expr_t* lhs, dl_expr_t*
  * position into start_var and end_var. Returns body literal index. */
 int dl_rule_add_interval(dl_rule_t* rule, int fact_var, int start_var, int end_var);
 
+/* pred_arity is advisory; evaluator re-resolves against program EDB/IDB at compile time. */
+/* Add an aggregate body literal: (op ?target pred col)
+ *  - op: DL_AGG_COUNT (col is ignored), DL_AGG_SUM/MIN/MAX/AVG
+ *  - target_var: variable that receives the aggregate result
+ *  - pred: predicate to aggregate over
+ *  - pred_arity: arity of that predicate
+ *  - value_col: which column to aggregate (ignored for COUNT)
+ * Returns body literal index. */
+int dl_rule_add_agg(dl_rule_t* rule, int op, int target_var,
+                    const char* pred, int pred_arity, int value_col);
+
+/* Attach group-by keys to an aggregate body literal previously added via
+ * dl_rule_add_agg. body_idx is that builder's return value.
+ * key_vars and key_cols have n_keys entries (<= DL_AGG_MAX_KEYS).
+ * Returns 0 on success, -1 if n_keys is out of range. */
+int dl_rule_agg_set_group(dl_rule_t* rule, int body_idx,
+                          const int* key_vars, const int* key_cols, int n_keys);
+
 /* ===== Expression tree builders ===== */
 
 /* Create a constant expression */
 dl_expr_t* dl_expr_const(int64_t val);
+
+/* Create a float constant expression */
+dl_expr_t* dl_expr_const_f64(double val);
 
 /* Create a variable reference expression */
 dl_expr_t* dl_expr_var(int var_idx);

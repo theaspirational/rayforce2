@@ -67,6 +67,7 @@ extern MunitSuite test_format_suite;
 extern MunitSuite test_datalog_suite;
 extern MunitSuite test_rowsel_suite;
 extern MunitSuite test_embedding_suite;
+extern MunitSuite test_runtime_suite;
 
 static MunitSuite child_suites[] = {
     /* { .prefix, .tests, .suites, .iterations, .options } */
@@ -103,6 +104,7 @@ static MunitSuite child_suites[] = {
     { "/datalog",  NULL, NULL, 0, 0 },
     { "/rowsel",   NULL, NULL, 0, 0 },
     { "/embedding",NULL, NULL, 0, 0 },
+    { "/runtime",  NULL, NULL, 0, 0 },
     { NULL, NULL, NULL, 0, 0 },        /* terminator */
 };
 
@@ -149,6 +151,7 @@ int main(int argc, char* argv[]) {
     child_suites[30] = test_datalog_suite;
     child_suites[31] = test_rowsel_suite;
     child_suites[32] = test_embedding_suite;
+    child_suites[33] = test_runtime_suite;
 
     return munit_suite_main(&root_suite, NULL, argc, argv);
 }

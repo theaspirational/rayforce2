@@ -31,6 +31,7 @@
 #include "lang/env.h"
 #include "table/sym.h"
 #include "ops/ops.h"
+#include "ops/internal.h"      /* col_propagate_str_pool */
 #include <string.h>
 #include <stdio.h>
 
@@ -157,6 +158,76 @@ int dl_ensure_idb(dl_program_t* prog, const char* name, int arity) {
  * Rule management
  * ======================================================================== */
 
+/* When a rule has a typed head constant at slot c, the IDB relation's
+ * column c must be of that type so ray_vec_concat (used by table_union)
+ * doesn't reject the merge.  Rebuilds matching columns on an *empty* IDB
+ * table in-place.  Safe because schema is established before evaluation. */
+static void dl_idb_align_head_const_types(dl_program_t* prog, const dl_rule_t* rule) {
+    int rel_idx = dl_find_rel(prog, rule->head_pred);
+    if (rel_idx < 0) return;
+    dl_rel_t* rel = &prog->rels[rel_idx];
+    if (!rel->is_idb) return;
+    if (!rel->table || RAY_IS_ERR(rel->table)) return;
+    if (ray_table_nrows(rel->table) != 0) return;  /* types already committed */
+
+    int ncols = (int)ray_table_ncols(rel->table);
+    if (ncols != rel->arity) return;
+
+    bool any_change = false;
+    int8_t desired[DL_MAX_ARITY];
+    for (int c = 0; c < rel->arity; c++) {
+        ray_t* col = ray_table_get_col_idx(rel->table, c);
+        int8_t cur = col ? col->type : RAY_I64;
+        int8_t want = rule->head_const_types[c];
+        if (want == 0) {
+            desired[c] = cur;
+        } else if (cur != RAY_I64 && cur != want) {
+            /* First-non-zero-wins policy: once a slot is committed to a
+             * non-default type by a prior rule, any later rule that
+             * disagrees is a program-level conflict.  Mark the program
+             * so dl_eval (which reads eval_err after evaluation) reports
+             * failure — no stderr write from a non-debug code path. */
+            prog->eval_err = true;
+            return;
+        } else {
+            desired[c] = want;
+            if (want != cur) any_change = true;
+        }
+    }
+    if (!any_change) return;
+
+    /* Rebuild the table with typed empty columns.  Alignment is required
+     * for later evaluation to produce type-matching table_union inputs,
+     * so any failure here must also set prog->eval_err = true — silently
+     * returning would leave the IDB schema unaligned and dl_eval would
+     * later hit a ray_vec_concat type mismatch without any error signal. */
+    ray_t* fresh = ray_table_new(rel->arity);
+    if (!fresh) { prog->eval_err = true; return; }
+    if (RAY_IS_ERR(fresh)) { prog->eval_err = true; ray_error_free(fresh); return; }
+    for (int c = 0; c < rel->arity; c++) {
+        ray_t* empty_col = ray_vec_new(desired[c], 0);
+        if (!empty_col) { prog->eval_err = true; ray_release(fresh); return; }
+        if (RAY_IS_ERR(empty_col)) {
+            prog->eval_err = true;
+            ray_error_free(empty_col);
+            ray_release(fresh);
+            return;
+        }
+        ray_t* prev = fresh;
+        fresh = ray_table_add_col(fresh, rel->col_names[c], empty_col);
+        ray_release(empty_col);
+        if (!fresh) { prog->eval_err = true; ray_release(prev); return; }
+        if (RAY_IS_ERR(fresh)) {
+            prog->eval_err = true;
+            ray_release(prev);
+            ray_error_free(fresh);
+            return;
+        }
+    }
+    ray_release(rel->table);
+    rel->table = fresh;
+}
+
 int dl_add_rule(dl_program_t* prog, const dl_rule_t* rule) {
     if (!prog || !rule || prog->n_rules >= DL_MAX_RULES)
         return -1;
@@ -166,6 +237,10 @@ int dl_add_rule(dl_program_t* prog, const dl_rule_t* rule) {
 
     /* Ensure IDB relation exists for the head predicate */
     dl_ensure_idb(prog, rule->head_pred, rule->head_arity);
+
+    /* Align IDB column types to any typed head constants in this rule.
+     * Must run before evaluation so table_union/concat see matching types. */
+    dl_idb_align_head_const_types(prog, rule);
 
     return idx;
 }
@@ -191,13 +266,32 @@ void dl_rule_init(dl_rule_t* rule, const char* head_pred, int head_arity) {
 void dl_rule_head_var(dl_rule_t* rule, int pos, int var_idx) {
     if (pos < 0 || pos >= rule->head_arity) return;
     rule->head_vars[pos] = var_idx;
+    rule->head_const_types[pos] = 0;
     if (var_idx + 1 > rule->n_vars) rule->n_vars = var_idx + 1;
 }
 
-void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val) {
+void dl_rule_head_const_typed(dl_rule_t* rule, int pos, int64_t val, int8_t type) {
     if (pos < 0 || pos >= rule->head_arity) return;
+    /* Default to RAY_I64 if an unrecognized type sneaks through; keeps
+     * old-callers-with-no-type compat when writing to the slot. */
+    if (type != RAY_I64 && type != RAY_SYM && type != RAY_F64)
+        type = RAY_I64;
     rule->head_vars[pos] = DL_CONST;
     rule->head_consts[pos] = val;
+    rule->head_const_types[pos] = type;
+}
+
+/* Backward-compatible I64 wrapper.  Pre-aggregates-PR external callers
+ * used this 3-arg form; it now forwards to the typed variant with
+ * RAY_I64. */
+void dl_rule_head_const(dl_rule_t* rule, int pos, int64_t val) {
+    dl_rule_head_const_typed(rule, pos, val, RAY_I64);
+}
+
+void dl_rule_head_const_f64(dl_rule_t* rule, int pos, double val) {
+    int64_t bits;
+    memcpy(&bits, &val, sizeof(bits));
+    dl_rule_head_const_typed(rule, pos, bits, RAY_F64);
 }
 
 int dl_rule_add_atom(dl_rule_t* rule, const char* pred, int arity) {
@@ -281,6 +375,14 @@ dl_expr_t* dl_expr_const(int64_t val) {
     if (!e) return NULL;
     e->kind = DL_EXPR_CONST;
     e->const_val = val;
+    return e;
+}
+
+dl_expr_t* dl_expr_const_f64(double val) {
+    dl_expr_t* e = dl_expr_alloc();
+    if (!e) return NULL;
+    e->kind = DL_EXPR_CONST_F64;
+    e->const_f64 = val;
     return e;
 }
 
@@ -375,6 +477,39 @@ int dl_rule_add_interval(dl_rule_t* rule, int fact_var, int start_var, int end_v
     return idx;
 }
 
+int dl_rule_add_agg(dl_rule_t* rule, int op, int target_var,
+                    const char* pred, int pred_arity, int value_col) {
+    if (rule->n_body >= DL_MAX_BODY) return -1;
+    int idx = rule->n_body++;
+    dl_body_t* b = &rule->body[idx];
+    memset(b, 0, sizeof(*b));
+    b->type           = DL_AGG;
+    b->agg_op         = op;
+    b->agg_target_var = target_var;
+    snprintf(b->agg_pred, sizeof(b->agg_pred), "%s", pred);
+    b->agg_arity      = pred_arity;
+    b->agg_value_col  = value_col;
+    b->agg_n_group_keys = 0;
+    if (target_var + 1 > rule->n_vars) rule->n_vars = target_var + 1;
+    return idx;
+}
+
+int dl_rule_agg_set_group(dl_rule_t* rule, int body_idx,
+                          const int* key_vars, const int* key_cols, int n_keys) {
+    if (!rule || body_idx < 0 || body_idx >= rule->n_body) return -1;
+    if (n_keys < 0 || n_keys > DL_AGG_MAX_KEYS) return -1;
+    dl_body_t* b = &rule->body[body_idx];
+    if (b->type != DL_AGG) return -1;
+    b->agg_n_group_keys = n_keys;
+    for (int i = 0; i < n_keys; i++) {
+        b->agg_group_key_vars[i] = key_vars[i];
+        b->agg_group_key_cols[i] = key_cols[i];
+        if (key_vars[i] + 1 > rule->n_vars)
+            rule->n_vars = key_vars[i] + 1;
+    }
+    return 0;
+}
+
 /* ========================================================================
  * Stratification — topological sort on negation dependency graph
  * ======================================================================== */
@@ -396,6 +531,14 @@ int dl_stratify(dl_program_t* prog) {
 
         for (int b = 0; b < rule->n_body; b++) {
             dl_body_t* body = &rule->body[b];
+            if (body->type == DL_AGG) {
+                /* Aggregates are non-monotonic: head must live in a higher
+                 * stratum than the predicate being aggregated. */
+                int body_idx = dl_find_rel(prog, body->agg_pred);
+                if (body_idx < 0) continue;
+                dep[head_idx][body_idx] = 2;  /* negative (non-monotonic) dep */
+                continue;
+            }
             if (body->type != DL_POS && body->type != DL_NEG) continue;
             int body_idx = dl_find_rel(prog, body->pred);
             if (body_idx < 0) continue;
@@ -472,8 +615,27 @@ int dl_stratify(dl_program_t* prog) {
  * Expression evaluation — compute column from expression tree
  * ======================================================================== */
 
+/* Helper: materialize a column of the given type/size as a copy or promotion
+ * of src. If target==RAY_F64 and src is RAY_I64, promote. Returns new owned column. */
+static ray_t* dl_col_as_f64(ray_t* src, int64_t nrows) {
+    ray_t* out = ray_vec_new(RAY_F64, nrows);
+    if (!out) return NULL;
+    if (RAY_IS_ERR(out)) { ray_error_free(out); return NULL; }
+    out->len = nrows;
+    double* od = (double*)ray_data(out);
+    if (src->type == RAY_F64) {
+        memcpy(od, ray_data(src), (size_t)nrows * sizeof(double));
+    } else { /* RAY_I64 */
+        int64_t* sd = (int64_t*)ray_data(src);
+        for (int64_t r = 0; r < nrows; r++) od[r] = (double)sd[r];
+    }
+    return out;
+}
+
 /* Evaluate an expression tree against the accumulator table.
- * Returns a new owned I64 vector of length nrows. */
+ * Returns a new owned vector of length nrows. The element type is RAY_F64
+ * if the expression involves any float constant or any RAY_F64 source column,
+ * otherwise RAY_I64. */
 static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
                              int* var_col, int64_t nrows) {
     if (!expr) return NULL;
@@ -481,21 +643,35 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
     switch (expr->kind) {
     case DL_EXPR_CONST: {
         ray_t* col = ray_vec_new(RAY_I64, nrows);
-        if (!col || RAY_IS_ERR(col)) return NULL;
+        if (!col) return NULL;
+        if (RAY_IS_ERR(col)) { ray_error_free(col); return NULL; }
         col->len = nrows;
         int64_t* d = (int64_t*)ray_data(col);
         for (int64_t r = 0; r < nrows; r++)
             d[r] = expr->const_val;
         return col;
     }
+    case DL_EXPR_CONST_F64: {
+        ray_t* col = ray_vec_new(RAY_F64, nrows);
+        if (!col) return NULL;
+        if (RAY_IS_ERR(col)) { ray_error_free(col); return NULL; }
+        col->len = nrows;
+        double* d = (double*)ray_data(col);
+        for (int64_t r = 0; r < nrows; r++)
+            d[r] = expr->const_f64;
+        return col;
+    }
     case DL_EXPR_VAR: {
         int ci = var_col[expr->var_idx];
         ray_t* src = ray_table_get_col_idx(accum, ci);
         if (!src) return NULL;
-        ray_t* dst = ray_vec_new(RAY_I64, nrows);
-        if (!dst || RAY_IS_ERR(dst)) return NULL;
+        if (src->type != RAY_I64 && src->type != RAY_F64) return NULL;
+        size_t elem = (src->type == RAY_F64) ? sizeof(double) : sizeof(int64_t);
+        ray_t* dst = ray_vec_new(src->type, nrows);
+        if (!dst) return NULL;
+        if (RAY_IS_ERR(dst)) { ray_error_free(dst); return NULL; }
         dst->len = nrows;
-        memcpy(ray_data(dst), ray_data(src), (size_t)nrows * sizeof(int64_t));
+        memcpy(ray_data(dst), ray_data(src), (size_t)nrows * elem);
         return dst;
     }
     case DL_EXPR_BINOP: {
@@ -506,8 +682,42 @@ static ray_t* dl_eval_expr(dl_expr_t* expr, ray_t* accum,
             if (rv) ray_release(rv);
             return NULL;
         }
+        bool is_f64 = (lv->type == RAY_F64) || (rv->type == RAY_F64);
+        if (is_f64) {
+            ray_t* lf = dl_col_as_f64(lv, nrows);
+            ray_t* rf = dl_col_as_f64(rv, nrows);
+            ray_release(lv); ray_release(rv);
+            if (!lf || !rf) {
+                if (lf) ray_release(lf);
+                if (rf) ray_release(rf);
+                return NULL;
+            }
+            ray_t* out = ray_vec_new(RAY_F64, nrows);
+            if (!out) { ray_release(lf); ray_release(rf); return NULL; }
+            if (RAY_IS_ERR(out)) {
+                ray_error_free(out);
+                ray_release(lf); ray_release(rf); return NULL;
+            }
+            out->len = nrows;
+            double* ld = (double*)ray_data(lf);
+            double* rd = (double*)ray_data(rf);
+            double* od = (double*)ray_data(out);
+            for (int64_t r = 0; r < nrows; r++) {
+                switch (expr->binop) {
+                case OP_ADD: od[r] = ld[r] + rd[r]; break;
+                case OP_SUB: od[r] = ld[r] - rd[r]; break;
+                case OP_MUL: od[r] = ld[r] * rd[r]; break;
+                case OP_DIV: od[r] = rd[r] != 0.0 ? ld[r] / rd[r] : 0.0; break;
+                default:     od[r] = 0.0; break;
+                }
+            }
+            ray_release(lf); ray_release(rf);
+            return out;
+        }
         ray_t* out = ray_vec_new(RAY_I64, nrows);
-        if (!out || RAY_IS_ERR(out)) {
+        if (!out) { ray_release(lv); ray_release(rv); return NULL; }
+        if (RAY_IS_ERR(out)) {
+            ray_error_free(out);
             ray_release(lv); ray_release(rv); return NULL;
         }
         out->len = nrows;
@@ -741,61 +951,275 @@ static ray_t* dl_antijoin_tables(ray_t* left, ray_t* right,
 }
 
 /* Helper: filter a table to rows where column col_idx == value */
+/* Row-at-index read helper: read an I64 from either a RAY_I64 column
+ * or from a RAY_SYM column (of any adaptive width) as a sym ID.  Other
+ * types aren't supported by the constant-filter path and cause the
+ * caller to pass through the input table unchanged. */
+static bool dl_col_eq_row(ray_t* col, int64_t row, int64_t value) {
+    if (col->type == RAY_I64) return ((int64_t*)ray_data(col))[row] == value;
+    if (col->type == RAY_SYM)
+        return ray_read_sym(ray_data(col), row, col->type, col->attrs) == value;
+    return false;
+}
+
 static ray_t* dl_filter_eq(ray_t* tbl, int col_idx, int64_t value) {
-    if (!tbl || RAY_IS_ERR(tbl) || ray_table_nrows(tbl) == 0) return tbl;
+    /* Contract: always return an owned reference (rc bumped) so the
+     * caller can release uniformly.  Every pass-through must therefore
+     * retain — else the caller's `ray_release(body_tbl); body_tbl =
+     * filtered;` pattern would leave body_tbl under-referenced and a
+     * later release could land on freed memory. */
+    if (!tbl || RAY_IS_ERR(tbl)) { if (tbl) ray_retain(tbl); return tbl; }
+    if (ray_table_nrows(tbl) == 0) { ray_retain(tbl); return tbl; }
 
     ray_t* col = ray_table_get_col_idx(tbl, col_idx);
-    if (!col) return tbl;
+    if (!col) { ray_retain(tbl); return tbl; }
+    /* Non-numeric, non-sym keys: not supported by this filter — pass
+     * through (retained) rather than miscompare via raw memcpy. */
+    if (col->type != RAY_I64 && col->type != RAY_SYM) {
+        ray_retain(tbl);
+        return tbl;
+    }
 
     int64_t nrows = ray_table_nrows(tbl);
     int64_t ncols = ray_table_ncols(tbl);
-    int64_t* data = (int64_t*)ray_data(col);
 
-    /* Count matching rows */
+    /* Count matching rows — type-aware read for RAY_SYM adaptive width. */
     int64_t count = 0;
     for (int64_t r = 0; r < nrows; r++)
-        if (data[r] == value) count++;
+        if (dl_col_eq_row(col, r, value)) count++;
 
     if (count == nrows) { ray_retain(tbl); return tbl; }
 
-    /* Build filtered table */
+    /* Build filtered table.  Each surviving column is allocated with
+     * its source's element-size (via ray_sym_elem_size) so narrow-SYM
+     * stays narrow rather than being silently widened to W64. */
     ray_t* out = ray_table_new((int)ncols);
+    if (!out) return ray_error("memory", "dl_filter_eq: table_new");
+    if (RAY_IS_ERR(out)) return out;
     for (int64_t c = 0; c < ncols; c++) {
         ray_t* src = ray_table_get_col_idx(tbl, c);
-        if (!src) continue;
-        ray_t* dst = ray_vec_new(src->type, count);
-        if (!dst || RAY_IS_ERR(dst)) continue;
+        if (!src) {
+            ray_release(out);
+            return ray_error("domain", "dl_filter_eq: missing source column");
+        }
+        ray_t* dst = (src->type == RAY_SYM)
+            ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, count)
+            : ray_vec_new(src->type, count);
+        if (!dst) { ray_release(out); return ray_error("memory", "dl_filter_eq: vec_new"); }
+        if (RAY_IS_ERR(dst)) { ray_error_free(dst); ray_release(out); return ray_error("memory", "dl_filter_eq: vec_new"); }
         dst->len = count;
-        int64_t* src_d = (int64_t*)ray_data(src);
-        int64_t* dst_d = (int64_t*)ray_data(dst);
+        uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
+        const uint8_t* src_b = (const uint8_t*)ray_data(src);
+        uint8_t* dst_b = (uint8_t*)ray_data(dst);
         int64_t j = 0;
         for (int64_t r = 0; r < nrows; r++) {
-            if (data[r] == value)
-                dst_d[j++] = src_d[r];
+            if (dl_col_eq_row(col, r, value)) {
+                memcpy(dst_b + (size_t)j * esz,
+                       src_b + (size_t)r * esz,
+                       (size_t)esz);
+                j++;
+            }
         }
-        out = ray_table_add_col(out, ray_table_col_name(tbl, c), dst);
+        if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
+        ray_t* next = ray_table_add_col(out, ray_table_col_name(tbl, c), dst);
         ray_release(dst);
+        /* ray_table_add_col does not release `out` on failure, so we
+         * must release the partially-built table before bailing out. */
+        if (!next) {
+            ray_release(out);
+            return ray_error("memory", "dl_filter_eq: add_col");
+        }
+        if (RAY_IS_ERR(next)) {
+            ray_release(out);
+            return next;
+        }
+        out = next;
     }
     return out;
 }
 
-/* Helper: project table to selected columns, producing output with head relation naming */
+/* Helper: build a fully-owned broadcast column for a constant head slot.
+ *
+ * Returns a fresh ray_t* vec with refcount 1, caller-owned.  The caller is
+ * expected to hand the ref to a table via ray_table_add_col (which retains)
+ * and then ray_release our owning ref, leaving the table as sole owner.
+ *
+ * Correctness note: this must be a real, heap-allocated vec — not a view
+ * onto rule-local scratch — so that the IDB relation table can outlive the
+ * per-iteration scratch that built it.  Cross-IDB reads at subsequent
+ * strata borrow from this column via ray_table_get_col_idx. */
+/* width_template: when type == RAY_SYM, this column is consulted for its
+ * SYM attrs/width so the broadcast matches the IDB relation's existing
+ * adaptive width (otherwise ray_vec_new would default to W64 and a
+ * later table_union would hit a ray_vec_concat width mismatch).  Pass
+ * NULL (no existing column) to get the W64 default.  Using a pointer
+ * here rather than a uint8_t hint avoids the W8=0 sentinel ambiguity
+ * of an "a zero hint means default" convention. */
+static ray_t* dl_broadcast_const_col(int64_t nrows, int8_t type, int64_t val,
+                                      const ray_t* width_template) {
+    if (type != RAY_I64 && type != RAY_SYM && type != RAY_F64) {
+        return ray_error("type", NULL);
+    }
+    uint8_t sym_w = RAY_SYM_W64;
+    if (type == RAY_SYM && width_template && width_template->type == RAY_SYM)
+        sym_w = width_template->attrs & RAY_SYM_W_MASK;
+    ray_t* v = (type == RAY_SYM)
+        ? ray_sym_vec_new(sym_w, nrows)
+        : ray_vec_new(type, nrows);
+    if (!v || RAY_IS_ERR(v)) return v;
+    v->len = nrows;
+
+    if (type == RAY_SYM) {
+        /* Use the generic writer so it handles any adaptive width. */
+        void* data = ray_data(v);
+        for (int64_t i = 0; i < nrows; i++) {
+            ray_write_sym(data, i, (uint64_t)val, v->type, v->attrs);
+        }
+    } else if (type == RAY_F64) {
+        double d;
+        memcpy(&d, &val, sizeof(d));
+        double* data = (double*)ray_data(v);
+        for (int64_t i = 0; i < nrows; i++) data[i] = d;
+    } else {  /* RAY_I64 */
+        int64_t* data = (int64_t*)ray_data(v);
+        for (int64_t i = 0; i < nrows; i++) data[i] = val;
+    }
+    return v;
+}
+
+/* Helper: project table to selected columns, producing output with head relation naming.
+ *
+ * For each output slot c:
+ *   - if col_indices[c] >= 0, copy that column from `tbl`
+ *   - else (constant slot), synthesize a broadcast column from head_consts[c]
+ *     with type head_const_types[c]. */
 static ray_t* dl_project(ray_t* tbl, const int* col_indices, int n_out,
-                          dl_rel_t* head_rel) {
+                          dl_rel_t* head_rel, const int64_t* head_consts,
+                          const int8_t* head_const_types) {
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
     int64_t nrows = ray_table_nrows(tbl);
     ray_t* out = ray_table_new(n_out);
+    if (!out || RAY_IS_ERR(out))
+        return out ? out : ray_error("memory", "dl_project: table_new");
+    /* If accum collapsed to zero rows (e.g. antijoin removed everything),
+     * its schema may have been dropped too.  Fall back to the IDB's existing
+     * column types so downstream table_union sees a matching schema. */
+    bool empty_accum = (nrows == 0);
     for (int c = 0; c < n_out; c++) {
         int src_idx = col_indices[c];
-        if (src_idx < 0) continue;  /* constant — handled separately */
-        ray_t* src = ray_table_get_col_idx(tbl, src_idx);
-        if (!src) continue;
-        ray_t* dst = ray_vec_new(src->type, nrows);
-        if (!dst || RAY_IS_ERR(dst)) continue;
-        dst->len = nrows;
-        memcpy(ray_data(dst), ray_data(src), (size_t)nrows * sizeof(int64_t));
-        out = ray_table_add_col(out, head_rel->col_names[c], dst);
-        ray_release(dst);
+        if (src_idx >= 0) {
+            ray_t* src = ray_table_get_col_idx(tbl, src_idx);
+            if (!src) {
+                if (empty_accum && head_rel && head_rel->table) {
+                    ray_t* hcol = ray_table_get_col_idx(head_rel->table, c);
+                    int8_t htype = hcol ? hcol->type : RAY_I64;
+                    /* For SYM columns, preserve the head-relation's
+                     * adaptive-width attrs — ray_vec_new(RAY_SYM, …) would
+                     * force W64 and a later table_union onto a narrower
+                     * head-rel column would hit the column-count check,
+                     * or worse, produce a width-mismatched merge. */
+                    ray_t* ecol = (htype == RAY_SYM && hcol)
+                        ? ray_sym_vec_new(hcol->attrs & RAY_SYM_W_MASK, 0)
+                        : ray_vec_new(htype, 0);
+                    if (!ecol) {
+                        ray_release(out);
+                        return ray_error("memory", "dl_project: empty col");
+                    }
+                    if (RAY_IS_ERR(ecol)) {
+                        ray_error_free(ecol);
+                        ray_release(out);
+                        return ray_error("memory", "dl_project: empty col");
+                    }
+                    ray_t* next = ray_table_add_col(out, head_rel->col_names[c], ecol);
+                    ray_release(ecol);
+                    if (!next) {
+                        ray_release(out);
+                        return ray_error("memory", "dl_project: add_col");
+                    }
+                    if (RAY_IS_ERR(next)) {
+                        ray_release(out);
+                        return next;
+                    }
+                    out = next;
+                    continue;
+                }
+                ray_release(out);
+                return ray_error("domain", "dl_project: source column missing");
+            }
+            /* Preserve SYM index width: ray_vec_new(RAY_SYM, …) would always
+             * produce a W64 vec, so memcpy'ing with the source's narrower
+             * element size would leave the upper bytes of each W64 slot
+             * uninitialized.  ray_sym_vec_new mirrors src's attrs width. */
+            ray_t* dst = (src->type == RAY_SYM)
+                ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, nrows)
+                : ray_vec_new(src->type, nrows);
+            if (!dst) {
+                ray_release(out);
+                return ray_error("memory", "dl_project: vec_new");
+            }
+            if (RAY_IS_ERR(dst)) {
+                ray_error_free(dst);
+                ray_release(out);
+                return ray_error("memory", "dl_project: vec_new");
+            }
+            dst->len = nrows;
+            uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
+            if (esz == 0) {
+                ray_release(dst);
+                ray_release(out);
+                return ray_error("type", "dl_project: unsupported column type");
+            }
+            memcpy(ray_data(dst), ray_data(src), (size_t)nrows * (size_t)esz);
+            /* RAY_STR stores 16-byte ray_str_t handles inline; strings >12
+             * bytes keep their bytes in a per-vector pool referenced via
+             * pool_off.  The memcpy above copies the handles but not the
+             * pool, so propagate the source's pool onto dst or later
+             * reads through pool_off would land in a NULL pool. */
+            if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
+            ray_t* next = ray_table_add_col(out, head_rel->col_names[c], dst);
+            ray_release(dst);
+            /* Release the partial `out` on failure — ray_table_add_col
+             * does not free its input on error. */
+            if (!next) {
+                ray_release(out);
+                return ray_error("memory", "dl_project: add_col");
+            }
+            if (RAY_IS_ERR(next)) {
+                ray_release(out);
+                return next;
+            }
+            out = next;
+        } else {
+            /* Constant head slot: materialize an owned broadcast column. */
+            int8_t ctype = head_const_types ? head_const_types[c] : 0;
+            if (ctype == 0) {
+                ray_release(out);
+                return ray_error("domain", "dl_project: unset head-const type");
+            }
+            /* When the head relation's slot is an existing SYM column
+             * (from a prior aligned rule), match its width so
+             * table_union's ray_vec_concat doesn't reject a W64 vs
+             * narrow mismatch. */
+            const ray_t* width_tpl = NULL;
+            if (ctype == RAY_SYM && head_rel && head_rel->table)
+                width_tpl = ray_table_get_col_idx(head_rel->table, c);
+            ray_t* bcast = dl_broadcast_const_col(nrows, ctype, head_consts[c], width_tpl);
+            if (!bcast || RAY_IS_ERR(bcast)) {
+                ray_release(out);
+                return bcast ? bcast : ray_error("memory", "dl_project: broadcast");
+            }
+            ray_t* next = ray_table_add_col(out, head_rel->col_names[c], bcast);
+            ray_release(bcast);
+            if (!next) {
+                ray_release(out);
+                return ray_error("memory", "dl_project: add_col");
+            }
+            if (RAY_IS_ERR(next)) {
+                ray_release(out);
+                return next;
+            }
+            out = next;
+        }
     }
     return out;
 }
@@ -833,6 +1257,20 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             if (body->vars[c] == DL_CONST) {
                 ray_t* filtered = dl_filter_eq(body_tbl, c, body->const_vals[c]);
                 ray_release(body_tbl);
+                if (!filtered) {
+                    /* Treat as genuine failure — dl_filter_eq returns an
+                     * owned reference on every non-NULL path, so NULL
+                     * means something went wrong inside the helper. */
+                    if (accum) ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (RAY_IS_ERR(filtered)) {
+                    ray_error_free(filtered);
+                    if (accum) ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
                 body_tbl = filtered;
             }
         }
@@ -905,6 +1343,58 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         }
     }
 
+    /* Rules with only aggregates (no positive body atoms) still need a
+     * one-row binding environment so aggregate results can be projected. */
+    if (!accum) {
+        bool has_agg = false;
+        for (int bi = 0; bi < rule->n_body; bi++) {
+            if (rule->body[bi].type == DL_AGG) {
+                has_agg = true;
+                break;
+            }
+        }
+        if (!has_agg)
+            return NULL;
+        ray_t* one_val = ray_vec_new(RAY_I64, 1);
+        if (!one_val) { prog->eval_err = true; return NULL; }
+        if (RAY_IS_ERR(one_val)) {
+            ray_error_free(one_val);
+            prog->eval_err = true;
+            return NULL;
+        }
+        one_val->len = 1;
+        ((int64_t*)ray_data(one_val))[0] = 0;
+        accum = ray_table_new(1);
+        if (!accum) {
+            ray_release(one_val);
+            prog->eval_err = true;
+            return NULL;
+        }
+        if (RAY_IS_ERR(accum)) {
+            ray_error_free(accum);
+            ray_release(one_val);
+            prog->eval_err = true;
+            return NULL;
+        }
+        int64_t unit_sym = ray_sym_intern("_unit", 5);
+        ray_t* accum_unit = ray_table_add_col(accum, unit_sym, one_val);
+        ray_release(one_val);
+        /* ray_table_add_col doesn't free `accum` on error — release it
+         * ourselves so the partially-built table isn't leaked. */
+        if (!accum_unit) {
+            ray_release(accum);
+            prog->eval_err = true;
+            return NULL;
+        }
+        if (RAY_IS_ERR(accum_unit)) {
+            ray_error_free(accum_unit);
+            ray_release(accum);
+            prog->eval_err = true;
+            return NULL;
+        }
+        accum = accum_unit;
+    }
+
     if (!accum) return NULL;
 
     /* Process non-join body literals in declared order.
@@ -928,6 +1418,17 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 if (body->vars[c] == DL_CONST) {
                     ray_t* filtered = dl_filter_eq(neg_tbl, c, body->const_vals[c]);
                     ray_release(neg_tbl);
+                    if (!filtered) {
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
+                    if (RAY_IS_ERR(filtered)) {
+                        ray_error_free(filtered);
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
                     neg_tbl = filtered;
                 }
             }
@@ -956,7 +1457,20 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         case DL_ASSIGN: {
             int64_t nrows = ray_table_nrows(accum);
             ray_t* new_col = dl_eval_expr(body->assign_expr, accum, var_col, nrows);
-            if (!new_col || RAY_IS_ERR(new_col)) break;
+            /* Silently breaking would leave assign_var unbound and let
+             * the rest of the rule keep compiling with stale bindings,
+             * producing a dl_eval == 0 return alongside wrong rows. */
+            if (!new_col) {
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
+            if (RAY_IS_ERR(new_col)) {
+                ray_error_free(new_col);
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
 
             int new_col_idx = (int)ray_table_ncols(accum);
             char colname[32];
@@ -964,10 +1478,346 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             ray_t* new_accum = dl_table_add_computed_col(accum, new_col, colname);
             ray_release(new_col);
             ray_release(accum);
+            if (!new_accum) { prog->eval_err = true; return NULL; }
+            if (RAY_IS_ERR(new_accum)) {
+                ray_error_free(new_accum);
+                prog->eval_err = true;
+                return NULL;
+            }
             accum = new_accum;
 
             var_bound[body->assign_var] = true;
             var_col[body->assign_var] = new_col_idx;
+            break;
+        }
+
+        case DL_AGG: {
+            if (body->agg_n_group_keys > 0) {
+                /* Grouped aggregation: use rayforce's ray_group on src_table.
+                 *
+                 * Mixed-rule guard: this path assumes accum is the singleton
+                 * _unit placeholder created for aggregate-only rules. If the
+                 * rule has real positive body atoms, accum carries bound
+                 * variables from a prior join that we would need to intersect
+                 * against the group result — not yet supported. Bail early. */
+                bool has_pos = false;
+                for (int bi = 0; bi < rule->n_body; bi++) {
+                    if (rule->body[bi].type == DL_POS) { has_pos = true; break; }
+                }
+                if (has_pos) {
+                    /* nyi: grouped aggregate + positive body atoms.
+                     * Surface via eval_err so dl_eval reports failure
+                     * instead of writing a warning to stderr in a
+                     * non-debug build. */
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+
+                int src_idx = dl_find_rel(prog, body->agg_pred);
+                if (src_idx < 0) { ray_release(accum); return NULL; }
+                ray_t* src_table = prog->rels[src_idx].table;
+                int64_t src_nrows = (src_table && !RAY_IS_ERR(src_table))
+                    ? ray_table_nrows(src_table) : 0;
+                if (src_nrows == 0) {
+                    /* No source rows -> no groups -> rule produces no head tuples. */
+                    ray_release(accum);
+                    return NULL;
+                }
+
+                dl_rel_t* src_rel = &prog->rels[src_idx];
+                int nk = body->agg_n_group_keys;
+
+                /* Build a sub-graph that SCANs src_table's columns by symbol name.
+                 * ray_graph_new retains src_table internally; no extra retain needed. */
+                ray_graph_t* gg = ray_graph_new(src_table);
+                if (!gg) {
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+
+                ray_op_t* keys_ops[DL_AGG_MAX_KEYS];
+                for (int i = 0; i < nk; i++) {
+                    int kc = body->agg_group_key_cols[i];
+                    if (kc < 0 || kc >= src_rel->arity) {
+                        ray_graph_free(gg);
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
+                    int64_t sym = src_rel->col_names[kc];
+                    ray_t* s = ray_sym_str(sym);
+                    if (!s) {
+                        ray_graph_free(gg);
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
+                    keys_ops[i] = ray_scan(gg, ray_str_ptr(s));
+                    if (!keys_ops[i]) {
+                        ray_graph_free(gg);
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
+                }
+
+                /* Agg input: value column (for COUNT we still pass a column; any
+                 * column works since COUNT only counts rows).  Must be bounds-
+                 * checked — silently clamping to 0 would compute a valid-looking
+                 * but wrong result over an unrelated column. */
+                int value_col = body->agg_value_col;
+                if (body->agg_op != DL_AGG_COUNT &&
+                    (value_col < 0 || value_col >= src_rel->arity)) {
+                    ray_graph_free(gg);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (value_col < 0 || value_col >= src_rel->arity) value_col = 0;
+                ray_t* vs = ray_sym_str(src_rel->col_names[value_col]);
+                if (!vs) {
+                    ray_graph_free(gg);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                ray_op_t* agg_in = ray_scan(gg, ray_str_ptr(vs));
+                if (!agg_in) {
+                    ray_graph_free(gg);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+
+                uint16_t op_code;
+                switch (body->agg_op) {
+                    case DL_AGG_COUNT: op_code = OP_COUNT; break;
+                    case DL_AGG_SUM:   op_code = OP_SUM;   break;
+                    case DL_AGG_MIN:   op_code = OP_MIN;   break;
+                    case DL_AGG_MAX:   op_code = OP_MAX;   break;
+                    case DL_AGG_AVG:   op_code = OP_AVG;   break;
+                    default:
+                        ray_graph_free(gg);
+                        ray_release(accum); return NULL;
+                }
+
+                ray_op_t* ag_ins[1] = { agg_in };
+                ray_op_t* root = ray_group(gg, keys_ops, (uint8_t)nk, &op_code, ag_ins, 1);
+                if (!root) {
+                    ray_graph_free(gg);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                ray_t* group_tbl = ray_execute(gg, root);
+                ray_graph_free(gg);
+
+                if (!group_tbl) {
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (RAY_IS_ERR(group_tbl)) {
+                    ray_error_free(group_tbl);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+
+                /* Replace accum with group_tbl (schema: key0..key{nk-1}, agg).
+                 * This is valid because the DL_AGG case for aggregate-only rules
+                 * created a singleton _unit accum that we can discard. Mixed
+                 * rules (body atoms + grouped agg) are not supported here; they
+                 * would require a join on shared vars and fall under A5/later. */
+                ray_release(accum);
+                accum = group_tbl;
+
+                /* Bind key variables to the key columns in the group output */
+                for (int i = 0; i < nk; i++) {
+                    int kv = body->agg_group_key_vars[i];
+                    var_bound[kv] = true;
+                    var_col[kv] = i;
+                }
+                /* Bind target variable to the aggregate column (last column) */
+                var_bound[body->agg_target_var] = true;
+                var_col[body->agg_target_var] = nk;  /* agg column immediately follows keys */
+                break;
+            }
+            /* -------- existing scalar path below unchanged -------- */
+            int src_idx = dl_find_rel(prog, body->agg_pred);
+            if (src_idx < 0) {
+                ray_release(accum);
+                return NULL;
+            }
+            dl_rel_t* src_rel_s = &prog->rels[src_idx];
+            ray_t* src_table = src_rel_s->table;
+            int64_t src_nrows = (src_table && !RAY_IS_ERR(src_table))
+                ? ray_table_nrows(src_table)
+                : 0;
+
+            /* Bounds-check value column up front for every value-taking op
+             * (SUM/MIN/MAX/AVG).  Must happen before the empty-source early
+             * returns below, otherwise an out-of-range index on an empty
+             * source would silently emit the SUM identity 0 / 0.0. */
+            bool need_value_col = (body->agg_op == DL_AGG_SUM
+                                   || body->agg_op == DL_AGG_MIN
+                                   || body->agg_op == DL_AGG_MAX
+                                   || body->agg_op == DL_AGG_AVG);
+            if (need_value_col &&
+                (body->agg_value_col < 0 ||
+                 body->agg_value_col >= src_rel_s->arity)) {
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
+
+            if (src_nrows == 0 && (body->agg_op == DL_AGG_MIN
+                     || body->agg_op == DL_AGG_MAX
+                     || body->agg_op == DL_AGG_AVG)) {
+                /* Empty-source: MIN/MAX/AVG emit no row (matches rayforce core's domain
+                 * error / typed-null semantics). COUNT and SUM keep their identities (0). */
+                ray_release(accum);
+                return NULL;
+            }
+
+            int64_t result_i = 0;
+            double  result_f = 0.0;
+            bool    is_avg   = (body->agg_op == DL_AGG_AVG);
+            /* Float promotion: AVG always emits f64; SUM/MIN/MAX track their
+             * source column type (i64 in -> i64 out; f64 in -> f64 out).
+             * COUNT is always i64.  For empty SUM, we still need to inspect
+             * the column type so the identity (0 / 0.0) is emitted in the
+             * correct result type. */
+            bool    is_float = is_avg;
+            if (need_value_col) {
+                ray_t* vc0 = ray_table_get_col_idx(src_table, body->agg_value_col);
+                if (vc0) {
+                    if (vc0->type == RAY_F64) {
+                        is_float = true;
+                    } else if (vc0->type != RAY_I64) {
+                        /* Non-numeric source: reject regardless of row count. */
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
+                }
+            }
+            switch (body->agg_op) {
+            case DL_AGG_COUNT:
+                result_i = src_nrows;
+                break;
+            case DL_AGG_SUM:
+            case DL_AGG_MIN:
+            case DL_AGG_MAX:
+            case DL_AGG_AVG:
+                if (src_nrows > 0) {
+                    ray_t* val_col =
+                        ray_table_get_col_idx(src_table, body->agg_value_col);
+                    if (!val_col) {
+                        ray_release(accum);
+                        return NULL;
+                    }
+                    if (val_col->type == RAY_I64) {
+                        int64_t* vd = (int64_t*)ray_data(val_col);
+                        if (body->agg_op == DL_AGG_SUM) {
+                            result_i = 0;
+                            for (int64_t i = 0; i < src_nrows; i++)
+                                result_i += vd[i];
+                        } else if (body->agg_op == DL_AGG_MIN) {
+                            result_i = vd[0];
+                            for (int64_t i = 1; i < src_nrows; i++) {
+                                if (vd[i] < result_i)
+                                    result_i = vd[i];
+                            }
+                        } else if (body->agg_op == DL_AGG_MAX) {
+                            result_i = vd[0];
+                            for (int64_t i = 1; i < src_nrows; i++) {
+                                if (vd[i] > result_i)
+                                    result_i = vd[i];
+                            }
+                        } else { /* DL_AGG_AVG */
+                            int64_t acc = 0;
+                            for (int64_t i = 0; i < src_nrows; i++)
+                                acc += vd[i];
+                            result_f = (double)acc / (double)src_nrows;
+                        }
+                    } else if (val_col->type == RAY_F64) {
+                        is_float = true;  /* SUM/MIN/MAX promote to f64 */
+                        double* vd = (double*)ray_data(val_col);
+                        if (body->agg_op == DL_AGG_SUM) {
+                            result_f = 0.0;
+                            for (int64_t i = 0; i < src_nrows; i++)
+                                result_f += vd[i];
+                        } else if (body->agg_op == DL_AGG_MIN) {
+                            result_f = vd[0];
+                            for (int64_t i = 1; i < src_nrows; i++) {
+                                if (vd[i] < result_f)
+                                    result_f = vd[i];
+                            }
+                        } else if (body->agg_op == DL_AGG_MAX) {
+                            result_f = vd[0];
+                            for (int64_t i = 1; i < src_nrows; i++) {
+                                if (vd[i] > result_f)
+                                    result_f = vd[i];
+                            }
+                        } else { /* DL_AGG_AVG */
+                            double acc = 0.0;
+                            for (int64_t i = 0; i < src_nrows; i++)
+                                acc += vd[i];
+                            result_f = acc / (double)src_nrows;
+                        }
+                    } else {
+                        /* Non-numeric source column — reject loudly rather than
+                         * silently returning zero. */
+                        ray_release(accum);
+                        prog->eval_err = true;
+                        return NULL;
+                    }
+                }
+                break;
+            default:
+                break;
+            }
+
+            int64_t nrows = ray_table_nrows(accum);
+            if (nrows == 0)
+                break;
+            ray_t* new_col = ray_vec_new(is_float ? RAY_F64 : RAY_I64, nrows);
+            /* Silent break would leave agg_target_var unbound and eval
+             * would keep running with a partially-constructed rule —
+             * surface the allocation failure so dl_eval returns -1. */
+            if (!new_col) {
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
+            if (RAY_IS_ERR(new_col)) {
+                ray_error_free(new_col);
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
+            new_col->len = nrows;
+            if (is_float) {
+                double* nd = (double*)ray_data(new_col);
+                for (int64_t r = 0; r < nrows; r++) nd[r] = result_f;
+            } else {
+                int64_t* nd = (int64_t*)ray_data(new_col);
+                for (int64_t r = 0; r < nrows; r++) nd[r] = result_i;
+            }
+
+            int new_col_idx = (int)ray_table_ncols(accum);
+            char colname[32];
+            snprintf(colname, sizeof(colname), "_g%d", body->agg_target_var);
+            ray_t* new_accum = dl_table_add_computed_col(accum, new_col, colname);
+            ray_release(new_col);
+            ray_release(accum);
+            accum = new_accum;
+
+            var_bound[body->agg_target_var] = true;
+            var_col[body->agg_target_var] = new_col_idx;
             break;
         }
 
@@ -1018,44 +1868,92 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
 
             ray_t* lhs_evaled = NULL;
             ray_t* rhs_evaled = NULL;
-            int64_t* lhs_data;
-            int64_t* rhs_data;
+            ray_t* lhs_src = NULL;  /* borrowed reference for type inspection */
+            ray_t* rhs_src = NULL;
 
             if (body->cmp_lhs_expr) {
-                /* Expression-based LHS */
                 lhs_evaled = dl_eval_expr(body->cmp_lhs_expr, accum, var_col, nrows);
-                if (!lhs_evaled || RAY_IS_ERR(lhs_evaled)) break;
-                lhs_data = (int64_t*)ray_data(lhs_evaled);
+                /* LHS evaluation failure can't be silently skipped — a
+                 * missing filter changes the query's answer. */
+                if (!lhs_evaled) {
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
+                }
+                if (RAY_IS_ERR(lhs_evaled)) {
+                    ray_error_free(lhs_evaled);
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
+                }
+                lhs_src = lhs_evaled;
             } else {
-                /* Simple variable LHS */
                 int lhs_col = var_col[body->cmp_lhs];
-                ray_t* lhs_vec = ray_table_get_col_idx(accum, lhs_col);
-                if (!lhs_vec) break;
-                lhs_data = (int64_t*)ray_data(lhs_vec);
+                lhs_src = ray_table_get_col_idx(accum, lhs_col);
+                if (!lhs_src) {
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
+                }
             }
 
             if (body->cmp_rhs_expr) {
-                /* Expression-based RHS */
                 rhs_evaled = dl_eval_expr(body->cmp_rhs_expr, accum, var_col, nrows);
-                if (!rhs_evaled || RAY_IS_ERR(rhs_evaled)) {
+                if (!rhs_evaled) {
                     if (lhs_evaled) ray_release(lhs_evaled);
-                    break;
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
                 }
-                rhs_data = (int64_t*)ray_data(rhs_evaled);
+                if (RAY_IS_ERR(rhs_evaled)) {
+                    ray_error_free(rhs_evaled);
+                    if (lhs_evaled) ray_release(lhs_evaled);
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
+                }
+                rhs_src = rhs_evaled;
             } else if (body->cmp_rhs != DL_CONST) {
-                /* Simple variable RHS */
                 int rhs_col = var_col[body->cmp_rhs];
-                ray_t* rhs_vec = ray_table_get_col_idx(accum, rhs_col);
-                if (!rhs_vec) {
+                rhs_src = ray_table_get_col_idx(accum, rhs_col);
+                if (!rhs_src) {
                     if (lhs_evaled) ray_release(lhs_evaled);
-                    break;
+                    prog->eval_err = true;
+                    ray_release(accum);
+                    return NULL;
                 }
-                rhs_data = (int64_t*)ray_data(rhs_vec);
-            } else {
-                rhs_data = NULL;  /* constant RHS */
+            }
+            /* else rhs is a constant i64 body->cmp_const */
+
+            /* Reject non-numeric sources — DL_CMP has no meaningful
+             * comparison for SYM/STR columns without an ordering hook. */
+            bool lhs_is_f64 = lhs_src && lhs_src->type == RAY_F64;
+            bool rhs_is_f64 = rhs_src && rhs_src->type == RAY_F64;
+            if (lhs_src && lhs_src->type != RAY_I64 && lhs_src->type != RAY_F64) {
+                if (lhs_evaled) ray_release(lhs_evaled);
+                if (rhs_evaled) ray_release(rhs_evaled);
+                prog->eval_err = true;
+                ray_release(accum);
+                return NULL;
+            }
+            if (rhs_src && rhs_src->type != RAY_I64 && rhs_src->type != RAY_F64) {
+                if (lhs_evaled) ray_release(lhs_evaled);
+                if (rhs_evaled) ray_release(rhs_evaled);
+                prog->eval_err = true;
+                ray_release(accum);
+                return NULL;
             }
 
-            /* Build boolean mask */
+            /* Promote to f64 iff either side is f64.  Otherwise stay in
+             * i64 arithmetic for speed and exact integer semantics. */
+            bool use_f64 = lhs_is_f64 || rhs_is_f64;
+            const int64_t* lhs_i = !use_f64 ? (const int64_t*)ray_data(lhs_src) : NULL;
+            const int64_t* rhs_i = !use_f64 && rhs_src ? (const int64_t*)ray_data(rhs_src) : NULL;
+            const double*  lhs_f = use_f64 && !lhs_is_f64 ? NULL
+                                 : (use_f64 ? (const double*)ray_data(lhs_src) : NULL);
+            const double*  rhs_f = use_f64 && rhs_src && rhs_is_f64
+                                 ? (const double*)ray_data(rhs_src) : NULL;
+
             ray_t* mask_block = ray_alloc((size_t)nrows * sizeof(bool));
             if (!mask_block) {
                 if (lhs_evaled) ray_release(lhs_evaled);
@@ -1065,16 +1963,37 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
             bool* mask = (bool*)ray_data(mask_block);
             int64_t count = 0;
             for (int64_t r = 0; r < nrows; r++) {
-                int64_t rv = rhs_data ? rhs_data[r] : body->cmp_const;
                 bool pass = false;
-                switch (body->cmp_op) {
-                case DL_CMP_EQ: pass = (lhs_data[r] == rv); break;
-                case DL_CMP_NE: pass = (lhs_data[r] != rv); break;
-                case DL_CMP_LT: pass = (lhs_data[r] <  rv); break;
-                case DL_CMP_LE: pass = (lhs_data[r] <= rv); break;
-                case DL_CMP_GT: pass = (lhs_data[r] >  rv); break;
-                case DL_CMP_GE: pass = (lhs_data[r] >= rv); break;
+                if (use_f64) {
+                    /* Widen the non-f64 side — mixed arithmetic is already
+                     * supported by dl_eval_expr, and DL_CMP_const is i64. */
+                    double lv = lhs_is_f64 ? lhs_f[r] : (double)((const int64_t*)ray_data(lhs_src))[r];
+                    double rv;
+                    if (rhs_src)
+                        rv = rhs_is_f64 ? rhs_f[r] : (double)((const int64_t*)ray_data(rhs_src))[r];
+                    else
+                        rv = (double)body->cmp_const;
+                    switch (body->cmp_op) {
+                    case DL_CMP_EQ: pass = (lv == rv); break;
+                    case DL_CMP_NE: pass = (lv != rv); break;
+                    case DL_CMP_LT: pass = (lv <  rv); break;
+                    case DL_CMP_LE: pass = (lv <= rv); break;
+                    case DL_CMP_GT: pass = (lv >  rv); break;
+                    case DL_CMP_GE: pass = (lv >= rv); break;
+                    }
+                } else {
+                    int64_t lv = lhs_i[r];
+                    int64_t rv = rhs_i ? rhs_i[r] : body->cmp_const;
+                    switch (body->cmp_op) {
+                    case DL_CMP_EQ: pass = (lv == rv); break;
+                    case DL_CMP_NE: pass = (lv != rv); break;
+                    case DL_CMP_LT: pass = (lv <  rv); break;
+                    case DL_CMP_LE: pass = (lv <= rv); break;
+                    case DL_CMP_GT: pass = (lv >  rv); break;
+                    case DL_CMP_GE: pass = (lv >= rv); break;
+                    }
                 }
+                (void)lhs_f;  /* silence unused warnings in non-f64 paths */
                 mask[r] = pass;
                 if (pass) count++;
             }
@@ -1087,22 +2006,72 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
                 break;  /* all rows pass */
             }
 
-            /* Build filtered table */
+            /* Build filtered table — element-size-aware memcpy so f64
+             * columns and narrow-SYM columns survive the mask unchanged.
+             * Silently `continue`-ing past missing columns would yield
+             * a table with fewer columns than accum, breaking schema
+             * invariants in downstream table_union.  Treat every such
+             * failure as unrecoverable. */
             int64_t ncols = ray_table_ncols(accum);
             ray_t* out = ray_table_new((int)ncols);
+            if (!out || RAY_IS_ERR(out)) {
+                if (out && RAY_IS_ERR(out)) ray_error_free(out);
+                ray_free(mask_block);
+                ray_release(accum);
+                prog->eval_err = true;
+                return NULL;
+            }
             for (int64_t c = 0; c < ncols; c++) {
                 ray_t* src = ray_table_get_col_idx(accum, c);
-                if (!src) continue;
-                ray_t* dst = ray_vec_new(src->type, count);
-                if (!dst || RAY_IS_ERR(dst)) continue;
+                if (!src) {
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                ray_t* dst = (src->type == RAY_SYM)
+                    ? ray_sym_vec_new(src->attrs & RAY_SYM_W_MASK, count)
+                    : ray_vec_new(src->type, count);
+                if (!dst) {
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (RAY_IS_ERR(dst)) {
+                    ray_error_free(dst);
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
                 dst->len = count;
-                int64_t* src_d = (int64_t*)ray_data(src);
-                int64_t* dst_d = (int64_t*)ray_data(dst);
+                uint8_t esz = ray_sym_elem_size(src->type, src->attrs);
+                const uint8_t* sb = (const uint8_t*)ray_data(src);
+                uint8_t* db = (uint8_t*)ray_data(dst);
                 int64_t j = 0;
                 for (int64_t r = 0; r < nrows; r++)
-                    if (mask[r]) dst_d[j++] = src_d[r];
-                out = ray_table_add_col(out, ray_table_col_name(accum, c), dst);
+                    if (mask[r]) {
+                        memcpy(db + (size_t)j * esz, sb + (size_t)r * esz, esz);
+                        j++;
+                    }
+                if (src->type == RAY_STR) col_propagate_str_pool(dst, src);
+                ray_t* next = ray_table_add_col(out, ray_table_col_name(accum, c), dst);
                 ray_release(dst);
+                if (!next) {
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                if (RAY_IS_ERR(next)) {
+                    ray_error_free(next);
+                    ray_release(out); ray_free(mask_block);
+                    ray_release(accum);
+                    prog->eval_err = true;
+                    return NULL;
+                }
+                out = next;
             }
             ray_free(mask_block);
             ray_release(accum);
@@ -1140,8 +2109,20 @@ ray_op_t* dl_compile_rule(dl_program_t* prog, dl_rule_t* rule,
         }
     }
 
-    ray_t* projected = dl_project(accum, proj_cols, rule->head_arity, head_rel);
+    ray_t* projected = dl_project(accum, proj_cols, rule->head_arity, head_rel,
+                                   rule->head_consts, rule->head_const_types);
     ray_release(accum);
+
+    /* dl_project now surfaces hard failures (alloc OOM, type errors, add-col
+     * errors) as RAY_ERROR objects.  Catch those here and flag the program
+     * so dl_eval can return -1 instead of silently dropping the rule's
+     * output via the const_table/execute chain. */
+    if (!projected) return NULL;
+    if (RAY_IS_ERR(projected)) {
+        ray_error_free(projected);
+        prog->eval_err = true;
+        return NULL;
+    }
 
     /* Store result in the graph as a const_table so the caller can execute */
     ray_op_t* result_node = ray_const_table(g, projected);
@@ -1218,25 +2199,76 @@ static ray_t* restore_names(ray_t* tbl, ray_t* src) {
 /* Create a table by concatenating all rows from tables a and b (same schema).
  * Uses column-wise ray_vec_concat. Returns new owned table with a's names. */
 static ray_t* table_union(ray_t* a, ray_t* b) {
-    if (!a || RAY_IS_ERR(a)) return b;
-    if (!b || RAY_IS_ERR(b)) return a;
+    /* Pass-through paths always return a retained non-NULL result so
+     * callers can release uniformly.  A NULL operand falls back to the
+     * other side; a RAY_ERROR operand is *propagated* (retained) rather
+     * than masked by the non-error side — otherwise a real failure on
+     * `b` would silently surface as `a` and the caller would never see
+     * the error.  ray_retain is a no-op on errors so the retain call is
+     * safe and keeps the contract "release is always valid". */
+    if (!a) {
+        if (b) ray_retain(b);
+        return b;
+    }
+    if (RAY_IS_ERR(a)) {
+        ray_retain(a);  /* no-op for errors; documents "owned return" */
+        return a;
+    }
+    if (!b) { ray_retain(a); return a; }
+    if (RAY_IS_ERR(b)) {
+        ray_retain(b);
+        return b;
+    }
+
+    /* Column-count check must run before the empty-rows short-circuit.
+     * Otherwise one side having 0 rows but a stripped schema (e.g. an
+     * antijoin result that collapsed to (0 rows, 0 cols)) would silently
+     * return the other side's schema and the caller would store a table
+     * whose arity differs from what it expected. */
+    int64_t ncols_a = ray_table_ncols(a);
+    int64_t ncols_b = ray_table_ncols(b);
+    if (ncols_a != ncols_b)
+        return ray_error("schema", "table_union: column count mismatch");
+    int64_t ncols = ncols_a;
+
     if (ray_table_nrows(a) == 0) { ray_retain(b); return b; }
     if (ray_table_nrows(b) == 0) { ray_retain(a); return a; }
 
-    int64_t ncols_a = ray_table_ncols(a);
-    int64_t ncols_b = ray_table_ncols(b);
-    int64_t ncols = ncols_a < ncols_b ? ncols_a : ncols_b;
-
     ray_t* out = ray_table_new((int)ncols);
+    if (!out || RAY_IS_ERR(out))
+        return out ? out : ray_error("memory", "table_union: table_new");
     for (int64_t c = 0; c < ncols; c++) {
         ray_t* col_a = ray_table_get_col_idx(a, c);
         ray_t* col_b = ray_table_get_col_idx(b, c);
-        if (!col_a || !col_b) continue;
-        ray_t* merged = ray_vec_concat(col_a, col_b);
-        if (merged && !RAY_IS_ERR(merged)) {
-            out = ray_table_add_col(out, ray_table_col_name(a, c), merged);
-            ray_release(merged);
+        if (!col_a || !col_b) {
+            /* Silently dropping a column would produce a schema-incomplete
+             * result that the caller mistakes for a successful union. */
+            ray_release(out);
+            return ray_error("domain", "table_union: missing column");
         }
+        ray_t* merged = ray_vec_concat(col_a, col_b);
+        if (!merged) {
+            ray_release(out);
+            return ray_error("memory", "table_union: concat");
+        }
+        if (RAY_IS_ERR(merged)) {
+            /* Propagate the original error (e.g. "type" for schema
+             * mismatch) so callers see the real diagnostic instead of
+             * a generic "memory". */
+            ray_release(out);
+            return merged;
+        }
+        ray_t* next = ray_table_add_col(out, ray_table_col_name(a, c), merged);
+        ray_release(merged);
+        if (!next) {
+            ray_release(out);
+            return ray_error("memory", "table_union: add_col");
+        }
+        if (RAY_IS_ERR(next)) {
+            ray_release(out);
+            return next;
+        }
+        out = next;
     }
     return out;
 }
@@ -1251,9 +2283,14 @@ static ray_t* table_distinct(ray_t* tbl) {
     if (ncols <= 0) { ray_retain(tbl); return tbl; }
 
     ray_t* canonical = canonicalize(tbl);
+    if (!canonical || RAY_IS_ERR(canonical))
+        return canonical ? canonical : ray_error("memory", "table_distinct: canonicalize");
 
     ray_graph_t* g = ray_graph_new(canonical);
-    if (!g) { ray_release(canonical); ray_retain(tbl); return tbl; }
+    if (!g) {
+        ray_release(canonical);
+        return ray_error("memory", "table_distinct: graph_new");
+    }
 
     ray_op_t* keys[DL_MAX_ARITY];
     for (int64_t c = 0; c < ncols && c < DL_MAX_ARITY; c++) {
@@ -1288,10 +2325,20 @@ static ray_t* table_antijoin(ray_t* left, ray_t* right) {
     if (ncols <= 0) { ray_retain(left); return left; }
 
     ray_t* cl = canonicalize(left);
+    if (!cl || RAY_IS_ERR(cl))
+        return cl ? cl : ray_error("memory", "table_antijoin: canonicalize left");
     ray_t* cr = canonicalize(right);
+    if (!cr || RAY_IS_ERR(cr)) {
+        ray_release(cl);
+        return cr ? cr : ray_error("memory", "table_antijoin: canonicalize right");
+    }
 
     ray_graph_t* g = ray_graph_new(NULL);
-    if (!g) { ray_release(cl); ray_release(cr); ray_retain(left); return left; }
+    if (!g) {
+        ray_release(cl);
+        ray_release(cr);
+        return ray_error("memory", "table_antijoin: graph_new");
+    }
 
     ray_op_t* l = ray_const_table(g, cl);
     ray_op_t* r = ray_const_table(g, cr);
@@ -1544,6 +2591,17 @@ static void dl_build_provenance(dl_program_t* prog) {
 int dl_eval(dl_program_t* prog) {
     if (!prog) return -1;
 
+    /* eval_err is sticky: it may have been raised at rule-add time (e.g.
+     * by a head-const type conflict in dl_idb_align_head_const_types) —
+     * resetting here would silently discard that signal.  Additional
+     * failures during stratify/compile/exec below keep setting the flag,
+     * and the final return honors it either way. */
+    if (prog->eval_err) {
+        /* Short-circuit: compile-time errors already stand; don't run
+         * a potentially broken fixpoint. */
+        return -1;
+    }
+
     /* Stratify if not already done */
     if (prog->n_strata == 0) {
         if (dl_stratify(prog) != 0) return -1;
@@ -1573,32 +2631,39 @@ int dl_eval(dl_program_t* prog) {
             dl_rel_t* head_rel = &prog->rels[head_idx];
 
             ray_graph_t* g = ray_graph_new(NULL);
-            if (!g) continue;
+            if (!g) { prog->eval_err = true; continue; }
 
             ray_op_t* output = dl_compile_rule(prog, rule, -1, stratum_rule_idx[ri], g);
-            if (!output) { ray_graph_free(g); continue; }
+            if (!output) {
+                /* dl_compile_rule marks eval_err on genuine failures; a bare
+                 * NULL means "rule has no rows this pass" — not a fault. */
+                ray_graph_free(g);
+                continue;
+            }
 
             ray_t* raw_tuples = ray_execute(g, output);
             ray_graph_free(g);
 
-            if (!raw_tuples || RAY_IS_ERR(raw_tuples)) continue;
+            if (!raw_tuples) continue;
+            if (RAY_IS_ERR(raw_tuples)) { prog->eval_err = true; ray_error_free(raw_tuples); continue; }
 
             /* Rename columns to match head relation's expected names */
             ray_t* new_tuples = table_rename_cols(raw_tuples, head_rel);
             ray_release(raw_tuples);
-            if (!new_tuples || RAY_IS_ERR(new_tuples)) continue;
+            if (!new_tuples) continue;
+            if (RAY_IS_ERR(new_tuples)) { prog->eval_err = true; ray_error_free(new_tuples); continue; }
 
             /* Merge into the head relation's table */
             ray_t* merged = table_union(head_rel->table, new_tuples);
             ray_release(new_tuples);
-            if (merged && !RAY_IS_ERR(merged)) {
-                ray_t* deduped = table_distinct(merged);
-                ray_release(merged);
-                if (deduped && !RAY_IS_ERR(deduped)) {
-                    ray_release(head_rel->table);
-                    head_rel->table = deduped;
-                }
-            }
+            if (!merged) { prog->eval_err = true; continue; }
+            if (RAY_IS_ERR(merged)) { prog->eval_err = true; ray_error_free(merged); continue; }
+            ray_t* deduped = table_distinct(merged);
+            ray_release(merged);
+            if (!deduped) { prog->eval_err = true; continue; }
+            if (RAY_IS_ERR(deduped)) { prog->eval_err = true; ray_error_free(deduped); continue; }
+            ray_release(head_rel->table);
+            head_rel->table = deduped;
         }
 
         /* Phase B: Semi-naive loop — iterate with delta relations */
@@ -1616,10 +2681,15 @@ int dl_eval(dl_program_t* prog) {
             if (rel->is_idb) {
                 ray_retain(rel->table);
                 delta_tables[rel_idx] = rel->table;
-                /* prev = empty table with same schema as the relation */
+                /* prev = empty table with same schema as the relation.
+                 * Column types must match rel->table so later ray_vec_concat
+                 * calls don't reject the merge when the relation has
+                 * non-i64 columns (e.g. RAY_SYM from head-constant slots). */
                 prev_tables[rel_idx] = ray_table_new(rel->arity);
                 for (int c = 0; c < rel->arity && c < DL_MAX_ARITY; c++) {
-                    ray_t* empty_col = ray_vec_new(RAY_I64, 0);
+                    ray_t* src = ray_table_get_col_idx(rel->table, c);
+                    int8_t ctype = src ? src->type : RAY_I64;
+                    ray_t* empty_col = ray_vec_new(ctype, 0);
                     if (empty_col && !RAY_IS_ERR(empty_col)) {
                         prev_tables[rel_idx] = ray_table_add_col(
                             prev_tables[rel_idx], rel->col_names[c], empty_col);
@@ -1670,12 +2740,19 @@ int dl_eval(dl_program_t* prog) {
                     prog->rels[body_rel].table = delta_tables[body_rel];
 
                     ray_graph_t* g = ray_graph_new(NULL);
-                    if (!g) { prog->rels[body_rel].table = saved; continue; }
+                    if (!g) {
+                        prog->rels[body_rel].table = saved;
+                        prog->eval_err = true;
+                        continue;
+                    }
 
                     ray_op_t* output = dl_compile_rule(prog, rule, b, stratum_rule_idx[ri], g);
                     if (!output) {
                         ray_graph_free(g);
                         prog->rels[body_rel].table = saved;
+                        /* dl_compile_rule sets eval_err itself on genuine
+                         * failures; NULL without the flag means "rule yields
+                         * no rows this iteration" and should not fault. */
                         continue;
                     }
 
@@ -1683,19 +2760,32 @@ int dl_eval(dl_program_t* prog) {
                     ray_graph_free(g);
                     prog->rels[body_rel].table = saved;
 
-                    if (!raw_result || RAY_IS_ERR(raw_result)) continue;
+                    if (!raw_result) continue;
+                    if (RAY_IS_ERR(raw_result)) { prog->eval_err = true; ray_error_free(raw_result); continue; }
 
                     /* Rename columns to match head relation */
                     dl_rel_t* head_rel2 = &prog->rels[head_idx];
                     ray_t* result = table_rename_cols(raw_result, head_rel2);
                     ray_release(raw_result);
-                    if (!result || RAY_IS_ERR(result)) continue;
+                    if (!result) continue;
+                    if (RAY_IS_ERR(result)) { prog->eval_err = true; ray_error_free(result); continue; }
 
                     /* Accumulate new tuples for this head */
                     if (new_tuples_per_rel[head_idx]) {
                         ray_t* u = table_union(new_tuples_per_rel[head_idx], result);
                         ray_release(new_tuples_per_rel[head_idx]);
                         ray_release(result);
+                        if (!u) {
+                            prog->eval_err = true;
+                            new_tuples_per_rel[head_idx] = NULL;
+                            continue;
+                        }
+                        if (RAY_IS_ERR(u)) {
+                            prog->eval_err = true;
+                            ray_error_free(u);
+                            new_tuples_per_rel[head_idx] = NULL;
+                            continue;
+                        }
                         new_tuples_per_rel[head_idx] = u;
                     } else {
                         new_tuples_per_rel[head_idx] = result;
@@ -1715,7 +2805,10 @@ int dl_eval(dl_program_t* prog) {
                 delta_tables[rel_idx] = NULL;
 
                 ray_t* new_tuples = new_tuples_per_rel[rel_idx];
-                if (!new_tuples || RAY_IS_ERR(new_tuples)) {
+                if (!new_tuples) { delta_tables[rel_idx] = NULL; continue; }
+                if (RAY_IS_ERR(new_tuples)) {
+                    prog->eval_err = true;
+                    ray_error_free(new_tuples);
                     delta_tables[rel_idx] = NULL;
                     continue;
                 }
@@ -1723,22 +2816,30 @@ int dl_eval(dl_program_t* prog) {
                 /* Deduplicate */
                 ray_t* deduped = table_distinct(new_tuples);
                 ray_release(new_tuples);
-                if (!deduped || RAY_IS_ERR(deduped)) continue;
+                if (!deduped) { prog->eval_err = true; continue; }
+                if (RAY_IS_ERR(deduped)) { prog->eval_err = true; ray_error_free(deduped); continue; }
 
                 /* Subtract existing relation to get true delta */
                 ray_t* delta = table_antijoin(deduped, rel->table);
                 ray_release(deduped);
-                if (!delta || RAY_IS_ERR(delta)) continue;
+                if (!delta) { prog->eval_err = true; continue; }
+                if (RAY_IS_ERR(delta)) { prog->eval_err = true; ray_error_free(delta); continue; }
 
                 delta_tables[rel_idx] = delta;
 
-                /* Merge delta into full relation */
+                /* Merge delta into full relation.  A merge failure here
+                 * leaves delta_tables set but rel->table stale — that would
+                 * desync the fixpoint, so treat it as a hard failure. */
                 if (ray_table_nrows(delta) > 0) {
                     ray_t* merged = table_union(rel->table, delta);
-                    if (merged && !RAY_IS_ERR(merged)) {
-                        ray_release(rel->table);
-                        rel->table = merged;
+                    if (!merged) { prog->eval_err = true; continue; }
+                    if (RAY_IS_ERR(merged)) {
+                        prog->eval_err = true;
+                        ray_error_free(merged);
+                        continue;
                     }
+                    ray_release(rel->table);
+                    rel->table = merged;
                 }
             }
 
@@ -1766,7 +2867,11 @@ int dl_eval(dl_program_t* prog) {
     if (prog->flags & DL_FLAG_PROVENANCE)
         dl_build_provenance(prog);
 
-    return 0;
+    /* Any compile-time or runtime error surfaced by a rule causes dl_eval
+     * to report failure, so callers (notably ray_query_fn) can turn this
+     * into a user-visible "evaluation failed" error instead of shipping a
+     * silently-incomplete result. */
+    return prog->eval_err ? -1 : 0;
 }
 
 /* ========================================================================
@@ -2162,6 +3267,12 @@ static int is_dl_var(ray_t* x) {
 static dl_rule_t  g_dl_rules[DL_MAX_RULES];
 static int        g_dl_n_rules = 0;
 
+void dl_append_global_rules(dl_program_t* prog) {
+    if (!prog) return;
+    for (int i = 0; i < g_dl_n_rules; i++)
+        dl_add_rule(prog, &g_dl_rules[i]);
+}
+
 /* Variable name -> index map for parsing a single rule or query body */
 typedef struct {
     int64_t syms[DL_MAX_ARITY * DL_MAX_BODY];
@@ -2204,6 +3315,8 @@ static dl_expr_t* dl_build_expr(ray_t* node, dl_var_map_t* vars) {
     if (!node) return NULL;
     if (node->type == -RAY_I64)
         return dl_expr_const(node->i64);
+    if (node->type == -RAY_F64)
+        return dl_expr_const_f64(node->f64);
     if (node->type == -RAY_SYM && is_dl_var(node)) {
         int vi = dl_var_get_or_create(vars, node->i64);
         return (vi >= 0) ? dl_expr_var(vi) : NULL;
@@ -2288,6 +3401,33 @@ static bool dl_is_assignment(ray_t* clause) {
     return is_dl_var(ce[1]);
 }
 
+static bool dl_is_aggregate(ray_t* clause) {
+    if (!is_list(clause) || ray_len(clause) < 3) return false;
+    ray_t** ce = (ray_t**)ray_data(clause);
+    if (ce[0]->type != -RAY_SYM) return false;
+    ray_t* name = ray_sym_str(ce[0]->i64);
+    if (!name) return false;
+    const char* n = ray_str_ptr(name);
+    return strcmp(n, "count") == 0 || strcmp(n, "sum") == 0
+        || strcmp(n, "min")   == 0 || strcmp(n, "max") == 0
+        || strcmp(n, "avg")   == 0;
+}
+
+static int dl_agg_op_from_name(const char* n) {
+    if (strcmp(n, "count") == 0) return DL_AGG_COUNT;
+    if (strcmp(n, "sum")   == 0) return DL_AGG_SUM;
+    if (strcmp(n, "min")   == 0) return DL_AGG_MIN;
+    if (strcmp(n, "max")   == 0) return DL_AGG_MAX;
+    if (strcmp(n, "avg")   == 0) return DL_AGG_AVG;
+    return -1;
+}
+
+static bool dl_sym_is_name(ray_t* sym, const char* lit) {
+    if (!sym || sym->type != -RAY_SYM) return false;
+    ray_t* s = ray_sym_str(sym->i64);
+    return s && strcmp(ray_str_ptr(s), lit) == 0;
+}
+
 /* Resolve an AST node to a variable or constant in a body atom.
  * Sets the body position to either a variable or constant.
  * For expressions like (quote x), evaluates them first. */
@@ -2314,6 +3454,14 @@ static ray_t* dl_set_body_pos(dl_rule_t* rule, int bidx, int pos,
         }
         return NULL;
     }
+    if (node->type == -RAY_STR) {
+        /* Quoted string literal in body: intern as sym so it compares
+         * equal to other sym-interned constants.  Mirrors the head
+         * parser convention. */
+        int64_t sym = ray_sym_intern(ray_str_ptr(node), ray_str_len(node));
+        dl_body_set_const(rule, bidx, pos, sym);
+        return NULL;
+    }
     /* For other forms (e.g., (quote x)), evaluate to get constant */
     ray_t* val = ray_eval(node);
     if (!val || RAY_IS_ERR(val))
@@ -2334,7 +3482,7 @@ static ray_t* dl_set_body_pos(dl_rule_t* rule, int bidx, int pos,
  * Handles triple patterns, negations, comparisons, assignments,
  * and rule invocations (positive atoms). */
 static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
-                                     dl_var_map_t* vars) {
+                                     dl_var_map_t* vars, dl_program_t* prog) {
     if (!is_list(clause) || ray_len(clause) < 1)
         return ray_error("type", "rule/query: body clause must be a list");
 
@@ -2395,6 +3543,109 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
             }
         }
         return NULL;
+    }
+
+    /* -- Aggregate: (count ?N pred) | (sum ?S pred col) | ... [by ?k col ...] -- */
+    if (dl_is_aggregate(clause)) {
+        ray_t* op_str = ray_sym_str(ce[0]->i64);
+        if (!op_str) return ray_error("type", "aggregate: bad operator");
+        int op = dl_agg_op_from_name(ray_str_ptr(op_str));
+        if (op < 0) return ray_error("type", "aggregate: unknown operator");
+
+        if (!is_dl_var(ce[1]))
+            return ray_error("type", "aggregate: first argument must be ?variable");
+        int target_vi = dl_var_get_or_create(vars, ce[1]->i64);
+        if (target_vi < 0)
+            return ray_error("domain", "aggregate: too many variables");
+
+        if (ce[2]->type != -RAY_SYM)
+            return ray_error("type", "aggregate: predicate must be a symbol");
+        ray_t* pred_sym = ray_sym_str(ce[2]->i64);
+        if (!pred_sym)
+            return ray_error("type", "aggregate: cannot resolve predicate name");
+        const char* pred_name = ray_str_ptr(pred_sym);
+
+        /* Record arity=0 as "unknown" when we can't resolve it against the
+         * program (prog=NULL or predicate not yet registered).  The compiler
+         * and env auto-register treat 0 as a wildcard and resolve against the
+         * source relation at evaluation time.  A hardcoded 1 would spuriously
+         * reject any env-bound table whose arity isn't 1. */
+        int pred_arity = 0;
+        if (prog) {
+            int ri = dl_find_rel(prog, pred_name);
+            if (ri >= 0) pred_arity = prog->rels[ri].arity;
+        }
+
+        int i = 3;
+        bool has_value_col = false;
+        int value_col = 0;
+        int key_vars[DL_AGG_MAX_KEYS];
+        int key_cols[DL_AGG_MAX_KEYS];
+        int n_keys = 0;
+
+        while (i < clen) {
+            if (dl_sym_is_name(ce[i], "by")) {
+                i++;
+                while (i < clen) {
+                    if (!is_dl_var(ce[i]))
+                        return ray_error("type", "aggregate: group key must be ?variable");
+                    if (n_keys >= DL_AGG_MAX_KEYS)
+                        return ray_error("domain", "aggregate: too many group keys");
+                    key_vars[n_keys] = dl_var_get_or_create(vars, ce[i]->i64);
+                    i++;
+                    if (i >= clen || ce[i]->type != -RAY_I64)
+                        return ray_error("type", "aggregate: group key column must be integer");
+                    key_cols[n_keys] = (int)ce[i]->i64;
+                    i++;
+                    n_keys++;
+                }
+                break;
+            }
+            if (ce[i]->type == -RAY_I64) {
+                if (has_value_col)
+                    return ray_error("type", "aggregate: at most one value column index");
+                has_value_col = true;
+                value_col = (int)ce[i]->i64;
+                i++;
+                continue;
+            }
+            return ray_error("type", "aggregate: unexpected token in aggregate clause");
+        }
+
+        if (op == DL_AGG_COUNT) {
+            if (has_value_col)
+                return ray_error("type", "aggregate: count does not take a value column");
+        } else {
+            if (!has_value_col)
+                return ray_error("type", "aggregate: sum/min/max/avg require a value column index");
+        }
+
+        int bidx = dl_rule_add_agg(rule, op, target_vi, pred_name, pred_arity, has_value_col ? value_col : 0);
+        if (bidx < 0) return ray_error("domain", "rule: too many body literals");
+        if (n_keys > 0) {
+            if (dl_rule_agg_set_group(rule, bidx, key_vars, key_cols, n_keys) != 0)
+                return ray_error("domain", "aggregate: cannot attach group keys");
+        }
+        return NULL;
+    }
+
+    /* -- Between sugar: (between ?x lo hi) -> (>= ?x lo) and (<= ?x hi) -- */
+    if (clen == 4 && ce[0]->type == -RAY_SYM) {
+        ray_t* nm = ray_sym_str(ce[0]->i64);
+        if (nm && strcmp(ray_str_ptr(nm), "between") == 0) {
+            if (!is_dl_var(ce[1]))
+                return ray_error("type", "between target must be a ?variable");
+            int vi = dl_var_get_or_create(vars, ce[1]->i64);
+            if (vi < 0)
+                return ray_error("domain", "between: too many variables");
+            if (ce[2]->type != -RAY_I64 || ce[3]->type != -RAY_I64)
+                return ray_error("type", "between bounds must be integer constants");
+            if (dl_rule_add_cmp_const(rule, DL_CMP_GE, vi, ce[2]->i64) < 0)
+                return ray_error("domain", "rule: too many body literals");
+            if (dl_rule_add_cmp_const(rule, DL_CMP_LE, vi, ce[3]->i64) < 0)
+                return ray_error("domain", "rule: too many body literals");
+            return NULL;
+        }
     }
 
     /* -- Assignment: (= ?var expr) -- */
@@ -2474,7 +3725,7 @@ static ray_t* dl_parse_body_clause(dl_rule_t* rule, ray_t* clause,
 /* Parse head + body clauses into out (shared by rule and query inline rules). */
 static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
                                                 ray_t** body_args, int64_t n_body,
-                                                dl_var_map_t* vars) {
+                                                dl_var_map_t* vars, dl_program_t* prog) {
     if (!is_list(head) || ray_len(head) < 1)
         return ray_error("type", "rule: head must be (name ?var ...)");
 
@@ -2500,16 +3751,25 @@ static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
             int vi = dl_var_get_or_create(vars, harg->i64);
             dl_rule_head_var(out, i, vi);
         } else if (harg->type == -RAY_I64) {
-            dl_rule_head_const(out, i, harg->i64);
+            dl_rule_head_const_typed(out, i, harg->i64, RAY_I64);
         } else if (harg->type == -RAY_SYM) {
-            dl_rule_head_const(out, i, harg->i64);
+            dl_rule_head_const_typed(out, i, harg->i64, RAY_SYM);
+        } else if (harg->type == -RAY_F64) {
+            int64_t bits;
+            memcpy(&bits, &harg->f64, sizeof(bits));
+            dl_rule_head_const_typed(out, i, bits, RAY_F64);
+        } else if (harg->type == -RAY_STR) {
+            /* Intern the string as a sym so it can be stored in a RAY_SYM
+             * column.  Matches the body-literal parser convention. */
+            int64_t sym = ray_sym_intern(ray_str_ptr(harg), ray_str_len(harg));
+            dl_rule_head_const_typed(out, i, sym, RAY_SYM);
         } else {
             return ray_error("type", "rule: head arguments must be ?variables or constants");
         }
     }
 
     for (int64_t i = 0; i < n_body; i++) {
-        ray_t* err = dl_parse_body_clause(out, body_args[i], vars);
+        ray_t* err = dl_parse_body_clause(out, body_args[i], vars, prog);
         if (err) return err;
     }
 
@@ -2518,7 +3778,7 @@ static ray_t* dl_parse_rule_from_head_and_body(dl_rule_t* out, ray_t* head,
 }
 
 /* One inline rule: ((head-name ?a ...) body1 body2 ...) */
-static ray_t* dl_parse_inline_rule(dl_rule_t* out, ray_t* rule_list) {
+static ray_t* dl_parse_inline_rule(dl_rule_t* out, ray_t* rule_list, dl_program_t* prog) {
     if (!is_list(rule_list) || ray_len(rule_list) < 1)
         return ray_error("type", "query: each (rules ...) entry must be a non-empty list");
 
@@ -2526,7 +3786,7 @@ static ray_t* dl_parse_inline_rule(dl_rule_t* out, ray_t* rule_list) {
     int64_t rlen = ray_len(rule_list);
     dl_var_map_t vars;
     memset(&vars, 0, sizeof(vars));
-    return dl_parse_rule_from_head_and_body(out, re[0], &re[1], rlen - 1, &vars);
+    return dl_parse_rule_from_head_and_body(out, re[0], &re[1], rlen - 1, &vars, prog);
 }
 
 /* (rule (head-name ?v1 ?v2 ...) clause1 clause2 ...)
@@ -2542,7 +3802,7 @@ ray_t* ray_rule_fn(ray_t** args, int64_t n) {
     dl_var_map_t vars;
     memset(&vars, 0, sizeof(vars));
     dl_rule_t rule;
-    ray_t* perr = dl_parse_rule_from_head_and_body(&rule, args[0], &args[1], n - 1, &vars);
+    ray_t* perr = dl_parse_rule_from_head_and_body(&rule, args[0], &args[1], n - 1, &vars, NULL);
     if (perr) return perr;
 
     memcpy(&g_dl_rules[g_dl_n_rules++], &rule, sizeof(dl_rule_t));
@@ -2652,7 +3912,7 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
 
     /* Parse body clauses into the query rule */
     for (int64_t i = 1; i < where_len; i++) {
-        ray_t* err = dl_parse_body_clause(&qrule, where_elems[i], &vars);
+        ray_t* err = dl_parse_body_clause(&qrule, where_elems[i], &vars, NULL);
         if (err) { ray_release(db); return err; }
     }
     qrule.n_vars = vars.n;
@@ -2694,7 +3954,7 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
         int64_t rlen = ray_len(rules_clause);
         for (int64_t i = 1; i < rlen; i++) {
             dl_rule_t irule;
-            ray_t* rerr = dl_parse_inline_rule(&irule, re[i]);
+            ray_t* rerr = dl_parse_inline_rule(&irule, re[i], prog);
             if (rerr) {
                 dl_program_free(prog);
                 ray_release(db);
@@ -2713,6 +3973,120 @@ ray_t* ray_query_fn(ray_t** args, int64_t n) {
 
     /* Add the synthetic query rule */
     dl_add_rule(prog, &qrule);
+
+    /* Auto-register env-bound EDB tables referenced from rule bodies.
+     *
+     * Rationale: the primary `db` argument becomes the `eav` EDB (above).
+     * User rules can also reference additional relations by name
+     * (e.g. `(facts_i64 ?e ?a ?v)`). Rather than force callers to pre-declare
+     * every EDB, scan the program's rule bodies for positive / negative atom
+     * predicates that are not yet known as a relation, look them up in the
+     * global ray env, and register them when they resolve to a RAY_TABLE of
+     * matching arity. SYM columns are converted to I64 (same treatment as
+     * the primary `eav` table).
+     *
+     * Aggregate sources are handled too (`DL_AGG` uses `agg_pred`).
+     * The built-in synthetic "__query" / "eav" names are skipped. */
+    for (int ri = 0; ri < prog->n_rules; ri++) {
+        dl_rule_t* rr = &prog->rules[ri];
+        for (int bi = 0; bi < rr->n_body; bi++) {
+            dl_body_t* bd = &rr->body[bi];
+            const char* pred_name = NULL;
+            int pred_arity = 0;
+
+            if (bd->type == DL_POS || bd->type == DL_NEG) {
+                pred_name = bd->pred;
+                pred_arity = bd->arity;
+            } else if (bd->type == DL_AGG) {
+                pred_name = bd->agg_pred;
+                pred_arity = bd->agg_arity;
+            } else {
+                continue;
+            }
+
+            if (!pred_name || pred_name[0] == '\0') continue;
+            if (strcmp(pred_name, "eav") == 0) continue;
+            if (dl_find_rel(prog, pred_name) >= 0) continue;
+
+            int64_t env_sym = ray_sym_intern(pred_name, strlen(pred_name));
+            ray_t* env_val = ray_env_get(env_sym);
+            if (!env_val || env_val->type != RAY_TABLE) continue;
+            int64_t ncols = ray_table_ncols(env_val);
+            /* pred_arity == 0 is a "not yet known" sentinel used when the
+             * aggregate parser couldn't resolve the source predicate's arity
+             * at parse time (prog=NULL, surface syntax).  Resolve it from the
+             * env-bound table's column count now. */
+            if (pred_arity == 0) pred_arity = (int)ncols;
+            if (ncols != pred_arity) continue;
+
+            int64_t nrows_env = ray_table_nrows(env_val);
+            ray_t* clean = ray_table_new(pred_arity);
+            if (!clean || RAY_IS_ERR(clean)) {
+                if (clean) ray_release(clean);
+                dl_program_free(prog);
+                ray_release(db);
+                return ray_error("memory", "query: failed to create env-backed EDB table");
+            }
+            for (int c = 0; c < pred_arity; c++) {
+                ray_t* col = ray_table_get_col_idx(env_val, c);
+                ray_t* next_clean;
+                if (!col) {
+                    /* Silently skipping would build `clean` with fewer than
+                     * pred_arity columns yet still register it via dl_add_edb
+                     * — the program would see a schema-inconsistent EDB. */
+                    ray_release(clean);
+                    dl_program_free(prog);
+                    ray_release(db);
+                    return ray_error("schema", "query: env-backed EDB table missing expected column");
+                }
+                if (col->type == RAY_SYM) {
+                    ray_t* i64col = ray_vec_new(RAY_I64, nrows_env);
+                    if (!i64col) {
+                        ray_release(clean);
+                        dl_program_free(prog);
+                        ray_release(db);
+                        return ray_error("memory", "query: failed to convert env-backed SYM column");
+                    }
+                    if (RAY_IS_ERR(i64col)) {
+                        ray_error_free(i64col);
+                        ray_release(clean);
+                        dl_program_free(prog);
+                        ray_release(db);
+                        return ray_error("memory", "query: failed to convert env-backed SYM column");
+                    }
+                    i64col->len = nrows_env;
+                    int64_t* d = (int64_t*)ray_data(i64col);
+                    for (int64_t r = 0; r < nrows_env; r++)
+                        d[r] = ray_read_sym(ray_data(col), r, col->type, col->attrs);
+                    next_clean = ray_table_add_col(clean, ray_table_col_name(env_val, c), i64col);
+                    ray_release(i64col);
+                } else {
+                    next_clean = ray_table_add_col(clean, ray_table_col_name(env_val, c), col);
+                }
+                if (!next_clean) {
+                    ray_release(clean);
+                    dl_program_free(prog);
+                    ray_release(db);
+                    return ray_error("memory", "query: failed to build env-backed EDB table");
+                }
+                if (RAY_IS_ERR(next_clean)) {
+                    ray_error_free(next_clean);
+                    ray_release(clean);
+                    dl_program_free(prog);
+                    ray_release(db);
+                    return ray_error("memory", "query: failed to build env-backed EDB table");
+                }
+                clean = next_clean;
+            }
+            if (dl_add_edb(prog, pred_name, clean, pred_arity) < 0) {
+                ray_release(clean);
+                dl_program_free(prog);
+                ray_release(db);
+                return ray_error("domain", "query: failed to register env-backed EDB table");
+            }
+            ray_release(clean);
+        }
+    }
 
     /* Stratify and evaluate */
     if (dl_stratify(prog) != 0) {
