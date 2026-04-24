@@ -1,0 +1,20 @@
+;; Invariants for `union` — distinct set combination.
+;; Current rayforce keeps A's duplicates and appends only new-from-B elements.
+;; Treat it as a weak "contains all and no extras beyond A" relation.
+
+(union [1 2 3] [3 4 5]) -- [1 2 3 4 5]
+(union [] [1 2]) -- [1 2]
+(union [1 2] []) -- [1 2]
+(union [1 2 3] [1 2 3]) -- [1 2 3]
+
+;; every element of A is in union(A,B)
+(set A [10 20 30])
+(set B [40 50])
+(count A) -- (sum (in A (union A B)))
+
+;; every element of B is in union(A,B)
+(count B) -- (sum (in B (union A B)))
+
+;; count is between distinct(A ++ B) and count(A) + count(B)
+1 -- (as 'I64 (>= (count (union A B)) (count (distinct (concat A B)))))
+1 -- (as 'I64 (<= (count (union A B)) (+ (count A) (count B))))

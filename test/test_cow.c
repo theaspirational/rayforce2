@@ -21,136 +21,124 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include <stdatomic.h>
 
 /* ---- Setup / Teardown -------------------------------------------------- */
 
-static void* cow_setup(const void* params, void* user_data) {
-    (void)params; (void)user_data;
+static void cow_setup(void) {
     ray_heap_init();
-    return NULL;
 }
 
-static void cow_teardown(void* fixture) {
-    (void)fixture;
+static void cow_teardown(void) {
     ray_heap_destroy();
 }
 
 /* ---- retain/release basic ---------------------------------------------- */
 
-static MunitResult test_retain_release(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_retain_release(void) {
     ray_t* v = ray_alloc(0);
-    munit_assert_ptr_not_null(v);
-    munit_assert_false(RAY_IS_ERR(v));
+    TEST_ASSERT_NOT_NULL(v);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(v));
 
     /* rc starts at 1 */
-    munit_assert_uint(v->rc, ==, 1);
+    TEST_ASSERT_EQ_U(v->rc, 1);
 
     /* retain -> rc=2 */
     ray_retain(v);
-    munit_assert_uint(v->rc, ==, 2);
+    TEST_ASSERT_EQ_U(v->rc, 2);
 
     /* release -> rc=1 */
     ray_release(v);
-    munit_assert_uint(v->rc, ==, 1);
+    TEST_ASSERT_EQ_U(v->rc, 1);
 
     /* release -> rc=0, block freed (don't access v after this) */
     ray_release(v);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- cow sole owner ---------------------------------------------------- */
 
-static MunitResult test_cow_sole_owner(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_cow_sole_owner(void) {
     ray_t* v = ray_alloc(0);
-    munit_assert_ptr_not_null(v);
+    TEST_ASSERT_NOT_NULL(v);
     v->type = -RAY_I64;
     v->i64 = 42;
 
     /* rc=1, sole owner -> cow returns same pointer */
     ray_t* w = ray_cow(v);
-    munit_assert_ptr_equal(v, w);
-    munit_assert_uint(w->rc, ==, 1);
+    TEST_ASSERT_EQ_PTR(v, w);
+    TEST_ASSERT_EQ_U(w->rc, 1);
 
     ray_release(w);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- cow shared -------------------------------------------------------- */
 
-static MunitResult test_cow_shared(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_cow_shared(void) {
     ray_t* v = ray_alloc(0);
-    munit_assert_ptr_not_null(v);
+    TEST_ASSERT_NOT_NULL(v);
     v->type = -RAY_I64;
     v->i64 = 99;
 
     /* retain to rc=2 (shared) */
     ray_retain(v);
-    munit_assert_uint(v->rc, ==, 2);
+    TEST_ASSERT_EQ_U(v->rc, 2);
 
     /* cow on shared object -> returns different pointer */
     ray_t* w = ray_cow(v);
-    munit_assert_ptr_not_null(w);
-    munit_assert_false(RAY_IS_ERR(w));
-    munit_assert_true((void*)w != (void*)v);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(w));
+    TEST_ASSERT_TRUE((void*)w != (void*)v);
 
     /* Copy should have rc=1 */
-    munit_assert_uint(w->rc, ==, 1);
+    TEST_ASSERT_EQ_U(w->rc, 1);
 
     /* Original should have rc=1 (cow decremented from 2 to 1) */
-    munit_assert_uint(v->rc, ==, 1);
+    TEST_ASSERT_EQ_U(v->rc, 1);
 
     /* Value should be preserved */
-    munit_assert_int(w->type, ==, -RAY_I64);
-    munit_assert_int(w->i64, ==, 99);
+    TEST_ASSERT_EQ_I(w->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(w->i64, 99);
 
     ray_release(v);
     ray_release(w);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- null/error safety ------------------------------------------------- */
 
-static MunitResult test_null_error_safety(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_null_error_safety(void) {
     /* These should not crash */
     ray_retain(NULL);
     ray_release(NULL);
     ray_t* r = ray_cow(NULL);
-    munit_assert_null(r);
+    TEST_ASSERT_NULL(r);
 
     /* Error objects (new model: ray_error returns a real ray_t with type RAY_ERROR) */
     ray_t* err = ray_error("oom", NULL);
-    munit_assert_true(RAY_IS_ERR(err));
+    TEST_ASSERT_TRUE(RAY_IS_ERR(err));
     ray_retain(err);
     ray_release(err);
     ray_t* r2 = ray_cow(err);
-    munit_assert_true(RAY_IS_ERR(r2));
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r2));
     ray_release(err);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- cow with vector data ---------------------------------------------- */
 
-static MunitResult test_cow_vector(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_cow_vector(void) {
     /* Create a vector with actual data */
     size_t data_size = 10 * sizeof(int64_t);
     ray_t* v = ray_alloc(data_size);
-    munit_assert_ptr_not_null(v);
+    TEST_ASSERT_NOT_NULL(v);
     v->type = RAY_I64;
     v->len = 10;
     int64_t* data = (int64_t*)ray_data(v);
@@ -161,33 +149,31 @@ static MunitResult test_cow_vector(const void* params, void* fixture) {
     /* Share and cow */
     ray_retain(v);
     ray_t* w = ray_cow(v);
-    munit_assert_ptr_not_null(w);
-    munit_assert_true((void*)w != (void*)v);
-    munit_assert_int(w->type, ==, RAY_I64);
-    munit_assert_int(w->len, ==, 10);
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_TRUE((void*)w != (void*)v);
+    TEST_ASSERT_EQ_I(w->type, RAY_I64);
+    TEST_ASSERT_EQ_I(w->len, 10);
 
     /* Verify data was copied */
     int64_t* wdata = (int64_t*)ray_data(w);
     for (int i = 0; i < 10; i++) {
-        munit_assert_int(wdata[i], ==, (int64_t)(i * 100));
+        TEST_ASSERT_EQ_I(wdata[i], (int64_t)(i * 100));
     }
 
     /* Modifying copy should not affect original */
     wdata[0] = 999;
-    munit_assert_int(data[0], ==, 0);
+    TEST_ASSERT_EQ_I(data[0], 0);
 
     ray_release(v);
     ray_release(w);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- block_copy retains children --------------------------------------- */
 
 extern ray_t* ray_block_copy(ray_t* src);
 
-static MunitResult test_block_copy_retains_children(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_block_copy_retains_children(void) {
     (void)ray_sym_init();
 
     int64_t vals[] = {1, 2, 3};
@@ -203,36 +189,30 @@ static MunitResult test_block_copy_retains_children(const void* params, void* fi
 
     /* Copy the table block */
     ray_t* copy = ray_block_copy(tbl);
-    munit_assert_ptr_not_null(copy);
-    munit_assert_false(RAY_IS_ERR(copy));
+    TEST_ASSERT_NOT_NULL(copy);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(copy));
 
     /* Column ref count should have increased by 1 */
     uint32_t rc_after = col_before->rc;
-    munit_assert_uint(rc_after, ==, rc_before + 1);
+    TEST_ASSERT_EQ_U(rc_after, rc_before + 1);
 
     ray_release(copy);
     ray_release(tbl);
     ray_sym_destroy();
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Suite definition -------------------------------------------------- */
 
-static MunitTest cow_tests[] = {
-    { "/retain_release",     test_retain_release,    cow_setup, cow_teardown, 0, NULL },
-    { "/cow_sole_owner",     test_cow_sole_owner,    cow_setup, cow_teardown, 0, NULL },
-    { "/cow_shared",         test_cow_shared,        cow_setup, cow_teardown, 0, NULL },
-    { "/null_error_safety",  test_null_error_safety, cow_setup, cow_teardown, 0, NULL },
-    { "/cow_vector",         test_cow_vector,        cow_setup, cow_teardown, 0, NULL },
-    { "/block_copy_retains", test_block_copy_retains_children, cow_setup, cow_teardown, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL },
+const test_entry_t cow_entries[] = {
+    { "cow/retain_release", test_retain_release, cow_setup, cow_teardown },
+    { "cow/cow_sole_owner", test_cow_sole_owner, cow_setup, cow_teardown },
+    { "cow/cow_shared", test_cow_shared, cow_setup, cow_teardown },
+    { "cow/null_error_safety", test_null_error_safety, cow_setup, cow_teardown },
+    { "cow/cow_vector", test_cow_vector, cow_setup, cow_teardown },
+    { "cow/block_copy_retains", test_block_copy_retains_children, cow_setup, cow_teardown },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_cow_suite = {
-    "/cow",
-    cow_tests,
-    NULL,
-    0,
-    0,
-};
+

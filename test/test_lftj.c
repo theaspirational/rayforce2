@@ -21,7 +21,8 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "store/csr.h"
@@ -62,8 +63,7 @@ static void init_enum_output(lftj_enum_ctx_t* ctx, int64_t** col_ptrs) {
 }
 
 /* Triangle graph: 0-1, 0-2, 1-2 (bidirectional) */
-static MunitResult test_lftj_triangle(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_lftj_triangle(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -71,7 +71,7 @@ static MunitResult test_lftj_triangle(const void* params, void* data) {
     int64_t src[] = {0, 0, 1, 1, 2, 2};
     int64_t dst[] = {1, 2, 0, 2, 0, 1};
     ray_rel_t* rel = make_rel(src, dst, 6, 3);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Find triangles: (a,b,c) where a→b, a→c, b→c */
     lftj_enum_ctx_t ctx;
@@ -79,15 +79,15 @@ static MunitResult test_lftj_triangle(const void* params, void* data) {
 
     ray_rel_t* rels[] = { rel, rel, rel };
     bool ok = lftj_build_default_plan(&ctx, rels, 3, 3);
-    munit_assert_true(ok);
+    TEST_ASSERT_TRUE(ok);
 
     int64_t* col_ptrs[LFTJ_MAX_VARS];
     init_enum_output(&ctx, col_ptrs);
 
     lftj_enumerate(&ctx, 0);
-    munit_assert_false(ctx.oom);
+    TEST_ASSERT_FALSE(ctx.oom);
     /* One triangle: (0,1,2) in all 6 orderings → 6 results */
-    munit_assert_true(ctx.out_count == 6);
+    TEST_ASSERT_TRUE(ctx.out_count == 6);
 
     /* Cleanup output buffers */
     for (uint8_t i = 0; i < ctx.n_vars; i++) {
@@ -96,11 +96,10 @@ static MunitResult test_lftj_triangle(const void* params, void* data) {
     ray_rel_free(rel);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_lftj_no_results(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_lftj_no_results(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -108,21 +107,21 @@ static MunitResult test_lftj_no_results(const void* params, void* data) {
     int64_t src[] = {0, 1};
     int64_t dst[] = {1, 2};
     ray_rel_t* rel = make_rel(src, dst, 2, 3);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     lftj_enum_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
 
     ray_rel_t* rels[] = { rel, rel, rel };
     bool ok = lftj_build_default_plan(&ctx, rels, 3, 3);
-    munit_assert_true(ok);
+    TEST_ASSERT_TRUE(ok);
 
     int64_t* col_ptrs[LFTJ_MAX_VARS];
     init_enum_output(&ctx, col_ptrs);
 
     lftj_enumerate(&ctx, 0);
-    munit_assert_false(ctx.oom);
-    munit_assert_true(ctx.out_count == 0);
+    TEST_ASSERT_FALSE(ctx.oom);
+    TEST_ASSERT_TRUE(ctx.out_count == 0);
 
     for (uint8_t i = 0; i < ctx.n_vars; i++) {
         if (ctx.buf_hdrs[i]) ray_free(ctx.buf_hdrs[i]);
@@ -130,11 +129,10 @@ static MunitResult test_lftj_no_results(const void* params, void* data) {
     ray_rel_free(rel);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_leapfrog_search(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_leapfrog_search(void) {
     ray_heap_init();
 
     /* Two sorted arrays, find intersection */
@@ -147,33 +145,31 @@ static MunitResult test_leapfrog_search(const void* params, void* data) {
     ray_lftj_iter_t* iters[] = { &a, &b };
     int64_t val;
     bool found = leapfrog_search(iters, 2, &val);
-    munit_assert_true(found);
-    munit_assert_int(val, ==, 3);
+    TEST_ASSERT_TRUE(found);
+    TEST_ASSERT_EQ_I(val, 3);
 
     /* Advance both iterators past 3 and find second intersection (7) */
     a.pos = 3;  /* points to 7 in a_data */
     b.pos = 3;  /* points to 7 in b_data */
     found = leapfrog_search(iters, 2, &val);
-    munit_assert_true(found);
-    munit_assert_int(val, ==, 7);
+    TEST_ASSERT_TRUE(found);
+    TEST_ASSERT_EQ_I(val, 7);
 
     /* Advance past 7 -- no more intersections */
     a.pos = 4;  /* points to 9 */
     b.pos = 4;  /* points to 10 */
     found = leapfrog_search(iters, 2, &val);
-    munit_assert_false(found);
+    TEST_ASSERT_FALSE(found);
 
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitTest lftj_tests[] = {
-    { "/triangle",        test_lftj_triangle,   NULL, NULL, 0, NULL },
-    { "/no_results",      test_lftj_no_results, NULL, NULL, 0, NULL },
-    { "/leapfrog_search", test_leapfrog_search,  NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL }
+const test_entry_t lftj_entries[] = {
+    { "lftj/triangle", test_lftj_triangle, NULL, NULL },
+    { "lftj/no_results", test_lftj_no_results, NULL, NULL },
+    { "lftj/leapfrog_search", test_leapfrog_search, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_lftj_suite = {
-    "/lftj", lftj_tests, NULL, 1, 0
-};
+

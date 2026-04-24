@@ -1,0 +1,13 @@
+;; Invariants for `>`.
+
+;; irreflexive
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (not (> A A)))
+
+;; dual of <:  (> a b) == (< b a)
+(set B (- (rand 256 200000) 100000))
+(count A) -- (sum (== (> A B) (< B A)))
+
+(> 2 1) -- true
+(> 1 2) -- false
+(> 3 3) -- false

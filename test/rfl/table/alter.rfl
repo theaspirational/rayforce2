@@ -1,0 +1,6 @@
+;; Ported from test_lang_rf.inc::test_rf_alter.
+
+;; ========== ALTER SET ON VECTORS ==========
+(set v [1 2 3 4 5]) (alter 'v set 0 100) v -- [100 2 3 4 5]
+;; ========== ALTER CONCAT ON VECTORS ==========
+(set v [1 2 3]) (alter 'v concat 4) v -- [1 2 3 4]

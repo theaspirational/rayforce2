@@ -1,0 +1,11 @@
+;; Invariants for `first`.
+
+(first [10 20 30]) -- 10
+(first [42]) -- 42
+
+;; first(v) == at(v, 0)
+(set V (rand 256 10000))
+(first V) -- (at V 0)
+
+;; prepend check via concat
+(first (concat [7] [1 2 3])) -- 7

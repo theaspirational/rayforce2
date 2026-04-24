@@ -21,7 +21,8 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/ops.h"
@@ -66,8 +67,7 @@ static ray_t* make_test_table(void) {
  *
  * Baseline correctness: id1=1 AND v3>5.0 → count=2
  */
-static MunitResult test_filter_reorder_by_type(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_filter_reorder_by_type(void) {
     ray_heap_init();
 
     ray_t* tbl = make_test_table();
@@ -92,15 +92,15 @@ static MunitResult test_filter_reorder_by_type(const void* params, void* data) {
      * id1=1 rows: indices 0,1,6,9 → v3={1.5,2.5,7.5,10.5}
      * v3>5.0 from those: indices 6,9 → count=2 */
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 2);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -111,8 +111,7 @@ static MunitResult test_filter_reorder_by_type(const void* params, void* data) {
  * After: FILTER(v3 > 5.0, FILTER(id1 = 1, SCAN(v1)))
  * Verify via correctness — same result as test above.
  */
-static MunitResult test_filter_and_split(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_filter_and_split(void) {
     ray_heap_init();
 
     ray_t* tbl = make_test_table();
@@ -132,15 +131,15 @@ static MunitResult test_filter_and_split(const void* params, void* data) {
     ray_op_t* cnt = ray_count(g, filt);
 
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 2);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -155,8 +154,7 @@ static MunitResult test_filter_and_split(const void* params, void* data) {
  *   FILTER(gt_on_f64, FILTER(eq_on_i64, SCAN))
  * i.e., outer predicate = gt_on_f64, inner predicate = eq_on_i64
  */
-static MunitResult test_filter_reorder_dag(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_filter_reorder_dag(void) {
     ray_heap_init();
 
     ray_t* tbl = make_test_table();
@@ -179,25 +177,25 @@ static MunitResult test_filter_reorder_dag(const void* params, void* data) {
     uint32_t gt_pred_id = gt_pred->id;
 
     ray_op_t* opt = ray_optimize(g, filt_outer);
-    munit_assert_ptr_not_null(opt);
+    TEST_ASSERT_NOT_NULL(opt);
 
     /* After reorder: outer should have gt (expensive), inner should have eq (cheap).
      * The pass swaps predicates, so:
      *   chain[0] (outer) gets the higher cost pred
      *   chain[1] (inner) gets the lower cost pred */
-    munit_assert_int(opt->opcode, ==, OP_FILTER);
+    TEST_ASSERT_EQ_I(opt->opcode, OP_FILTER);
     ray_op_t* inner = opt->inputs[0];
-    munit_assert_int(inner->opcode, ==, OP_FILTER);
+    TEST_ASSERT_EQ_I(inner->opcode, OP_FILTER);
 
     /* Inner pred should be eq (cheaper), outer pred should be gt (more expensive) */
-    munit_assert_int(inner->inputs[1]->id, ==, eq_pred_id);
-    munit_assert_int(opt->inputs[1]->id, ==, gt_pred_id);
+    TEST_ASSERT_EQ_I(inner->inputs[1]->id, eq_pred_id);
+    TEST_ASSERT_EQ_I(opt->inputs[1]->id, gt_pred_id);
 
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -209,8 +207,7 @@ static MunitResult test_filter_reorder_dag(const void* params, void* data) {
  * Verify both correctness and DAG structure.
  * id1=1 rows: indices 0,1,6,9 → count=4
  */
-static MunitResult test_pushdown_past_select(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_pushdown_past_select(void) {
     ray_heap_init();
 
     ray_t* tbl = make_test_table();
@@ -232,25 +229,25 @@ static MunitResult test_pushdown_past_select(const void* params, void* data) {
 
     /* Verify DAG structure: filter should have been pushed below select */
     ray_op_t* sel_after = &g->nodes[sel_id];
-    munit_assert_int(sel_after->opcode, ==, OP_SELECT);
-    munit_assert_int(sel_after->inputs[0]->opcode, ==, OP_FILTER);
+    TEST_ASSERT_EQ_I(sel_after->opcode, OP_SELECT);
+    TEST_ASSERT_EQ_I(sel_after->inputs[0]->opcode, OP_FILTER);
 
     /* Verify the optimized root is the select node (filter was pushed below) */
-    munit_assert_uint(opt_root->id, ==, sel_id);
+    TEST_ASSERT_EQ_U(opt_root->id, sel_id);
 
     /* Execute COUNT from the pushed-down filter to validate correctness.
      * The filter (now below select) should still produce the right row count. */
     ray_op_t* cnt = ray_count(g, sel_after->inputs[0]);
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 4);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 4);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -262,8 +259,7 @@ static MunitResult test_pushdown_past_select(const void* params, void* data) {
  *
  * Verify correctness of filter-above-group execution. Result: id1=1, sum=200
  */
-static MunitResult test_pushdown_past_group(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_pushdown_past_group(void) {
     ray_heap_init();
 
     ray_t* tbl = make_test_table();
@@ -286,20 +282,20 @@ static MunitResult test_pushdown_past_group(const void* params, void* data) {
 
     /* Verify correctness */
     ray_t* result = ray_execute(g, filt);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 1);
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 1);
     ray_t* sum_col = ray_table_get_col_idx(result, 1);
-    munit_assert_ptr_not_null(sum_col);
-    munit_assert_int(((int64_t*)ray_data(sum_col))[0], ==, 200);
+    TEST_ASSERT_NOT_NULL(sum_col);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(sum_col))[0], 200);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -310,8 +306,7 @@ static MunitResult test_pushdown_past_group(const void* params, void* data) {
  * so they should not affect the result.
  * sum(v1) = 10+20+30+40+50+60+70+80+90+100 = 550
  */
-static MunitResult test_projection_pushdown(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_projection_pushdown(void) {
     ray_heap_init();
     ray_t *tbl = make_test_table();
     ray_graph_t *g = ray_graph_new(tbl);
@@ -322,15 +317,15 @@ static MunitResult test_projection_pushdown(const void* params, void* data) {
     ray_op_t *opt = ray_optimize(g, s);
 
     ray_t *result = ray_execute(g, opt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 550);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 550);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -342,8 +337,7 @@ static MunitResult test_projection_pushdown(const void* params, void* data) {
  * The partition pruning pass only activates for RAY_MAPCOMMON columns,
  * so with regular I64 columns this verifies the pass is a safe no-op.
  */
-static MunitResult test_partition_pruning_smoke(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_partition_pruning_smoke(void) {
     ray_heap_init();
     ray_t *tbl = make_test_table();
     ray_graph_t *g = ray_graph_new(tbl);
@@ -357,17 +351,17 @@ static MunitResult test_partition_pruning_smoke(const void* params, void* data) 
 
     ray_op_t *opt = ray_optimize(g, s);
     ray_t *result = ray_execute(g, opt);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     /* id1=1 rows: v1={10,20,70,100} -> sum=200 */
-    munit_assert_int(result->i64, ==, 200);
+    TEST_ASSERT_EQ_I(result->i64, 200);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -376,27 +370,26 @@ static MunitResult test_partition_pruning_smoke(const void* params, void* data) 
  * Build a parted table with 4 partitions keyed by I64 values [100, 200, 300, 400].
  * Filter: pkey >= 300.  Expected: bits 2,3 set (300,400), bits 0,1 clear (100,200).
  */
-static MunitResult test_partition_pruning_mask(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_partition_pruning_mask(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     /* Build MAPCOMMON column with 4 I64 partition keys */
     ray_t* key_values = ray_vec_new(RAY_I64, 4);
-    munit_assert_ptr_not_null(key_values);
+    TEST_ASSERT_NOT_NULL(key_values);
     key_values->len = 4;
     int64_t keys[] = {100, 200, 300, 400};
     memcpy(ray_data(key_values), keys, sizeof(keys));
 
     ray_t* row_counts = ray_vec_new(RAY_I64, 4);
-    munit_assert_ptr_not_null(row_counts);
+    TEST_ASSERT_NOT_NULL(row_counts);
     row_counts->len = 4;
     int64_t counts[] = {5, 5, 5, 5};
     memcpy(ray_data(row_counts), counts, sizeof(counts));
 
     /* MAPCOMMON: stores [key_values, row_counts] as pointer array */
     ray_t* mapcommon = ray_alloc(2 * sizeof(ray_t*));
-    munit_assert_ptr_not_null(mapcommon);
+    TEST_ASSERT_NOT_NULL(mapcommon);
     mapcommon->type = RAY_MAPCOMMON;
     mapcommon->len = 2; /* 2 pointers */
     ((ray_t**)ray_data(mapcommon))[0] = key_values;
@@ -406,7 +399,7 @@ static MunitResult test_partition_pruning_mask(const void* params, void* data) {
     ray_t* segs[4];
     for (int i = 0; i < 4; i++) {
         segs[i] = ray_vec_new(RAY_I64, 5);
-        munit_assert_ptr_not_null(segs[i]);
+        TEST_ASSERT_NOT_NULL(segs[i]);
         segs[i]->len = 5;
         int64_t* d = (int64_t*)ray_data(segs[i]);
         for (int j = 0; j < 5; j++) d[j] = (i + 1) * 10 + j;
@@ -414,7 +407,7 @@ static MunitResult test_partition_pruning_mask(const void* params, void* data) {
 
     /* Build parted data column */
     ray_t* val_parted = ray_alloc(4 * sizeof(ray_t*));
-    munit_assert_ptr_not_null(val_parted);
+    TEST_ASSERT_NOT_NULL(val_parted);
     val_parted->type = RAY_PARTED_BASE + RAY_I64;
     val_parted->len = 4;
     for (int i = 0; i < 4; i++)
@@ -430,7 +423,7 @@ static MunitResult test_partition_pruning_mask(const void* params, void* data) {
 
     /* Build DAG: FILTER(SCAN(val), GE(SCAN(pkey), CONST(300))) */
     ray_graph_t* g = ray_graph_new(tbl);
-    munit_assert_ptr_not_null(g);
+    TEST_ASSERT_NOT_NULL(g);
 
     ray_op_t* scan_val  = ray_scan(g, "val");
     ray_op_t* scan_pkey = ray_scan(g, "pkey");
@@ -440,7 +433,7 @@ static MunitResult test_partition_pruning_mask(const void* params, void* data) {
 
     /* Optimize — should produce seg_mask */
     ray_op_t* opt = ray_optimize(g, filt);
-    munit_assert_ptr_not_null(opt);
+    TEST_ASSERT_NOT_NULL(opt);
 
     /* Find the ext node for scan_val — it should have seg_mask set */
     ray_op_ext_t* val_ext = NULL;
@@ -450,12 +443,12 @@ static MunitResult test_partition_pruning_mask(const void* params, void* data) {
             break;
         }
     }
-    munit_assert_ptr_not_null(val_ext);
-    munit_assert_ptr_not_null(val_ext->seg_mask);
+    TEST_ASSERT_NOT_NULL(val_ext);
+    TEST_ASSERT_NOT_NULL(val_ext->seg_mask);
 
     /* Verify bitmap: bits 2,3 set (keys 300,400 >= 300), bits 0,1 clear */
     uint64_t expected = (1ULL << 2) | (1ULL << 3);
-    munit_assert_true(val_ext->seg_mask[0] == expected);
+    TEST_ASSERT_TRUE(val_ext->seg_mask[0] == expected);
 
     ray_graph_free(g);
     ray_release(mapcommon);
@@ -463,7 +456,7 @@ static MunitResult test_partition_pruning_mask(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -472,8 +465,7 @@ static MunitResult test_partition_pruning_mask(const void* params, void* data) {
  * 4 partitions keyed by I64 values [100, 200, 300, 400].
  * Filter: pkey IN [100, 300].  Expected seg_mask: bits 0,2 set.
  */
-static MunitResult test_partition_pruning_in(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_partition_pruning_in(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -516,7 +508,7 @@ static MunitResult test_partition_pruning_in(const void* params, void* data) {
 
     /* Build DAG: FILTER(SCAN(val), IN(SCAN(pkey), CONST(vec [100 300]))) */
     ray_graph_t* g = ray_graph_new(tbl);
-    munit_assert_ptr_not_null(g);
+    TEST_ASSERT_NOT_NULL(g);
 
     ray_op_t* scan_val  = ray_scan(g, "val");
     ray_op_t* scan_pkey = ray_scan(g, "pkey");
@@ -534,7 +526,7 @@ static MunitResult test_partition_pruning_in(const void* params, void* data) {
 
     /* Optimize — should produce seg_mask with bits 0,2 set */
     ray_op_t* opt = ray_optimize(g, filt);
-    munit_assert_ptr_not_null(opt);
+    TEST_ASSERT_NOT_NULL(opt);
 
     ray_op_ext_t* val_ext = NULL;
     for (uint32_t i = 0; i < g->ext_count; i++) {
@@ -543,12 +535,12 @@ static MunitResult test_partition_pruning_in(const void* params, void* data) {
             break;
         }
     }
-    munit_assert_ptr_not_null(val_ext);
-    munit_assert_ptr_not_null(val_ext->seg_mask);
+    TEST_ASSERT_NOT_NULL(val_ext);
+    TEST_ASSERT_NOT_NULL(val_ext->seg_mask);
 
     /* bits 0,2 set — partitions keyed 100 and 300 are in the set */
     uint64_t expected = (1ULL << 0) | (1ULL << 2);
-    munit_assert_true(val_ext->seg_mask[0] == expected);
+    TEST_ASSERT_TRUE(val_ext->seg_mask[0] == expected);
 
     ray_graph_free(g);
     ray_release(mapcommon);
@@ -556,7 +548,7 @@ static MunitResult test_partition_pruning_in(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
@@ -569,8 +561,7 @@ static MunitResult test_partition_pruning_in(const void* params, void* data) {
  * Setup: SYM-keyed partitions with a literal i64 set.  After
  * optimization, the scan's seg_mask must remain unset (no pruning).
  */
-static MunitResult test_partition_pruning_in_type_mismatch(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_partition_pruning_in_type_mismatch(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -637,7 +628,7 @@ static MunitResult test_partition_pruning_in_type_mismatch(const void* params, v
     ray_op_t* filt    = ray_filter(g, scan_val, in_pred);
 
     ray_op_t* opt = ray_optimize(g, filt);
-    munit_assert_ptr_not_null(opt);
+    TEST_ASSERT_NOT_NULL(opt);
 
     ray_op_ext_t* val_ext = NULL;
     for (uint32_t i = 0; i < g->ext_count; i++) {
@@ -646,9 +637,9 @@ static MunitResult test_partition_pruning_in_type_mismatch(const void* params, v
             break;
         }
     }
-    munit_assert_ptr_not_null(val_ext);
+    TEST_ASSERT_NOT_NULL(val_ext);
     /* Pruning must NOT have fired — seg_mask stays NULL. */
-    munit_assert_ptr_equal(val_ext->seg_mask, NULL);
+    TEST_ASSERT_EQ_PTR(val_ext->seg_mask, NULL);
 
     ray_graph_free(g);
     ray_release(mapcommon);
@@ -656,15 +647,14 @@ static MunitResult test_partition_pruning_in_type_mismatch(const void* params, v
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /*
  * Test: partition pruning for OP_NOT_IN is the complement.
  * pkey NOT IN [100, 300] → bits 1,3 set (keys 200 and 400).
  */
-static MunitResult test_partition_pruning_not_in(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_partition_pruning_not_in(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -720,7 +710,7 @@ static MunitResult test_partition_pruning_not_in(const void* params, void* data)
     ray_op_t* filt     = ray_filter(g, scan_val, nin_pred);
 
     ray_op_t* opt = ray_optimize(g, filt);
-    munit_assert_ptr_not_null(opt);
+    TEST_ASSERT_NOT_NULL(opt);
 
     ray_op_ext_t* val_ext = NULL;
     for (uint32_t i = 0; i < g->ext_count; i++) {
@@ -729,11 +719,11 @@ static MunitResult test_partition_pruning_not_in(const void* params, void* data)
             break;
         }
     }
-    munit_assert_ptr_not_null(val_ext);
-    munit_assert_ptr_not_null(val_ext->seg_mask);
+    TEST_ASSERT_NOT_NULL(val_ext);
+    TEST_ASSERT_NOT_NULL(val_ext->seg_mask);
 
     uint64_t expected = (1ULL << 1) | (1ULL << 3);
-    munit_assert_true(val_ext->seg_mask[0] == expected);
+    TEST_ASSERT_TRUE(val_ext->seg_mask[0] == expected);
 
     ray_graph_free(g);
     ray_release(mapcommon);
@@ -741,24 +731,22 @@ static MunitResult test_partition_pruning_not_in(const void* params, void* data)
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitTest tests[] = {
-    { "/filter_reorder_type", test_filter_reorder_by_type, NULL, NULL, 0, NULL },
-    { "/filter_and_split",    test_filter_and_split,       NULL, NULL, 0, NULL },
-    { "/filter_reorder_dag",  test_filter_reorder_dag,     NULL, NULL, 0, NULL },
-    { "/pushdown_select",     test_pushdown_past_select,   NULL, NULL, 0, NULL },
-    { "/pushdown_group",      test_pushdown_past_group,    NULL, NULL, 0, NULL },
-    { "/projection_pushdown", test_projection_pushdown,   NULL, NULL, 0, NULL },
-    { "/partition_pruning",   test_partition_pruning_smoke, NULL, NULL, 0, NULL },
-    { "/partition_pruning_mask", test_partition_pruning_mask, NULL, NULL, 0, NULL },
-    { "/partition_pruning_in",   test_partition_pruning_in,   NULL, NULL, 0, NULL },
-    { "/partition_pruning_not_in", test_partition_pruning_not_in, NULL, NULL, 0, NULL },
-    { "/partition_pruning_in_type_mismatch", test_partition_pruning_in_type_mismatch, NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL }
+const test_entry_t opt_entries[] = {
+    { "opt/filter_reorder_type", test_filter_reorder_by_type, NULL, NULL },
+    { "opt/filter_and_split", test_filter_and_split, NULL, NULL },
+    { "opt/filter_reorder_dag", test_filter_reorder_dag, NULL, NULL },
+    { "opt/pushdown_select", test_pushdown_past_select, NULL, NULL },
+    { "opt/pushdown_group", test_pushdown_past_group, NULL, NULL },
+    { "opt/projection_pushdown", test_projection_pushdown, NULL, NULL },
+    { "opt/partition_pruning", test_partition_pruning_smoke, NULL, NULL },
+    { "opt/partition_pruning_mask", test_partition_pruning_mask, NULL, NULL },
+    { "opt/partition_pruning_in", test_partition_pruning_in, NULL, NULL },
+    { "opt/partition_pruning_not_in", test_partition_pruning_not_in, NULL, NULL },
+    { "opt/partition_pruning_in_type_mismatch", test_partition_pruning_in_type_mismatch, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_opt_suite = {
-    "/opt", tests, NULL, 1, 0
-};
+

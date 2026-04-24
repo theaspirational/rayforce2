@@ -21,26 +21,25 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/fvec.h"
 
-static MunitResult test_ftable_new_free(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_ftable_new_free(void) {
     ray_heap_init();
 
     ray_ftable_t* ft = ray_ftable_new(3);
-    munit_assert_ptr_not_null(ft);
-    munit_assert_uint(ft->n_cols, ==, 3);
+    TEST_ASSERT_NOT_NULL(ft);
+    TEST_ASSERT_EQ_U(ft->n_cols, 3);
 
     ray_ftable_free(ft);
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_ftable_materialize_flat(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_ftable_materialize_flat(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -55,26 +54,25 @@ static MunitResult test_ftable_materialize_flat(const void* params, void* data) 
     ft->n_tuples = 5;
 
     ray_t* result = ray_ftable_materialize(ft);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 5);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 5);
 
     /* All rows should be 42 */
     ray_t* col = ray_table_get_col_idx(result, 0);
     int64_t* data_ptr = (int64_t*)ray_data(col);
     for (int i = 0; i < 5; i++)
-        munit_assert_int(data_ptr[i], ==, 42);
+        TEST_ASSERT_EQ_I(data_ptr[i], 42);
 
     ray_release(result);
     ray_ftable_free(ft);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_ftable_materialize_unflat(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_ftable_materialize_unflat(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -88,30 +86,28 @@ static MunitResult test_ftable_materialize_unflat(const void* params, void* data
     ft->n_tuples = 3;
 
     ray_t* result = ray_ftable_materialize(ft);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     ray_t* col = ray_table_get_col_idx(result, 0);
     int64_t* data_ptr = (int64_t*)ray_data(col);
-    munit_assert_int(data_ptr[0], ==, 10);
-    munit_assert_int(data_ptr[1], ==, 20);
-    munit_assert_int(data_ptr[2], ==, 30);
+    TEST_ASSERT_EQ_I(data_ptr[0], 10);
+    TEST_ASSERT_EQ_I(data_ptr[1], 20);
+    TEST_ASSERT_EQ_I(data_ptr[2], 30);
 
     ray_release(result);
     ray_ftable_free(ft);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitTest fvec_tests[] = {
-    { "/new_free",          test_ftable_new_free,          NULL, NULL, 0, NULL },
-    { "/materialize_flat",  test_ftable_materialize_flat,  NULL, NULL, 0, NULL },
-    { "/materialize_unflat", test_ftable_materialize_unflat, NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL }
+const test_entry_t fvec_entries[] = {
+    { "fvec/new_free", test_ftable_new_free, NULL, NULL },
+    { "fvec/materialize_flat", test_ftable_materialize_flat, NULL, NULL },
+    { "fvec/materialize_unflat", test_ftable_materialize_unflat, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_fvec_suite = {
-    "/fvec", fvec_tests, NULL, 1, 0
-};
+

@@ -1,0 +1,10 @@
+;; Invariants for `==` on i64 vectors.
+
+;; reflexive:  (== a a) is true for every element
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (== A A))
+
+;; symmetric:  (== a b) == (== b a)
+(set A (- (rand 256 200000) 100000))
+(set B (- (rand 256 200000) 100000))
+(count A) -- (sum (== (== A B) (== B A)))

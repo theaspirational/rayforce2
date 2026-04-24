@@ -1,0 +1,17 @@
+;; Invariants for `floor`.
+
+;; floor(x) <= x
+(set A (div (- (rand 256 10000) 5000) 100))
+(count A) -- (sum (<= (floor A) A))
+
+;; x - floor(x) is in [0, 1)
+(set D (- A (floor A)))
+(count A) -- (sum (and (>= D 0.0) (< D 1.0)))
+
+;; idempotent
+(count A) -- (sum (== (floor (floor A)) (floor A)))
+
+;; concrete
+(floor 3.7) -- 3.0
+(floor 3.0) -- 3.0
+(floor -3.2) -- -4.0

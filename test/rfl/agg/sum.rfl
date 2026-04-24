@@ -1,0 +1,13 @@
+;; Invariants for `sum` on i64 vectors.
+
+;; concat-distributive:  (sum (concat u v)) == (+ (sum u) (sum v))
+(set U (- (rand 128 40000) 20000))
+(set V (- (rand 128 40000) 20000))
+(sum (concat U V)) -- (+ (sum U) (sum V))
+
+;; concrete known value
+(sum [1 2 3 4 5 6 7 8 9 10]) -- 55
+
+;; linearity: scales with constant — falsifies sum ≡ 0.
+(set V (- (rand 100 2000) 1000))
+(* 3 (sum V)) -- (sum (* 3 V))

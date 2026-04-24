@@ -1,0 +1,17 @@
+;; Invariants for `reverse` on i64 vectors.
+
+;; length-preservation
+(set V (rand 256 10000))
+(count V) -- (count (reverse V))
+
+;; involution
+(set V (rand 256 10000))
+(count V) -- (sum (== (reverse (reverse V)) V))
+
+;; first element of reverse is last of input — falsifies identity-reverse.
+(set V (- (rand 256 200000) 100000))
+(at (reverse V) 0) -- (at V (- (count V) 1))
+(at (reverse V) (- (count V) 1)) -- (at V 0)
+
+;; concrete: reverse([1 2 3 4 5]) == [5 4 3 2 1]
+(reverse [1 2 3 4 5]) -- [5 4 3 2 1]

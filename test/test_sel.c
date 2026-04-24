@@ -21,50 +21,48 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/ops.h"
 
-static MunitResult test_sel_new(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_new(void) {
     ray_heap_init();
 
     ray_t* sel = ray_sel_new(100);
-    munit_assert_ptr_not_null(sel);
-    munit_assert_false(RAY_IS_ERR(sel));
-    munit_assert_int(sel->type, ==, RAY_SEL);
+    TEST_ASSERT_NOT_NULL(sel);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
+    TEST_ASSERT_EQ_I(sel->type, RAY_SEL);
 
     ray_release(sel);
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_sel_from_pred(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_from_pred(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     /* Create bool vector: [true, false, true, false, true] */
     uint8_t bools[] = {1, 0, 1, 0, 1};
     ray_t* bvec = ray_vec_from_raw(RAY_BOOL, bools, 5);
-    munit_assert_ptr_not_null(bvec);
+    TEST_ASSERT_NOT_NULL(bvec);
 
     ray_t* sel = ray_sel_from_pred(bvec);
-    munit_assert_ptr_not_null(sel);
-    munit_assert_false(RAY_IS_ERR(sel));
-    munit_assert_int(sel->type, ==, RAY_SEL);
-    munit_assert_int(ray_sel_meta(sel)->total_pass, ==, 3);
+    TEST_ASSERT_NOT_NULL(sel);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
+    TEST_ASSERT_EQ_I(sel->type, RAY_SEL);
+    TEST_ASSERT_EQ_I(ray_sel_meta(sel)->total_pass, 3);
 
     ray_release(sel);
     ray_release(bvec);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_sel_and(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_and(void) {
     ray_heap_init();
 
     uint8_t a_data[] = {1, 1, 0, 0, 1};
@@ -76,11 +74,11 @@ static MunitResult test_sel_and(const void* params, void* data) {
     ray_t* sel_b = ray_sel_from_pred(b_vec);
     ray_t* sel_and = ray_sel_and(sel_a, sel_b);
 
-    munit_assert_ptr_not_null(sel_and);
-    munit_assert_false(RAY_IS_ERR(sel_and));
-    munit_assert_int(sel_and->type, ==, RAY_SEL);
+    TEST_ASSERT_NOT_NULL(sel_and);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel_and));
+    TEST_ASSERT_EQ_I(sel_and->type, RAY_SEL);
     /* AND of {1,1,0,0,1} and {1,0,1,0,1} = indices {0,4} -> 2 passing */
-    munit_assert_int(ray_sel_meta(sel_and)->total_pass, ==, 2);
+    TEST_ASSERT_EQ_I(ray_sel_meta(sel_and)->total_pass, 2);
 
     ray_release(sel_and);
     ray_release(sel_a);
@@ -88,11 +86,10 @@ static MunitResult test_sel_and(const void* params, void* data) {
     ray_release(a_vec);
     ray_release(b_vec);
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_sel_filter_integration(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_filter_integration(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -112,25 +109,23 @@ static MunitResult test_sel_filter_integration(const void* params, void* data) {
     ray_op_t* s = ray_sum(g, filtered);
 
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 120);  /* 30+40+50 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 120);  /* 30+40+50 */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitTest sel_tests[] = {
-    { "/new",              test_sel_new,               NULL, NULL, 0, NULL },
-    { "/from_pred",        test_sel_from_pred,         NULL, NULL, 0, NULL },
-    { "/and",              test_sel_and,               NULL, NULL, 0, NULL },
-    { "/filter_integration", test_sel_filter_integration, NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL }
+const test_entry_t sel_entries[] = {
+    { "sel/new", test_sel_new, NULL, NULL },
+    { "sel/from_pred", test_sel_from_pred, NULL, NULL },
+    { "sel/and", test_sel_and, NULL, NULL },
+    { "sel/filter_integration", test_sel_filter_integration, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_sel_suite = {
-    "/sel", sel_tests, NULL, 1, 0
-};
+

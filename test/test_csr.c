@@ -21,7 +21,8 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/ops.h"
@@ -60,108 +61,105 @@ static ray_t* make_edge_table(void) {
  * Test: CSR build from edges
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_csr_build(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csr_build(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
-    munit_assert_ptr_not_null(edges);
+    TEST_ASSERT_NOT_NULL(edges);
 
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Forward CSR: check degrees */
-    munit_assert(rel->fwd.n_nodes == 4);
-    munit_assert(rel->fwd.n_edges == 6);
-    munit_assert(ray_csr_degree(&rel->fwd, 0) == 2);  /* 0->1, 0->2 */
-    munit_assert(ray_csr_degree(&rel->fwd, 1) == 2);  /* 1->2, 1->3 */
-    munit_assert(ray_csr_degree(&rel->fwd, 2) == 1);  /* 2->3 */
-    munit_assert(ray_csr_degree(&rel->fwd, 3) == 1);  /* 3->0 */
+    TEST_ASSERT_TRUE(rel->fwd.n_nodes == 4);
+    TEST_ASSERT_TRUE(rel->fwd.n_edges == 6);
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->fwd, 0) == 2);  /* 0->1, 0->2 */
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->fwd, 1) == 2);  /* 1->2, 1->3 */
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->fwd, 2) == 1);  /* 2->3 */
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->fwd, 3) == 1);  /* 3->0 */
 
     /* Check neighbors of node 0 */
     int64_t cnt;
     int64_t* nbrs = ray_csr_neighbors(&rel->fwd, 0, &cnt);
-    munit_assert(cnt == 2);
+    TEST_ASSERT_TRUE(cnt == 2);
     /* Neighbors should be 1 and 2 (order may vary) */
-    munit_assert(nbrs[0] == 1 || nbrs[0] == 2);
-    munit_assert(nbrs[1] == 1 || nbrs[1] == 2);
-    munit_assert(nbrs[0] != nbrs[1]);
+    TEST_ASSERT_TRUE(nbrs[0] == 1 || nbrs[0] == 2);
+    TEST_ASSERT_TRUE(nbrs[1] == 1 || nbrs[1] == 2);
+    TEST_ASSERT_TRUE(nbrs[0] != nbrs[1]);
 
     /* Reverse CSR */
-    munit_assert(rel->rev.n_nodes == 4);
-    munit_assert(rel->rev.n_edges == 6);
-    munit_assert(ray_csr_degree(&rel->rev, 0) == 1);  /* 3->0 */
-    munit_assert(ray_csr_degree(&rel->rev, 1) == 1);  /* 0->1 */
-    munit_assert(ray_csr_degree(&rel->rev, 2) == 2);  /* 0->2, 1->2 */
-    munit_assert(ray_csr_degree(&rel->rev, 3) == 2);  /* 1->3, 2->3 */
+    TEST_ASSERT_TRUE(rel->rev.n_nodes == 4);
+    TEST_ASSERT_TRUE(rel->rev.n_edges == 6);
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->rev, 0) == 1);  /* 3->0 */
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->rev, 1) == 1);  /* 0->1 */
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->rev, 2) == 2);  /* 0->2, 1->2 */
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->rev, 3) == 2);  /* 1->3, 2->3 */
 
     ray_rel_free(rel);
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: CSR sorted (for LFTJ)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_csr_sorted(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csr_sorted(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, true);
-    munit_assert_ptr_not_null(rel);
-    munit_assert_true(rel->fwd.sorted);
-    munit_assert_true(rel->rev.sorted);
+    TEST_ASSERT_NOT_NULL(rel);
+    TEST_ASSERT_TRUE(rel->fwd.sorted);
+    TEST_ASSERT_TRUE(rel->rev.sorted);
 
     /* Check sorted adjacency list for node 0 (fwd) */
     int64_t cnt;
     int64_t* nbrs = ray_csr_neighbors(&rel->fwd, 0, &cnt);
-    munit_assert(cnt == 2);
-    munit_assert(nbrs[0] == 1);
-    munit_assert(nbrs[1] == 2);
+    TEST_ASSERT_TRUE(cnt == 2);
+    TEST_ASSERT_TRUE(nbrs[0] == 1);
+    TEST_ASSERT_TRUE(nbrs[1] == 2);
 
     ray_rel_free(rel);
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_EXPAND (1-hop forward)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_expand(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_expand(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Expand from nodes {0, 1} forward */
     int64_t start_data[] = {0, 1};
     ray_t* start_vec = ray_vec_from_raw(RAY_I64, start_data, 2);
 
     ray_graph_t* g = ray_graph_new(NULL);
-    munit_assert_ptr_not_null(g);
+    TEST_ASSERT_NOT_NULL(g);
 
     ray_op_t* src = ray_const_vec(g, start_vec);
     ray_op_t* expand = ray_expand(g, src, rel, 0);
-    munit_assert_ptr_not_null(expand);
+    TEST_ASSERT_NOT_NULL(expand);
 
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Node 0 has 2 outgoing, node 1 has 2 outgoing = 4 total */
-    munit_assert(ray_table_nrows(result) == 4);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 4);
 
     ray_release(result);
     ray_graph_free(g);
@@ -170,15 +168,14 @@ static MunitResult test_expand(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_EXPAND (reverse)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_expand_reverse(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_expand_reverse(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -194,9 +191,9 @@ static MunitResult test_expand_reverse(const void* params, void* data) {
     ray_op_t* expand = ray_expand(g, src, rel, 1);  /* direction=1: reverse */
 
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert(ray_table_nrows(result) == 2);  /* 1->3, 2->3 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 2);  /* 1->3, 2->3 */
 
     ray_release(result);
     ray_graph_free(g);
@@ -205,15 +202,14 @@ static MunitResult test_expand_reverse(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_VAR_EXPAND (variable-length BFS)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_var_expand(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_var_expand(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -228,15 +224,15 @@ static MunitResult test_var_expand(const void* params, void* data) {
     ray_op_t* var_exp = ray_var_expand(g, src, rel, 0, 1, 3, false);
 
     ray_t* result = ray_execute(g, var_exp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* From node 0 with depth 1..3:
      * depth 1: 0->1, 0->2 (2 results)
      * depth 2: 1->3, 2->3 (but 3 visited only once) => 1 result
      * depth 3: 3->0 (but 0 already visited) => no results
      * Total reachable: nodes 1, 2, 3 at depths 1, 1, 2 = 3 results */
-    munit_assert(ray_table_nrows(result) == 3);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -245,15 +241,14 @@ static MunitResult test_var_expand(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_SHORTEST_PATH
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_shortest_path(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_shortest_path(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -266,20 +261,20 @@ static MunitResult test_shortest_path(const void* params, void* data) {
     ray_op_t* sp = ray_shortest_path(g, src, dst, rel, 10);
 
     ray_t* result = ray_execute(g, sp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Shortest path 0->3: 0->1->3 (length 3 nodes) or 0->2->3 */
     int64_t nrows = ray_table_nrows(result);
-    munit_assert(nrows == 3);  /* 3 nodes in path */
+    TEST_ASSERT_TRUE(nrows == 3);  /* 3 nodes in path */
 
     /* First node should be 0, last should be 3 */
     int64_t node_sym = ray_sym_intern("_node", 5);
     ray_t* node_col = ray_table_get_col(result, node_sym);
-    munit_assert_ptr_not_null(node_col);
+    TEST_ASSERT_NOT_NULL(node_col);
     int64_t* nodes = (int64_t*)ray_data(node_col);
-    munit_assert(nodes[0] == 0);
-    munit_assert(nodes[nrows - 1] == 3);
+    TEST_ASSERT_TRUE(nodes[0] == 0);
+    TEST_ASSERT_TRUE(nodes[nrows - 1] == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -287,15 +282,14 @@ static MunitResult test_shortest_path(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_SHORTEST_PATH (no path)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_shortest_path_no_path(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_shortest_path_no_path(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -319,8 +313,8 @@ static MunitResult test_shortest_path_no_path(const void* params, void* data) {
     ray_op_t* sp = ray_shortest_path(g, src_op, dst_op, rel, 10);
 
     ray_t* result = ray_execute(g, sp);
-    munit_assert_true(RAY_IS_ERR(result));
-    munit_assert_string_equal(ray_err_code(result), "range");
+    TEST_ASSERT_TRUE(RAY_IS_ERR(result));
+    TEST_ASSERT_STR_EQ(ray_err_code(result), "range");
     ray_release(result);
 
     ray_graph_free(g);
@@ -328,15 +322,14 @@ static MunitResult test_shortest_path_no_path(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_WCO_JOIN (triangle enumeration)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_wco_join_triangle(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_wco_join_triangle(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -356,22 +349,22 @@ static MunitResult test_wco_join_triangle(const void* params, void* data) {
 
     /* Build with sorted=true (required for LFTJ) */
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 3, 3, true);
-    munit_assert_ptr_not_null(rel);
-    munit_assert_true(rel->fwd.sorted);
+    TEST_ASSERT_NOT_NULL(rel);
+    TEST_ASSERT_TRUE(rel->fwd.sorted);
 
     /* Triangle pattern: 3 vars, 3 rels (all same rel for K3) */
     ray_rel_t* rels[3] = {rel, rel, rel};
 
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* wco = ray_wco_join(g, rels, 3, 3);
-    munit_assert_ptr_not_null(wco);
+    TEST_ASSERT_NOT_NULL(wco);
 
     ray_t* result = ray_execute(g, wco);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* K3 has directed triangles */
-    munit_assert(ray_table_nrows(result) >= 1);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) >= 1);
 
     ray_release(result);
     ray_graph_free(g);
@@ -379,15 +372,14 @@ static MunitResult test_wco_join_triangle(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: Multi-table graph (ray_graph_add_table + ray_scan_table)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_multi_table(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_multi_table(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -409,25 +401,25 @@ static MunitResult test_multi_table(const void* params, void* data) {
 
     ray_graph_t* g = ray_graph_new(persons);  /* primary table */
     uint16_t tasks_id = ray_graph_add_table(g, tasks);
-    munit_assert(tasks_id == 0);
+    TEST_ASSERT_TRUE(tasks_id == 0);
 
     /* Scan from persons (primary) */
     ray_op_t* age_scan = ray_scan(g, "age");
-    munit_assert_ptr_not_null(age_scan);
+    TEST_ASSERT_NOT_NULL(age_scan);
 
     /* Scan from tasks (registered table) */
     ray_op_t* prio_scan = ray_scan_table(g, tasks_id, "priority");
-    munit_assert_ptr_not_null(prio_scan);
+    TEST_ASSERT_NOT_NULL(prio_scan);
 
     /* Execute scans */
     ray_t* age_result = ray_execute(g, age_scan);
-    munit_assert_false(RAY_IS_ERR(age_result));
-    munit_assert(age_result->len == 4);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(age_result));
+    TEST_ASSERT_TRUE(age_result->len == 4);
     ray_release(age_result);
 
     ray_t* prio_result = ray_execute(g, prio_scan);
-    munit_assert_false(RAY_IS_ERR(prio_result));
-    munit_assert(prio_result->len == 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(prio_result));
+    TEST_ASSERT_TRUE(prio_result->len == 3);
     ray_release(prio_result);
 
     ray_graph_free(g);
@@ -435,15 +427,14 @@ static MunitResult test_multi_table(const void* params, void* data) {
     ray_release(tasks);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_WCO_JOIN (chain pattern: 3 vars, 2 rels — general LFTJ)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_wco_join_chain(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_wco_join_chain(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -462,7 +453,7 @@ static MunitResult test_wco_join_chain(const void* params, void* data) {
     ray_release(sv); ray_release(dv);
 
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, true);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Chain pattern: a->b->c with n_vars=3, n_rels=2
      * rels[0]: a->b, rels[1]: b->c (fallback chain pattern in LFTJ) */
@@ -470,18 +461,18 @@ static MunitResult test_wco_join_chain(const void* params, void* data) {
 
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* wco = ray_wco_join(g, rels, 2, 3);
-    munit_assert_ptr_not_null(wco);
+    TEST_ASSERT_NOT_NULL(wco);
 
     ray_t* result = ray_execute(g, wco);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* 2-hop paths: (0,1,2), (0,1,3), (0,2,3), (1,2,3) = 4 paths */
     int64_t nrows = ray_table_nrows(result);
-    munit_assert(nrows == 4);
+    TEST_ASSERT_TRUE(nrows == 4);
 
     /* Verify we have 3 columns: _v0, _v1, _v2 */
-    munit_assert(ray_table_ncols(result) == 3);
+    TEST_ASSERT_TRUE(ray_table_ncols(result) == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -489,21 +480,20 @@ static MunitResult test_wco_join_chain(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: Factorized expand (degree counting)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_expand_factorized(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_expand_factorized(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Expand nodes {0, 1, 2} forward — factorized should give degree counts */
     int64_t start_data[] = {0, 1, 2};
@@ -512,7 +502,7 @@ static MunitResult test_expand_factorized(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* src = ray_const_vec(g, start_vec);
     ray_op_t* expand = ray_expand(g, src, rel, 0);
-    munit_assert_ptr_not_null(expand);
+    TEST_ASSERT_NOT_NULL(expand);
 
     /* Manually set factorized flag (normally done by optimizer) */
     ray_op_ext_t* ext = NULL;
@@ -522,26 +512,26 @@ static MunitResult test_expand_factorized(const void* params, void* data) {
             break;
         }
     }
-    munit_assert_ptr_not_null(ext);
+    TEST_ASSERT_NOT_NULL(ext);
     ext->graph.factorized = 1;
 
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Should have 2 columns: _src and _count */
-    munit_assert(ray_table_ncols(result) == 2);
+    TEST_ASSERT_TRUE(ray_table_ncols(result) == 2);
 
     int64_t cnt_sym = ray_sym_intern("_count", 6);
     ray_t* cnt_col = ray_table_get_col(result, cnt_sym);
-    munit_assert_ptr_not_null(cnt_col);
+    TEST_ASSERT_NOT_NULL(cnt_col);
 
     /* Degrees: node 0=2, node 1=2, node 2=1 */
     int64_t* counts = (int64_t*)ray_data(cnt_col);
     int64_t total_deg = 0;
     for (int64_t i = 0; i < cnt_col->len; i++)
         total_deg += counts[i];
-    munit_assert(total_deg == 5);  /* 2 + 2 + 1 = 5 */
+    TEST_ASSERT_TRUE(total_deg == 5);  /* 2 + 2 + 1 = 5 */
 
     ray_release(result);
     ray_graph_free(g);
@@ -550,26 +540,25 @@ static MunitResult test_expand_factorized(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: SIP expand (source-side selection skip)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_sip_expand(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sip_expand(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Create source-side selection: only allow node 0 (skip nodes 1, 2, 3) */
     ray_t* src_sel = ray_sel_new(4);
-    munit_assert_ptr_not_null(src_sel);
-    munit_assert_false(RAY_IS_ERR(src_sel));
+    TEST_ASSERT_NOT_NULL(src_sel);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(src_sel));
     uint64_t* sel_bits = ray_sel_bits(src_sel);
     RAY_SEL_BIT_SET(sel_bits, 0);  /* only node 0 passes */
 
@@ -591,11 +580,11 @@ static MunitResult test_sip_expand(const void* params, void* data) {
     }
 
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Only node 0 should be expanded: degree 2 → 2 output rows */
-    munit_assert(ray_table_nrows(result) == 2);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 2);
 
     ray_release(result);
     ray_graph_free(g);
@@ -605,23 +594,22 @@ static MunitResult test_sip_expand(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: S-Join semijoin filter in exec_join
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_sjoin_filter(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sjoin_filter(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     /* Left table: id column with many rows, most not in right side */
     int64_t n_left = 100;
     ray_t* left_ids = ray_vec_new(RAY_I64, n_left);
-    munit_assert_ptr_not_null(left_ids);
-    munit_assert_false(RAY_IS_ERR(left_ids));
+    TEST_ASSERT_NOT_NULL(left_ids);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(left_ids));
     left_ids->len = n_left;
     int64_t* lid = (int64_t*)ray_data(left_ids);
     for (int64_t i = 0; i < n_left; i++) lid[i] = i;
@@ -664,14 +652,14 @@ static MunitResult test_sjoin_filter(const void* params, void* data) {
     ray_op_t* right_keys[1] = { right_scan };
 
     ray_op_t* join = ray_join(g, left_tbl_op, left_keys, right_tbl_op, right_keys, 1, 0);
-    munit_assert_ptr_not_null(join);
+    TEST_ASSERT_NOT_NULL(join);
 
     ray_t* result = ray_execute(g, join);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Should match exactly 3 rows (ids 5, 10, 15) */
-    munit_assert(ray_table_nrows(result) == 3);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -679,21 +667,20 @@ static MunitResult test_sjoin_filter(const void* params, void* data) {
     ray_release(right_tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: SIP bitmap auto-construction from optimizer hint
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_sip_auto_build(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sip_auto_build(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Use >64 source nodes to trigger SIP auto-build */
     int64_t start_data[100];
@@ -706,10 +693,10 @@ static MunitResult test_sip_auto_build(const void* params, void* data) {
     ray_op_t* expand1 = ray_expand(g1, src1, rel, 0);
 
     ray_t* baseline = ray_execute(g1, expand1);
-    munit_assert_false(RAY_IS_ERR(baseline));
-    munit_assert_int(baseline->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(baseline));
+    TEST_ASSERT_EQ_I(baseline->type, RAY_TABLE);
     int64_t baseline_rows = ray_table_nrows(baseline);
-    munit_assert(baseline_rows > 0);
+    TEST_ASSERT_TRUE(baseline_rows > 0);
     ray_release(baseline);
     ray_graph_free(g1);
 
@@ -726,18 +713,18 @@ static MunitResult test_sip_auto_build(const void* params, void* data) {
             break;
         }
     }
-    munit_assert_ptr_not_null(ext);
+    TEST_ASSERT_NOT_NULL(ext);
     ext->base.pad[2] = 1;  /* SIP hint flag */
 
     ray_t* result = ray_execute(g2, expand2);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* All 4 nodes have degree > 0 — SIP should pass all, same count */
-    munit_assert(ray_table_nrows(result) == baseline_rows);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == baseline_rows);
 
     /* Verify sip_sel was auto-built */
-    munit_assert_ptr_not_null(ext->graph.sip_sel);
+    TEST_ASSERT_NOT_NULL(ext->graph.sip_sel);
 
     ray_release(result);
     ray_graph_free(g2);
@@ -746,15 +733,14 @@ static MunitResult test_sip_auto_build(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: Factorized EXPAND → GROUP pipeline (degree count shortcut)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_factorized_group(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_factorized_group(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -762,7 +748,7 @@ static MunitResult test_factorized_group(const void* params, void* data) {
     /* Graph: 0→1, 0→2, 1→2, 1→3, 2→3, 3→0
      * Out-degrees: 0=2, 1=2, 2=1, 3=1 */
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     int64_t start_data[] = {0, 1, 2, 3};
     ray_t* start_vec = ray_vec_from_raw(RAY_I64, start_data, 4);
@@ -786,25 +772,25 @@ static MunitResult test_factorized_group(const void* params, void* data) {
     ray_op_t* agg_ins[1] = { agg_cnt };
     uint16_t agg_ops[1] = { OP_COUNT };
     ray_op_t* group = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
-    munit_assert_ptr_not_null(group);
+    TEST_ASSERT_NOT_NULL(group);
 
     ray_t* result = ray_execute(g, group);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Factorized expand produces 4 rows (one per node with deg > 0).
      * GROUP BY _src COUNT(*) on factorized output should return 4 groups
      * with counts = degrees [2, 2, 1, 1]. */
-    munit_assert(ray_table_nrows(result) == 4);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 4);
 
     /* Verify total count across groups == total degree (6 edges) */
     int64_t agg_sym = ray_sym_intern("_agg", 4);
     ray_t* agg_col = ray_table_get_col(result, agg_sym);
-    munit_assert_ptr_not_null(agg_col);
+    TEST_ASSERT_NOT_NULL(agg_col);
     int64_t* agg_data = (int64_t*)ray_data(agg_col);
     int64_t total = 0;
     for (int64_t i = 0; i < agg_col->len; i++) total += agg_data[i];
-    munit_assert(total == 6);
+    TEST_ASSERT_TRUE(total == 6);
 
     ray_release(result);
     ray_graph_free(g);
@@ -813,15 +799,14 @@ static MunitResult test_factorized_group(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: ASP-Join (factorized left → filtered right build)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_asp_join(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_asp_join(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -841,8 +826,8 @@ static MunitResult test_asp_join(const void* params, void* data) {
     /* Right table: large, ids 0..99 — most don't match left */
     int64_t n_right = 100;
     ray_t* right_ids = ray_vec_new(RAY_I64, n_right);
-    munit_assert_ptr_not_null(right_ids);
-    munit_assert_false(RAY_IS_ERR(right_ids));
+    TEST_ASSERT_NOT_NULL(right_ids);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(right_ids));
     right_ids->len = n_right;
     int64_t* rid = (int64_t*)ray_data(right_ids);
     for (int64_t i = 0; i < n_right; i++) rid[i] = i;
@@ -872,14 +857,14 @@ static MunitResult test_asp_join(const void* params, void* data) {
     ray_op_t* right_keys[1] = { right_scan };
 
     ray_op_t* join = ray_join(g, left_tbl_op, left_keys, right_tbl_op, right_keys, 1, 0);
-    munit_assert_ptr_not_null(join);
+    TEST_ASSERT_NOT_NULL(join);
 
     ray_t* result = ray_execute(g, join);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Should match exactly 3 rows (ids 2, 5, 8) */
-    munit_assert(ray_table_nrows(result) == 3);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -887,21 +872,20 @@ static MunitResult test_asp_join(const void* params, void* data) {
     ray_release(right_tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_EXPAND direction==2 (both forward + reverse)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_expand_both(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_expand_both(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Expand from node 1 in BOTH directions:
      * Fwd: 1->2, 1->3 (2 edges)
@@ -915,9 +899,9 @@ static MunitResult test_expand_both(const void* params, void* data) {
     ray_op_t* expand = ray_expand(g, src, rel, 2);  /* direction=2: both */
 
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert(ray_table_nrows(result) == 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -926,15 +910,14 @@ static MunitResult test_expand_both(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_VAR_EXPAND reverse direction
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_var_expand_reverse(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_var_expand_reverse(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -953,9 +936,9 @@ static MunitResult test_var_expand_reverse(const void* params, void* data) {
     ray_op_t* var_exp = ray_var_expand(g, src, rel, 1, 1, 3, false);
 
     ray_t* result = ray_execute(g, var_exp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert(ray_table_nrows(result) == 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -964,15 +947,14 @@ static MunitResult test_var_expand_reverse(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_VAR_EXPAND direction==2 (both)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_var_expand_both(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_var_expand_both(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -991,9 +973,9 @@ static MunitResult test_var_expand_both(const void* params, void* data) {
     ray_op_t* var_exp = ray_var_expand(g, src, rel, 2, 1, 1, false);
 
     ray_t* result = ray_execute(g, var_exp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert(ray_table_nrows(result) == 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1002,15 +984,14 @@ static MunitResult test_var_expand_both(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_SHORTEST_PATH reverse direction
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_shortest_path_reverse(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_shortest_path_reverse(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1033,10 +1014,10 @@ static MunitResult test_shortest_path_reverse(const void* params, void* data) {
     }
 
     ray_t* result = ray_execute(g, sp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* Reverse path 0->3: 0's rev neighbor is 3. Direct path of 2 nodes. */
-    munit_assert(ray_table_nrows(result) == 2);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 2);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1044,66 +1025,64 @@ static MunitResult test_shortest_path_reverse(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: CSR save/load/mmap roundtrip
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_csr_save_load(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csr_save_load(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, true);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Save */
     const char* dir = "/tmp/test_csr_save";
     ray_err_t err = ray_rel_save(rel, dir);
-    munit_assert_int(err, ==, RAY_OK);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
 
     /* Load */
     ray_rel_t* loaded = ray_rel_load(dir);
-    munit_assert_ptr_not_null(loaded);
-    munit_assert(loaded->fwd.n_nodes == 4);
-    munit_assert(loaded->fwd.n_edges == 6);
-    munit_assert(loaded->rev.n_nodes == 4);
-    munit_assert(loaded->rev.n_edges == 6);
-    munit_assert_true(loaded->fwd.sorted);
+    TEST_ASSERT_NOT_NULL(loaded);
+    TEST_ASSERT_TRUE(loaded->fwd.n_nodes == 4);
+    TEST_ASSERT_TRUE(loaded->fwd.n_edges == 6);
+    TEST_ASSERT_TRUE(loaded->rev.n_nodes == 4);
+    TEST_ASSERT_TRUE(loaded->rev.n_edges == 6);
+    TEST_ASSERT_TRUE(loaded->fwd.sorted);
 
     /* Verify neighbor data matches */
     int64_t cnt_orig, cnt_loaded;
     int64_t* nbrs_orig = ray_csr_neighbors(&rel->fwd, 0, &cnt_orig);
     int64_t* nbrs_loaded = ray_csr_neighbors(&loaded->fwd, 0, &cnt_loaded);
-    munit_assert(cnt_orig == cnt_loaded);
+    TEST_ASSERT_TRUE(cnt_orig == cnt_loaded);
     for (int64_t i = 0; i < cnt_orig; i++)
-        munit_assert(nbrs_orig[i] == nbrs_loaded[i]);
+        TEST_ASSERT_TRUE(nbrs_orig[i] == nbrs_loaded[i]);
 
     ray_rel_free(loaded);
 
     /* Mmap */
     ray_rel_t* mmapped = ray_rel_mmap(dir);
-    munit_assert_ptr_not_null(mmapped);
-    munit_assert(mmapped->fwd.n_nodes == 4);
-    munit_assert(mmapped->fwd.n_edges == 6);
+    TEST_ASSERT_NOT_NULL(mmapped);
+    TEST_ASSERT_TRUE(mmapped->fwd.n_nodes == 4);
+    TEST_ASSERT_TRUE(mmapped->fwd.n_edges == 6);
 
     ray_rel_free(mmapped);
     ray_rel_free(rel);
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: CSR with out-of-range node IDs (should silently skip)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_csr_out_of_range(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csr_out_of_range(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1120,29 +1099,28 @@ static MunitResult test_csr_out_of_range(const void* params, void* data) {
     ray_release(sv); ray_release(dv);
 
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Fwd CSR filters by src key: both src=0 are valid, so 2 fwd edges */
-    munit_assert(rel->fwd.n_edges == 2);
-    munit_assert(ray_csr_degree(&rel->fwd, 0) == 2);
+    TEST_ASSERT_TRUE(rel->fwd.n_edges == 2);
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->fwd, 0) == 2);
 
     /* Rev CSR filters by dst key: dst=1 is valid, dst=99 is out-of-range → 1 edge */
-    munit_assert(rel->rev.n_edges == 1);
-    munit_assert(ray_csr_degree(&rel->rev, 1) == 1);
+    TEST_ASSERT_TRUE(rel->rev.n_edges == 1);
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->rev, 1) == 1);
 
     ray_rel_free(rel);
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: CSR with empty edge table
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_csr_empty(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csr_empty(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1158,14 +1136,14 @@ static MunitResult test_csr_empty(const void* params, void* data) {
     ray_release(sv); ray_release(dv);
 
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_ptr_not_null(rel);
-    munit_assert(rel->fwd.n_edges == 0);
-    munit_assert(rel->rev.n_edges == 0);
-    munit_assert(rel->fwd.n_nodes == 4);
+    TEST_ASSERT_NOT_NULL(rel);
+    TEST_ASSERT_TRUE(rel->fwd.n_edges == 0);
+    TEST_ASSERT_TRUE(rel->rev.n_edges == 0);
+    TEST_ASSERT_TRUE(rel->fwd.n_nodes == 4);
 
     /* All degrees should be 0 */
     for (int i = 0; i < 4; i++)
-        munit_assert(ray_csr_degree(&rel->fwd, i) == 0);
+        TEST_ASSERT_TRUE(ray_csr_degree(&rel->fwd, i) == 0);
 
     /* Expand from empty graph should return 0 rows */
     int64_t start_data[] = {0, 1};
@@ -1174,8 +1152,8 @@ static MunitResult test_csr_empty(const void* params, void* data) {
     ray_op_t* src = ray_const_vec(g, start_vec);
     ray_op_t* expand = ray_expand(g, src, rel, 0);
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert(ray_table_nrows(result) == 0);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 0);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1184,15 +1162,14 @@ static MunitResult test_csr_empty(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: CSR type validation (non-I64 columns rejected)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_csr_type_validation(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csr_type_validation(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1209,26 +1186,25 @@ static MunitResult test_csr_type_validation(const void* params, void* data) {
     ray_release(sv); ray_release(dv);
 
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 3, 3, false);
-    munit_assert_ptr_equal(rel, NULL);  /* Should fail due to type check */
+    TEST_ASSERT_EQ_PTR(rel, NULL);  /* Should fail due to type check */
 
     /* Also test negative n_nodes */
     ray_t* edges2 = make_edge_table();
     ray_rel_t* rel2 = ray_rel_from_edges(edges2, "src", "dst", -1, 4, false);
-    munit_assert_ptr_equal(rel2, NULL);
+    TEST_ASSERT_EQ_PTR(rel2, NULL);
 
     ray_release(edges2);
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: Graph with self-loop edges
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_self_loop(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_self_loop(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1245,8 +1221,8 @@ static MunitResult test_self_loop(const void* params, void* data) {
     ray_release(sv); ray_release(dv);
 
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 2, 2, false);
-    munit_assert_ptr_not_null(rel);
-    munit_assert(rel->fwd.n_edges == 3);
+    TEST_ASSERT_NOT_NULL(rel);
+    TEST_ASSERT_TRUE(rel->fwd.n_edges == 3);
 
     /* Expand from node 0: self-loop 0->0 + 0->1 = 2 results */
     int64_t start_data[] = {0};
@@ -1256,8 +1232,8 @@ static MunitResult test_self_loop(const void* params, void* data) {
     ray_op_t* src = ray_const_vec(g, start_vec);
     ray_op_t* expand = ray_expand(g, src, rel, 0);
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert(ray_table_nrows(result) == 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 2);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1266,15 +1242,14 @@ static MunitResult test_self_loop(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: Expand with empty source vector
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_expand_empty_src(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_expand_empty_src(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1288,8 +1263,8 @@ static MunitResult test_expand_empty_src(const void* params, void* data) {
     ray_op_t* src = ray_const_vec(g, start_vec);
     ray_op_t* expand = ray_expand(g, src, rel, 0);
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert(ray_table_nrows(result) == 0);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 0);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1298,15 +1273,14 @@ static MunitResult test_expand_empty_src(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: ray_rel_build (FK-based CSR construction)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_rel_build(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_rel_build(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1319,40 +1293,39 @@ static MunitResult test_rel_build(const void* params, void* data) {
     ray_release(ref_vec);
 
     ray_rel_t* rel = ray_rel_build(tbl, "ref", 3, true);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Fwd: src=row index (0..3), dst=ref value */
-    munit_assert(rel->fwd.n_nodes == 4);  /* 4 rows */
-    munit_assert(rel->fwd.n_edges == 4);
-    munit_assert(ray_csr_degree(&rel->fwd, 0) == 1);  /* row 0 -> ref 2 */
-    munit_assert(ray_csr_degree(&rel->fwd, 1) == 1);  /* row 1 -> ref 0 */
+    TEST_ASSERT_TRUE(rel->fwd.n_nodes == 4);  /* 4 rows */
+    TEST_ASSERT_TRUE(rel->fwd.n_edges == 4);
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->fwd, 0) == 1);  /* row 0 -> ref 2 */
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->fwd, 1) == 1);  /* row 1 -> ref 0 */
 
     /* Rev: dst=ref target (0..2), src=row index */
-    munit_assert(rel->rev.n_nodes == 3);  /* 3 target nodes */
-    munit_assert(rel->rev.n_edges == 4);
-    munit_assert(ray_csr_degree(&rel->rev, 0) == 1);  /* target 0 <- row 1 */
-    munit_assert(ray_csr_degree(&rel->rev, 2) == 2);  /* target 2 <- rows 0,3 */
+    TEST_ASSERT_TRUE(rel->rev.n_nodes == 3);  /* 3 target nodes */
+    TEST_ASSERT_TRUE(rel->rev.n_edges == 4);
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->rev, 0) == 1);  /* target 0 <- row 1 */
+    TEST_ASSERT_TRUE(ray_csr_degree(&rel->rev, 2) == 2);  /* target 2 <- rows 0,3 */
 
-    munit_assert_true(rel->fwd.sorted);
+    TEST_ASSERT_TRUE(rel->fwd.sorted);
 
     /* Error cases */
-    munit_assert_ptr_equal(ray_rel_build(NULL, "ref", 3, false), NULL);
-    munit_assert_ptr_equal(ray_rel_build(tbl, "nonexistent", 3, false), NULL);
-    munit_assert_ptr_equal(ray_rel_build(tbl, "ref", -1, false), NULL);
+    TEST_ASSERT_EQ_PTR(ray_rel_build(NULL, "ref", 3, false), NULL);
+    TEST_ASSERT_EQ_PTR(ray_rel_build(tbl, "nonexistent", 3, false), NULL);
+    TEST_ASSERT_EQ_PTR(ray_rel_build(tbl, "ref", -1, false), NULL);
 
     ray_rel_free(rel);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: OP_SHORTEST_PATH direction==2 (bidirectional BFS)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_shortest_path_both(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_shortest_path_both(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1378,18 +1351,18 @@ static MunitResult test_shortest_path_both(const void* params, void* data) {
     }
 
     ray_t* result = ray_execute(g, sp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* With both fwd+rev from 0: fwd neighbors={1,2}, rev neighbors={3}.
      * BFS finds 3 at depth 1 via rev. Path: [0, 3] = 2 nodes. */
-    munit_assert(ray_table_nrows(result) == 2);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 2);
 
     int64_t node_sym = ray_sym_intern("_node", 5);
     ray_t* node_col = ray_table_get_col(result, node_sym);
     int64_t* nodes = (int64_t*)ray_data(node_col);
-    munit_assert(nodes[0] == 0);
-    munit_assert(nodes[1] == 3);
+    TEST_ASSERT_TRUE(nodes[0] == 0);
+    TEST_ASSERT_TRUE(nodes[1] == 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1397,15 +1370,14 @@ static MunitResult test_shortest_path_both(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: var_expand with max_depth==0 (should return empty)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_var_expand_depth0(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_var_expand_depth0(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1420,9 +1392,9 @@ static MunitResult test_var_expand_depth0(const void* params, void* data) {
     ray_op_t* var_exp = ray_var_expand(g, src, rel, 0, 1, 0, false);
 
     ray_t* result = ray_execute(g, var_exp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert(ray_table_nrows(result) == 0);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 0);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1431,45 +1403,43 @@ static MunitResult test_var_expand_depth0(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: WCO join with unsorted rels (should return error)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_wco_unsorted(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_wco_unsorted(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     /* Build with sorted=false */
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, false);
-    munit_assert_false(rel->fwd.sorted);
+    TEST_ASSERT_FALSE(rel->fwd.sorted);
 
     ray_rel_t* rels[3] = {rel, rel, rel};
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* wco = ray_wco_join(g, rels, 3, 3);
-    munit_assert_ptr_not_null(wco);
+    TEST_ASSERT_NOT_NULL(wco);
 
     ray_t* result = ray_execute(g, wco);
-    munit_assert_true(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(RAY_IS_ERR(result));
 
     ray_graph_free(g);
     ray_rel_free(rel);
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: Expand with out-of-range source node IDs at execution time
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_expand_oob_src(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_expand_oob_src(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1484,10 +1454,10 @@ static MunitResult test_expand_oob_src(const void* params, void* data) {
     ray_op_t* src = ray_const_vec(g, start_vec);
     ray_op_t* expand = ray_expand(g, src, rel, 0);
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     /* Node 0: 2 edges, node 99: skipped, node 1: 2 edges = 4 total */
-    munit_assert(ray_table_nrows(result) == 4);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 4);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1496,15 +1466,14 @@ static MunitResult test_expand_oob_src(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: Triangle exact count verification
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_triangle_exact(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_triangle_exact(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1526,8 +1495,8 @@ static MunitResult test_triangle_exact(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* wco = ray_wco_join(g, rels, 3, 3);
     ray_t* result = ray_execute(g, wco);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* K3 triangle pattern with variable ordering 0<1<2:
      * The LFTJ enumerates a where fwd[a] intersects:
@@ -1542,7 +1511,7 @@ static MunitResult test_triangle_exact(const void* params, void* data) {
      * a=2: fwd[2]={0,1}. b=0: fwd[0] intersect fwd[2] = {1,2} intersect {0,1} = {1}. Emit (2,0,1).
      * b=1: fwd[1] intersect fwd[2] = {0,2} intersect {0,1} = {0}. Emit (2,1,0).
      * Total: 6 directed triangles */
-    munit_assert(ray_table_nrows(result) == 6);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 6);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1550,15 +1519,14 @@ static MunitResult test_triangle_exact(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: LFTJ chain with 4 variables (a→b→c→d)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_wco_chain4(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_wco_chain4(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1580,20 +1548,20 @@ static MunitResult test_wco_chain4(const void* params, void* data) {
     ray_rel_t* rels[3] = {rel, rel, rel};
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* wco = ray_wco_join(g, rels, 3, 4);
-    munit_assert_ptr_not_null(wco);
+    TEST_ASSERT_NOT_NULL(wco);
 
     ray_t* result = ray_execute(g, wco);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* 3-hop paths: (0,1,2,3), (0,1,3,?), (0,2,3,?)
      * 0→1→2→3: valid. 0→1→3→?: no edges from 3. 0→2→3→?: no edges from 3.
      * 1→2→3→?: no edges from 3.
      * Only valid 3-hop: (0,1,2,3) = 1 path */
-    munit_assert(ray_table_nrows(result) == 1);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 1);
 
     /* Verify columns */
-    munit_assert(ray_table_ncols(result) == 4);
+    TEST_ASSERT_TRUE(ray_table_ncols(result) == 4);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1601,15 +1569,14 @@ static MunitResult test_wco_chain4(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: shortest_path src == dst (zero-hop)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_shortest_path_self(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_shortest_path_self(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1620,20 +1587,20 @@ static MunitResult test_shortest_path_self(const void* params, void* data) {
     ray_op_t* src_op = ray_const_i64(g, 2);
     ray_op_t* dst_op = ray_const_i64(g, 2);
     ray_op_t* sp = ray_shortest_path(g, src_op, dst_op, rel, 10);
-    munit_assert_ptr_not_null(sp);
+    TEST_ASSERT_NOT_NULL(sp);
 
     ray_t* result = ray_execute(g, sp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* src == dst: should return single row with node=2, depth=0 */
-    munit_assert(ray_table_nrows(result) == 1);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 1);
     ray_t* node_col = ray_table_get_col(result, ray_sym_intern("_node", 5));
     ray_t* depth_col = ray_table_get_col(result, ray_sym_intern("_depth", 6));
-    munit_assert_ptr_not_null(node_col);
-    munit_assert_ptr_not_null(depth_col);
-    munit_assert(((int64_t*)ray_data(node_col))[0] == 2);
-    munit_assert(((int64_t*)ray_data(depth_col))[0] == 0);
+    TEST_ASSERT_NOT_NULL(node_col);
+    TEST_ASSERT_NOT_NULL(depth_col);
+    TEST_ASSERT_TRUE(((int64_t*)ray_data(node_col))[0] == 2);
+    TEST_ASSERT_TRUE(((int64_t*)ray_data(depth_col))[0] == 0);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1641,53 +1608,51 @@ static MunitResult test_shortest_path_self(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: save/load verifies reverse CSR data
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_save_load_rev(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_save_load_rev(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* edges = make_edge_table();
     ray_rel_t* rel = ray_rel_from_edges(edges, "src", "dst", 4, 4, true);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     const char* dir = "/tmp/test_csr_rev";
     ray_err_t err = ray_rel_save(rel, dir);
-    munit_assert_int(err, ==, RAY_OK);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
 
     ray_rel_t* loaded = ray_rel_load(dir);
-    munit_assert_ptr_not_null(loaded);
+    TEST_ASSERT_NOT_NULL(loaded);
 
     /* Verify reverse CSR matches original */
-    munit_assert(loaded->rev.n_nodes == rel->rev.n_nodes);
-    munit_assert(loaded->rev.n_edges == rel->rev.n_edges);
+    TEST_ASSERT_TRUE(loaded->rev.n_nodes == rel->rev.n_nodes);
+    TEST_ASSERT_TRUE(loaded->rev.n_edges == rel->rev.n_edges);
     for (int64_t i = 0; i < 4; i++) {
-        munit_assert(ray_csr_degree(&loaded->rev, i) == ray_csr_degree(&rel->rev, i));
+        TEST_ASSERT_TRUE(ray_csr_degree(&loaded->rev, i) == ray_csr_degree(&rel->rev, i));
     }
     /* Verify sorted flags persisted */
-    munit_assert(loaded->fwd.sorted == true);
-    munit_assert(loaded->rev.sorted == true);
+    TEST_ASSERT_TRUE(loaded->fwd.sorted == true);
+    TEST_ASSERT_TRUE(loaded->rev.sorted == true);
 
     ray_rel_free(loaded);
     ray_rel_free(rel);
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: 4-clique WCO join (LFTJ with 4 vars, 6 rels)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_wco_4clique(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_wco_4clique(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1710,23 +1675,23 @@ static MunitResult test_wco_4clique(const void* params, void* data) {
     ray_release(sv); ray_release(dv);
 
     ray_rel_t* rel = ray_rel_from_edges(etbl, "src", "dst", 5, 5, true);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* 4-clique: 6 rels = all pairs among 4 variables */
     ray_rel_t* rels[6] = {rel, rel, rel, rel, rel, rel};
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* wco = ray_wco_join(g, rels, 6, 4);
-    munit_assert_ptr_not_null(wco);
+    TEST_ASSERT_NOT_NULL(wco);
 
     ray_t* result = ray_execute(g, wco);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* K5 bidirectional: each node's fwd neighbors are all 4 others.
      * LFTJ enumerates all ordered 4-tuples of distinct nodes:
      * 5 * 4 * 3 * 2 = 120 permutations (= 5 cliques * 4! orderings). */
-    munit_assert(ray_table_nrows(result) == 120);
-    munit_assert(ray_table_ncols(result) == 4);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 120);
+    TEST_ASSERT_TRUE(ray_table_ncols(result) == 4);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1734,22 +1699,21 @@ static MunitResult test_wco_4clique(const void* params, void* data) {
     ray_release(etbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: fvec module — ftable create/materialize
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_fvec_materialize(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_fvec_materialize(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     /* Create ftable with 2 columns: one flat, one unflat */
     ray_ftable_t* ft = ray_ftable_new(2);
-    munit_assert_ptr_not_null(ft);
-    munit_assert_int(ft->n_cols, ==, 2);
+    TEST_ASSERT_NOT_NULL(ft);
+    TEST_ASSERT_EQ_I(ft->n_cols, 2);
 
     /* Column 0: flat — single value replicated 5 times */
     int64_t vals0[] = {42, 99, 7};
@@ -1767,76 +1731,74 @@ static MunitResult test_fvec_materialize(const void* params, void* data) {
 
     /* Materialize */
     ray_t* result = ray_ftable_materialize(ft);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert(ray_table_nrows(result) == 5);
-    munit_assert(ray_table_ncols(result) == 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 5);
+    TEST_ASSERT_TRUE(ray_table_ncols(result) == 2);
 
     /* Verify flat column: all 5 values should be 99 */
     ray_t* c0 = ray_table_get_col(result, ray_sym_intern("_c0", 3));
-    munit_assert_ptr_not_null(c0);
+    TEST_ASSERT_NOT_NULL(c0);
     int64_t* d0 = (int64_t*)ray_data(c0);
     for (int64_t i = 0; i < 5; i++)
-        munit_assert(d0[i] == 99);
+        TEST_ASSERT_TRUE(d0[i] == 99);
 
     /* Verify unflat column: exact copy */
     ray_t* c1 = ray_table_get_col(result, ray_sym_intern("_c1", 3));
-    munit_assert_ptr_not_null(c1);
+    TEST_ASSERT_NOT_NULL(c1);
     int64_t* d1 = (int64_t*)ray_data(c1);
     for (int64_t i = 0; i < 5; i++)
-        munit_assert(d1[i] == vals1[i]);
+        TEST_ASSERT_TRUE(d1[i] == vals1[i]);
 
     ray_release(result);
     ray_ftable_free(ft);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: fvec — empty ftable materialization
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_fvec_empty(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_fvec_empty(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     /* 0 columns → error */
     ray_t* err = ray_ftable_materialize(NULL);
-    munit_assert(RAY_IS_ERR(err));
+    TEST_ASSERT_TRUE(RAY_IS_ERR(err));
 
     /* ftable with columns but no vec set → produces table with 0 real cols */
     ray_ftable_t* ft = ray_ftable_new(1);
-    munit_assert_ptr_not_null(ft);
+    TEST_ASSERT_NOT_NULL(ft);
     ft->columns[0].vec = NULL;
     ray_t* result = ray_ftable_materialize(ft);
     /* With no actual columns added, result should still be a valid table */
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     ray_release(result);
     ray_ftable_free(ft);
 
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: fvec — ftable free with semijoin
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_fvec_semijoin(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_fvec_semijoin(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_ftable_t* ft = ray_ftable_new(1);
-    munit_assert_ptr_not_null(ft);
+    TEST_ASSERT_NOT_NULL(ft);
 
     /* Set a semijoin bitmap */
     ray_t* sel = ray_sel_new(64);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ft->semijoin = sel;
 
     /* Set a column */
@@ -1846,8 +1808,8 @@ static MunitResult test_fvec_semijoin(const void* params, void* data) {
     ft->columns[0].cardinality = 3;
 
     ray_t* result = ray_ftable_materialize(ft);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert(ray_table_nrows(result) == 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 3);
     ray_release(result);
 
     /* Free should clean up semijoin bitmap too */
@@ -1855,15 +1817,14 @@ static MunitResult test_fvec_semijoin(const void* params, void* data) {
 
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: factorized expand with direction=1 (reverse)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_factorized_reverse(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_factorized_reverse(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1877,7 +1838,7 @@ static MunitResult test_factorized_reverse(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* src = ray_const_vec(g, start_vec);
     ray_op_t* expand = ray_expand(g, src, rel, 1);  /* direction=1 rev */
-    munit_assert_ptr_not_null(expand);
+    TEST_ASSERT_NOT_NULL(expand);
 
     /* Set factorized flag */
     ray_op_ext_t* ext = NULL;
@@ -1886,27 +1847,27 @@ static MunitResult test_factorized_reverse(const void* params, void* data) {
             ext = g->ext_nodes[i]; break;
         }
     }
-    munit_assert_ptr_not_null(ext);
+    TEST_ASSERT_NOT_NULL(ext);
     ext->graph.factorized = 1;
 
     ray_t* result = ray_execute(g, expand);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Reverse degrees: node 0 has 1 in-edge (3->0), node 1 has 1 (0->1),
      * node 2 has 2 in-edges (0->2, 1->2) */
-    munit_assert(ray_table_ncols(result) == 2);
+    TEST_ASSERT_TRUE(ray_table_ncols(result) == 2);
     int64_t cnt_sym = ray_sym_intern("_count", 6);
     ray_t* cnt_col = ray_table_get_col(result, cnt_sym);
-    munit_assert_ptr_not_null(cnt_col);
+    TEST_ASSERT_NOT_NULL(cnt_col);
     int64_t* counts = (int64_t*)ray_data(cnt_col);
     int64_t nrows = ray_table_nrows(result);
     /* All 3 nodes should have degree > 0, so all 3 appear */
-    munit_assert(nrows == 3);
+    TEST_ASSERT_TRUE(nrows == 3);
     /* Sum of degrees: 1 + 1 + 2 = 4 */
     int64_t sum = 0;
     for (int64_t i = 0; i < nrows; i++) sum += counts[i];
-    munit_assert(sum == 4);
+    TEST_ASSERT_TRUE(sum == 4);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1915,15 +1876,14 @@ static MunitResult test_factorized_reverse(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: LFTJ with disconnected/empty result
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_wco_empty_result(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_wco_empty_result(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1940,18 +1900,18 @@ static MunitResult test_wco_empty_result(const void* params, void* data) {
     ray_release(sv); ray_release(dv);
 
     ray_rel_t* rel = ray_rel_from_edges(etbl, "src", "dst", 4, 4, true);
-    munit_assert_ptr_not_null(rel);
+    TEST_ASSERT_NOT_NULL(rel);
 
     /* Triangle pattern (n_vars=3, n_rels=3) — no triangles exist */
     ray_rel_t* rels[3] = {rel, rel, rel};
     ray_graph_t* g = ray_graph_new(NULL);
     ray_op_t* wco = ray_wco_join(g, rels, 3, 3);
-    munit_assert_ptr_not_null(wco);
+    TEST_ASSERT_NOT_NULL(wco);
 
     ray_t* result = ray_execute(g, wco);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert(ray_table_nrows(result) == 0);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 0);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1959,15 +1919,14 @@ static MunitResult test_wco_empty_result(const void* params, void* data) {
     ray_release(etbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: var_expand with min_depth > max_depth (should return empty)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_var_expand_bad_range(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_var_expand_bad_range(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1981,13 +1940,13 @@ static MunitResult test_var_expand_bad_range(const void* params, void* data) {
     ray_op_t* src = ray_const_vec(g, start_vec);
     /* min_depth=5, max_depth=2 → no results possible */
     ray_op_t* ve = ray_var_expand(g, src, rel, 0, 5, 2, false);
-    munit_assert_ptr_not_null(ve);
+    TEST_ASSERT_NOT_NULL(ve);
 
     ray_t* result = ray_execute(g, ve);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* min > max means no depth qualifies → 0 rows */
-    munit_assert(ray_table_nrows(result) == 0);
+    TEST_ASSERT_TRUE(ray_table_nrows(result) == 0);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1996,14 +1955,13 @@ static MunitResult test_var_expand_bad_range(const void* params, void* data) {
     ray_release(edges);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * test_degree_cent: in/out/total degree from CSR offsets
  * -------------------------------------------------------------------------- */
-static MunitResult test_degree_cent(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_degree_cent(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2017,12 +1975,12 @@ static MunitResult test_degree_cent(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(tbl);
 
     ray_op_t* dc = ray_degree_cent(g, rel);
-    munit_assert_ptr_not_null(dc);
+    TEST_ASSERT_NOT_NULL(dc);
 
     ray_t* result = ray_execute(g, dc);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     /* Graph: 0→1, 0→2, 1→2, 1→3, 2→3, 3→0
      * Node 0: out=2, in=1, total=3
@@ -2037,30 +1995,30 @@ static MunitResult test_degree_cent(const void* params, void* data) {
     ray_t* in_col  = ray_table_get_col(result, in_sym);
     ray_t* deg_col = ray_table_get_col(result, deg_sym);
 
-    munit_assert_ptr_not_null(out_col);
-    munit_assert_ptr_not_null(in_col);
-    munit_assert_ptr_not_null(deg_col);
+    TEST_ASSERT_NOT_NULL(out_col);
+    TEST_ASSERT_NOT_NULL(in_col);
+    TEST_ASSERT_NOT_NULL(deg_col);
 
     int64_t* out_d = (int64_t*)ray_data(out_col);
     int64_t* in_d  = (int64_t*)ray_data(in_col);
     int64_t* deg_d = (int64_t*)ray_data(deg_col);
 
     /* Node 0: out=2, in=1, total=3 */
-    munit_assert_int(out_d[0], ==, 2);
-    munit_assert_int(in_d[0],  ==, 1);
-    munit_assert_int(deg_d[0], ==, 3);
+    TEST_ASSERT_EQ_I(out_d[0], 2);
+    TEST_ASSERT_EQ_I(in_d[0], 1);
+    TEST_ASSERT_EQ_I(deg_d[0], 3);
     /* Node 1: out=2, in=1, total=3 */
-    munit_assert_int(out_d[1], ==, 2);
-    munit_assert_int(in_d[1],  ==, 1);
-    munit_assert_int(deg_d[1], ==, 3);
+    TEST_ASSERT_EQ_I(out_d[1], 2);
+    TEST_ASSERT_EQ_I(in_d[1], 1);
+    TEST_ASSERT_EQ_I(deg_d[1], 3);
     /* Node 2: out=1, in=2, total=3 */
-    munit_assert_int(out_d[2], ==, 1);
-    munit_assert_int(in_d[2],  ==, 2);
-    munit_assert_int(deg_d[2], ==, 3);
+    TEST_ASSERT_EQ_I(out_d[2], 1);
+    TEST_ASSERT_EQ_I(in_d[2], 2);
+    TEST_ASSERT_EQ_I(deg_d[2], 3);
     /* Node 3: out=1, in=2, total=3 */
-    munit_assert_int(out_d[3], ==, 1);
-    munit_assert_int(in_d[3],  ==, 2);
-    munit_assert_int(deg_d[3], ==, 3);
+    TEST_ASSERT_EQ_I(out_d[3], 1);
+    TEST_ASSERT_EQ_I(in_d[3], 2);
+    TEST_ASSERT_EQ_I(deg_d[3], 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -2069,7 +2027,7 @@ static MunitResult test_degree_cent(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* DAG: 0→1, 0→2, 1→3, 2→3 (4 nodes, 4 edges, no cycles) */
@@ -2092,8 +2050,7 @@ static ray_t* make_dag_edge_table(void) {
     return tbl;
 }
 
-static MunitResult test_topsort(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_topsort(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2107,32 +2064,32 @@ static MunitResult test_topsort(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(tbl);
 
     ray_op_t* ts = ray_topsort(g, rel);
-    munit_assert_ptr_not_null(ts);
+    TEST_ASSERT_NOT_NULL(ts);
 
     ray_t* result = ray_execute(g, ts);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     /* DAG: 0→1, 0→2, 1→3, 2→3
      * Valid orderings: 0 must come before 1,2; 1,2 before 3 */
     int64_t order_sym = ray_sym_intern("_order", 6);
     ray_t* order_col = ray_table_get_col(result, order_sym);
-    munit_assert_ptr_not_null(order_col);
+    TEST_ASSERT_NOT_NULL(order_col);
     int64_t* ord = (int64_t*)ray_data(order_col);
 
     /* Order values must be a valid permutation of [0..3] */
     uint8_t seen[4] = {0};
     for (int i = 0; i < 4; i++) {
-        munit_assert_true(ord[i] >= 0 && ord[i] < 4);
-        munit_assert_false(seen[ord[i]]);
+        TEST_ASSERT_TRUE(ord[i] >= 0 && ord[i] < 4);
+        TEST_ASSERT_FALSE(seen[ord[i]]);
         seen[ord[i]] = 1;
     }
     /* Node 0 must come before 1,2; node 3 must come after 1,2 */
-    munit_assert_true(ord[0] < ord[1]);
-    munit_assert_true(ord[0] < ord[2]);
-    munit_assert_true(ord[3] > ord[1]);
-    munit_assert_true(ord[3] > ord[2]);
+    TEST_ASSERT_TRUE(ord[0] < ord[1]);
+    TEST_ASSERT_TRUE(ord[0] < ord[2]);
+    TEST_ASSERT_TRUE(ord[3] > ord[1]);
+    TEST_ASSERT_TRUE(ord[3] > ord[2]);
 
     ray_release(result);
     ray_graph_free(g);
@@ -2141,11 +2098,10 @@ static MunitResult test_topsort(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_topsort_cycle(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_topsort_cycle(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2163,7 +2119,7 @@ static MunitResult test_topsort_cycle(const void* params, void* data) {
     ray_t* result = ray_execute(g, ts);
 
     /* Cycle detected — should return error */
-    munit_assert_true(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(RAY_IS_ERR(result));
 
     ray_graph_free(g);
     ray_rel_free(rel);
@@ -2171,11 +2127,10 @@ static MunitResult test_topsort_cycle(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dfs(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_dfs(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2191,14 +2146,14 @@ static MunitResult test_dfs(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(src_tbl);
     ray_op_t* src_op = ray_scan(g, "src");
     ray_op_t* dfs = ray_dfs(g, src_op, rel, 255);
-    munit_assert_ptr_not_null(dfs);
+    TEST_ASSERT_NOT_NULL(dfs);
 
     ray_t* result = ray_execute(g, dfs);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     /* All 4 nodes should be reachable from node 0 */
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     /* Node 0 should have depth 0 and parent -1 */
     int64_t node_sym   = ray_sym_intern("_node", 5);
@@ -2208,29 +2163,29 @@ static MunitResult test_dfs(const void* params, void* data) {
     ray_t* node_col   = ray_table_get_col(result, node_sym);
     ray_t* depth_col  = ray_table_get_col(result, depth_sym);
     ray_t* parent_col = ray_table_get_col(result, parent_sym);
-    munit_assert_ptr_not_null(node_col);
-    munit_assert_ptr_not_null(depth_col);
-    munit_assert_ptr_not_null(parent_col);
+    TEST_ASSERT_NOT_NULL(node_col);
+    TEST_ASSERT_NOT_NULL(depth_col);
+    TEST_ASSERT_NOT_NULL(parent_col);
 
     int64_t* nodes   = (int64_t*)ray_data(node_col);
     int64_t* depths  = (int64_t*)ray_data(depth_col);
     int64_t* parents = (int64_t*)ray_data(parent_col);
 
     /* First node in DFS order should be source (node 0) */
-    munit_assert_int(nodes[0], ==, 0);
-    munit_assert_int(depths[0], ==, 0);
-    munit_assert_int(parents[0], ==, -1);
+    TEST_ASSERT_EQ_I(nodes[0], 0);
+    TEST_ASSERT_EQ_I(depths[0], 0);
+    TEST_ASSERT_EQ_I(parents[0], -1);
 
     /* All 4 nodes must be distinct and valid */
     uint8_t node_seen[4] = {0};
     for (int64_t i = 0; i < 4; i++) {
-        munit_assert_true(nodes[i] >= 0 && nodes[i] < 4);
-        munit_assert_false(node_seen[nodes[i]]);
+        TEST_ASSERT_TRUE(nodes[i] >= 0 && nodes[i] < 4);
+        TEST_ASSERT_FALSE(node_seen[nodes[i]]);
         node_seen[nodes[i]] = 1;
-        munit_assert_int(depths[i], >=, 0);
+        TEST_ASSERT((depths[i]) >= (0), "depths[i] >= 0");
         /* Non-root nodes must have a valid parent */
         if (i > 0) {
-            munit_assert_true(parents[i] >= 0 && parents[i] < 4);
+            TEST_ASSERT_TRUE(parents[i] >= 0 && parents[i] < 4);
         }
     }
 
@@ -2241,11 +2196,10 @@ static MunitResult test_dfs(const void* params, void* data) {
     ray_release(src_tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dfs_max_depth(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_dfs_max_depth(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2262,11 +2216,11 @@ static MunitResult test_dfs_max_depth(const void* params, void* data) {
     ray_op_t* dfs = ray_dfs(g, src_op, rel, 1);  /* max depth = 1 */
 
     ray_t* result = ray_execute(g, dfs);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     /* With max_depth=1 from node 0: nodes 0, 1, 2 (not 3) */
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     /* Verify correct nodes and depths */
     int64_t node_sym   = ray_sym_intern("_node", 5);
@@ -2277,13 +2231,13 @@ static MunitResult test_dfs_max_depth(const void* params, void* data) {
     int64_t* ds = (int64_t*)ray_data(depth_col);
     uint8_t found[4] = {0};
     for (int64_t i = 0; i < 3; i++) {
-        munit_assert_true(ds[i] <= 1);
-        munit_assert_true(ns[i] >= 0 && ns[i] < 4);
+        TEST_ASSERT_TRUE(ds[i] <= 1);
+        TEST_ASSERT_TRUE(ns[i] >= 0 && ns[i] < 4);
         found[ns[i]] = 1;
     }
     /* Node 3 should not be reached at depth 1 */
-    munit_assert_true(found[0] && found[1] && found[2]);
-    munit_assert_false(found[3]);
+    TEST_ASSERT_TRUE(found[0] && found[1] && found[2]);
+    TEST_ASSERT_FALSE(found[3]);
 
     ray_release(result);
     ray_graph_free(g);
@@ -2292,14 +2246,13 @@ static MunitResult test_dfs_max_depth(const void* params, void* data) {
     ray_release(src_tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * test_cluster_coeff: clustering coefficient via triangle counting
  * -------------------------------------------------------------------------- */
-static MunitResult test_cluster_coeff(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_cluster_coeff(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2316,12 +2269,12 @@ static MunitResult test_cluster_coeff(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(tbl);
 
     ray_op_t* cc = ray_cluster_coeff(g, rel);
-    munit_assert_ptr_not_null(cc);
+    TEST_ASSERT_NOT_NULL(cc);
 
     ray_t* result = ray_execute(g, cc);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     /* Verify exact clustering coefficients.
      * Graph edges: 0->1, 0->2, 1->2, 1->3, 2->3, 3->0 (directed).
@@ -2333,11 +2286,11 @@ static MunitResult test_cluster_coeff(const void* params, void* data) {
      * Node 3 (deg=3, pairs=6): fwd edges among {0,1,2}: 0->1,0->2,1->2 = 3; coeff=3/6=0.5 */
     int64_t coeff_sym = ray_sym_intern("_coefficient", 12);
     ray_t* coeff_col = ray_table_get_col(result, coeff_sym);
-    munit_assert_ptr_not_null(coeff_col);
+    TEST_ASSERT_NOT_NULL(coeff_col);
     double* coeffs = (double*)ray_data(coeff_col);
     for (int i = 0; i < 4; i++) {
-        munit_assert_double(coeffs[i], >=, 0.49);
-        munit_assert_double(coeffs[i], <=, 0.51);
+        TEST_ASSERT((coeffs[i]) >= (0.49), "double >= failed");
+        TEST_ASSERT((coeffs[i]) <= (0.51), "double <= failed");
     }
 
     ray_release(result);
@@ -2347,15 +2300,14 @@ static MunitResult test_cluster_coeff(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: Random walk
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_random_walk(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_random_walk(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2370,20 +2322,20 @@ static MunitResult test_random_walk(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(src_tbl);
     ray_op_t* src_op = ray_scan(g, "src");
     ray_op_t* rw = ray_random_walk(g, src_op, rel, 10);
-    munit_assert_ptr_not_null(rw);
+    TEST_ASSERT_NOT_NULL(rw);
 
     ray_t* result = ray_execute(g, rw);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     /* Should have 11 rows (start + 10 steps) */
-    munit_assert_int(ray_table_nrows(result), ==, 11);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 11);
 
     /* First node should be source (0) */
     int64_t node_sym = ray_sym_intern("_node", 5);
     ray_t* node_col = ray_table_get_col(result, node_sym);
     int64_t* nodes = (int64_t*)ray_data(node_col);
-    munit_assert_int(nodes[0], ==, 0);
+    TEST_ASSERT_EQ_I(nodes[0], 0);
 
     /* All nodes should be valid (0..3) and consecutive pairs must be edges.
      * Graph edges: 0->1, 0->2, 1->2, 1->3, 2->3, 3->0 */
@@ -2391,8 +2343,8 @@ static MunitResult test_random_walk(const void* params, void* data) {
     int edges_dst[] = {1, 2, 2, 3, 3, 0};
     int n_edges = 6;
     for (int i = 0; i < 11; i++) {
-        munit_assert(nodes[i] >= 0);
-        munit_assert(nodes[i] < 4);
+        TEST_ASSERT_TRUE(nodes[i] >= 0);
+        TEST_ASSERT_TRUE(nodes[i] < 4);
         if (i > 0) {
             bool valid_edge = false;
             for (int e = 0; e < n_edges; e++) {
@@ -2401,7 +2353,7 @@ static MunitResult test_random_walk(const void* params, void* data) {
                     break;
                 }
             }
-            munit_assert_true(valid_edge);
+            TEST_ASSERT_TRUE(valid_edge);
         }
     }
 
@@ -2410,7 +2362,7 @@ static MunitResult test_random_walk(const void* params, void* data) {
     ray_t* step_col = ray_table_get_col(result, step_sym);
     int64_t* steps = (int64_t*)ray_data(step_col);
     for (int i = 0; i < 11; i++) {
-        munit_assert_int(steps[i], ==, i);
+        TEST_ASSERT_EQ_I(steps[i], i);
     }
 
     ray_release(result);
@@ -2420,7 +2372,7 @@ static MunitResult test_random_walk(const void* params, void* data) {
     ray_release(src_tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
@@ -2471,8 +2423,7 @@ static void make_astar_graph(ray_t** out_edges, ray_rel_t** out_rel,
     *out_node_props = np;
 }
 
-static MunitResult test_astar(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_astar(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2483,15 +2434,15 @@ static MunitResult test_astar(const void* params, void* data) {
     ray_op_t* src = ray_const_i64(g, 0);
     ray_op_t* dst = ray_const_i64(g, 4);
     ray_op_t* as = ray_astar(g, src, dst, rel, "weight", "lat", "lon", node_props, 255);
-    munit_assert_ptr_not_null(as);
+    TEST_ASSERT_NOT_NULL(as);
 
     ray_t* result = ray_execute(g, as);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     /* Should find path to node 4 with dist=6.0 (0->1->3->4: 1+2+3) */
     int64_t nrows = ray_table_nrows(result);
-    munit_assert_int(nrows, >, 0);
+    TEST_ASSERT((nrows) > (0), "nrows > 0");
 
     int64_t node_sym = ray_sym_intern("_node", 5);
     int64_t dist_sym = ray_sym_intern("_dist", 5);
@@ -2503,12 +2454,12 @@ static MunitResult test_astar(const void* params, void* data) {
     bool found = false;
     for (int64_t i = 0; i < nrows; i++) {
         if (nodes[i] == 4) {
-            munit_assert_double(dists[i], >=, 5.99);
-            munit_assert_double(dists[i], <=, 6.01);
+            TEST_ASSERT((dists[i]) >= (5.99), "double >= failed");
+            TEST_ASSERT((dists[i]) <= (6.01), "double <= failed");
             found = true;
         }
     }
-    munit_assert_true(found);
+    TEST_ASSERT_TRUE(found);
 
     ray_release(result);
     ray_graph_free(g);
@@ -2517,11 +2468,10 @@ static MunitResult test_astar(const void* params, void* data) {
     ray_release(node_props);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_k_shortest(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_k_shortest(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2532,28 +2482,28 @@ static MunitResult test_k_shortest(const void* params, void* data) {
     ray_op_t* src = ray_const_i64(g, 0);
     ray_op_t* dst = ray_const_i64(g, 4);
     ray_op_t* ks = ray_k_shortest(g, src, dst, rel, "weight", 3);
-    munit_assert_ptr_not_null(ks);
+    TEST_ASSERT_NOT_NULL(ks);
 
     ray_t* result = ray_execute(g, ks);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     /* Should find at least 2 paths: 0->1->3->4 (6.0) and 0->2->3->4 (8.0) */
     int64_t nrows = ray_table_nrows(result);
-    munit_assert_int(nrows, >=, 2);
+    TEST_ASSERT((nrows) >= (2), "nrows >= 2");
 
     /* Check path_id column exists */
     int64_t pid_sym = ray_sym_intern("_path_id", 8);
     ray_t* pid_col = ray_table_get_col(result, pid_sym);
-    munit_assert_ptr_not_null(pid_col);
+    TEST_ASSERT_NOT_NULL(pid_col);
 
     /* First path should have lowest total distance */
     int64_t dist_sym = ray_sym_intern("_dist", 5);
     ray_t* dist_col = ray_table_get_col(result, dist_sym);
     double* dists = (double*)ray_data(dist_col);
     /* First row of path 0 should be source with dist 0 */
-    munit_assert_double(dists[0], >=, -0.01);
-    munit_assert_double(dists[0], <=, 0.01);
+    TEST_ASSERT((dists[0]) >= (-0.01), "double >= failed");
+    TEST_ASSERT((dists[0]) <= (0.01), "double <= failed");
 
     /* Verify path_id 0 exists and ends at dst with dist ~6.0 */
     int64_t node_sym = ray_sym_intern("_node", 5);
@@ -2566,9 +2516,9 @@ static MunitResult test_k_shortest(const void* params, void* data) {
     for (int64_t i = 0; i < nrows; i++) {
         if (pids[i] == 0) last_p0 = i;
     }
-    munit_assert_int(nodes_arr[last_p0], ==, 4);
-    munit_assert_double(dists[last_p0], >=, 5.99);
-    munit_assert_double(dists[last_p0], <=, 6.01);
+    TEST_ASSERT_EQ_I(nodes_arr[last_p0], 4);
+    TEST_ASSERT((dists[last_p0]) >= (5.99), "double >= failed");
+    TEST_ASSERT((dists[last_p0]) <= (6.01), "double <= failed");
 
     ray_release(result);
     ray_graph_free(g);
@@ -2577,15 +2527,14 @@ static MunitResult test_k_shortest(const void* params, void* data) {
     ray_release(node_props);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: betweenness centrality (Brandes, exact)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_betweenness(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_betweenness(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2601,16 +2550,16 @@ static MunitResult test_betweenness(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(tbl);
 
     ray_op_t* bc = ray_betweenness(g, rel, 0);  /* exact */
-    munit_assert_ptr_not_null(bc);
+    TEST_ASSERT_NOT_NULL(bc);
 
     ray_t* result = ray_execute(g, bc);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     int64_t cent_sym = ray_sym_intern("_centrality", 11);
     ray_t* cent_col = ray_table_get_col(result, cent_sym);
-    munit_assert_ptr_not_null(cent_col);
+    TEST_ASSERT_NOT_NULL(cent_col);
     double* cents = (double*)ray_data(cent_col);
 
     /* Undirected K_{2,2} (0-1, 0-2, 1-3, 2-3): each node is the sole
@@ -2618,8 +2567,8 @@ static MunitResult test_betweenness(const void* params, void* data) {
      * 1-0-2, but sigma_{1,2}=2 since 1-3-2 also exists), giving C_B = 0.5.
      * By symmetry all four nodes have equal betweenness. */
     for (int i = 0; i < 4; i++) {
-        munit_assert_double(cents[i] - 0.5, >=, -1e-9);
-        munit_assert_double(cents[i] - 0.5, <=, 1e-9);
+        TEST_ASSERT((cents[i] - 0.5) >= (-1e-9), "double >= failed");
+        TEST_ASSERT((cents[i] - 0.5) <= (1e-9), "double <= failed");
     }
 
     ray_release(result);
@@ -2629,15 +2578,14 @@ static MunitResult test_betweenness(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: betweenness centrality (Brandes, sampled)
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_betweenness_sampled(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_betweenness_sampled(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2652,17 +2600,17 @@ static MunitResult test_betweenness_sampled(const void* params, void* data) {
 
     ray_op_t* bc = ray_betweenness(g, rel, 2);  /* sample 2 sources */
     ray_t* result = ray_execute(g, bc);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     /* Verify centrality values are non-negative */
     int64_t cent_sym = ray_sym_intern("_centrality", 11);
     ray_t* cent_col = ray_table_get_col(result, cent_sym);
-    munit_assert_ptr_not_null(cent_col);
+    TEST_ASSERT_NOT_NULL(cent_col);
     double* cents = (double*)ray_data(cent_col);
     for (int i = 0; i < 4; i++) {
-        munit_assert_double(cents[i], >=, 0.0);
+        TEST_ASSERT((cents[i]) >= (0.0), "double >= failed");
     }
 
     ray_release(result);
@@ -2672,11 +2620,10 @@ static MunitResult test_betweenness_sampled(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_closeness(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_closeness(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2691,9 +2638,9 @@ static MunitResult test_closeness(const void* params, void* data) {
 
     ray_op_t* cc = ray_closeness(g, rel, 0);  /* exact */
     ray_t* result = ray_execute(g, cc);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     int64_t cent_sym = ray_sym_intern("_centrality", 11);
     ray_t* cent_col = ray_table_get_col(result, cent_sym);
@@ -2701,8 +2648,8 @@ static MunitResult test_closeness(const void* params, void* data) {
 
     /* All nodes should have positive closeness in a connected graph */
     for (int i = 0; i < 4; i++) {
-        munit_assert_double(cents[i], >, 0.0);
-        munit_assert_double(cents[i], <=, 1.0);
+        TEST_ASSERT((cents[i]) > (0.0), "double > failed");
+        TEST_ASSERT((cents[i]) <= (1.0), "double <= failed");
     }
 
     ray_release(result);
@@ -2712,11 +2659,10 @@ static MunitResult test_closeness(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_closeness_sampled(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_closeness_sampled(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2731,17 +2677,17 @@ static MunitResult test_closeness_sampled(const void* params, void* data) {
 
     ray_op_t* cc = ray_closeness(g, rel, 2);  /* sample 2 sources */
     ray_t* result = ray_execute(g, cc);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     /* Verify centrality values are positive */
     int64_t cent_sym = ray_sym_intern("_centrality", 11);
     ray_t* cent_col = ray_table_get_col(result, cent_sym);
-    munit_assert_ptr_not_null(cent_col);
+    TEST_ASSERT_NOT_NULL(cent_col);
     double* cents = (double*)ray_data(cent_col);
     for (int i = 0; i < 2; i++) {
-        munit_assert_double(cents[i], >, 0.0);
+        TEST_ASSERT((cents[i]) > (0.0), "double > failed");
     }
 
     ray_release(result);
@@ -2751,11 +2697,10 @@ static MunitResult test_closeness_sampled(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_mst(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_mst(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2772,24 +2717,24 @@ static MunitResult test_mst(const void* params, void* data) {
     ray_graph_t* g = ray_graph_new(tbl);
 
     ray_op_t* mst = ray_mst(g, rel, "weight");
-    munit_assert_ptr_not_null(mst);
+    TEST_ASSERT_NOT_NULL(mst);
 
     ray_t* result = ray_execute(g, mst);
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     /* MST of 5 nodes has 4 edges */
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     /* Total weight should be 7.0 */
     int64_t w_sym = ray_sym_intern("_weight", 7);
     ray_t* w_col = ray_table_get_col(result, w_sym);
-    munit_assert_ptr_not_null(w_col);
+    TEST_ASSERT_NOT_NULL(w_col);
     double* ws = (double*)ray_data(w_col);
     double total = 0.0;
     for (int i = 0; i < 4; i++) total += ws[i];
-    munit_assert_double(total, >=, 6.99);
-    munit_assert_double(total, <=, 7.01);
+    TEST_ASSERT((total) >= (6.99), "double >= failed");
+    TEST_ASSERT((total) <= (7.01), "double <= failed");
 
     ray_release(result);
     ray_graph_free(g);
@@ -2799,77 +2744,71 @@ static MunitResult test_mst(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Suite definition
  * -------------------------------------------------------------------------- */
 
-static MunitTest csr_tests[] = {
-    { "/build",            test_csr_build,            NULL, NULL, 0, NULL },
-    { "/sorted",           test_csr_sorted,           NULL, NULL, 0, NULL },
-    { "/expand",           test_expand,               NULL, NULL, 0, NULL },
-    { "/expand_reverse",   test_expand_reverse,       NULL, NULL, 0, NULL },
-    { "/var_expand",       test_var_expand,            NULL, NULL, 0, NULL },
-    { "/shortest_path",    test_shortest_path,         NULL, NULL, 0, NULL },
-    { "/shortest_path_no", test_shortest_path_no_path, NULL, NULL, 0, NULL },
-    { "/wco_join",         test_wco_join_triangle,     NULL, NULL, 0, NULL },
-    { "/wco_chain",        test_wco_join_chain,        NULL, NULL, 0, NULL },
-    { "/factorized",       test_expand_factorized,     NULL, NULL, 0, NULL },
-    { "/sip_expand",       test_sip_expand,            NULL, NULL, 0, NULL },
-    { "/sip_auto",         test_sip_auto_build,        NULL, NULL, 0, NULL },
-    { "/sjoin",            test_sjoin_filter,           NULL, NULL, 0, NULL },
-    { "/asp_join",         test_asp_join,              NULL, NULL, 0, NULL },
-    { "/fact_group",       test_factorized_group,      NULL, NULL, 0, NULL },
-    { "/multi_table",      test_multi_table,           NULL, NULL, 0, NULL },
-    { "/expand_both",      test_expand_both,           NULL, NULL, 0, NULL },
-    { "/var_rev",          test_var_expand_reverse,    NULL, NULL, 0, NULL },
-    { "/var_both",         test_var_expand_both,       NULL, NULL, 0, NULL },
-    { "/sp_reverse",       test_shortest_path_reverse, NULL, NULL, 0, NULL },
-    { "/save_load",        test_csr_save_load,         NULL, NULL, 0, NULL },
-    { "/out_of_range",     test_csr_out_of_range,      NULL, NULL, 0, NULL },
-    { "/empty",            test_csr_empty,             NULL, NULL, 0, NULL },
-    { "/type_check",       test_csr_type_validation,   NULL, NULL, 0, NULL },
-    { "/self_loop",        test_self_loop,             NULL, NULL, 0, NULL },
-    { "/empty_src",        test_expand_empty_src,      NULL, NULL, 0, NULL },
-    { "/rel_build",        test_rel_build,             NULL, NULL, 0, NULL },
-    { "/sp_both",          test_shortest_path_both,    NULL, NULL, 0, NULL },
-    { "/var_depth0",       test_var_expand_depth0,     NULL, NULL, 0, NULL },
-    { "/wco_unsorted",     test_wco_unsorted,          NULL, NULL, 0, NULL },
-    { "/expand_oob_src",   test_expand_oob_src,        NULL, NULL, 0, NULL },
-    { "/triangle_exact",   test_triangle_exact,        NULL, NULL, 0, NULL },
-    { "/wco_chain4",       test_wco_chain4,            NULL, NULL, 0, NULL },
-    { "/sp_self",          test_shortest_path_self,    NULL, NULL, 0, NULL },
-    { "/save_load_rev",    test_save_load_rev,         NULL, NULL, 0, NULL },
-    { "/wco_4clique",      test_wco_4clique,           NULL, NULL, 0, NULL },
-    { "/fvec_mat",         test_fvec_materialize,      NULL, NULL, 0, NULL },
-    { "/fvec_empty",       test_fvec_empty,            NULL, NULL, 0, NULL },
-    { "/fvec_semijoin",    test_fvec_semijoin,         NULL, NULL, 0, NULL },
-    { "/fact_rev",         test_factorized_reverse,    NULL, NULL, 0, NULL },
-    { "/wco_empty",        test_wco_empty_result,      NULL, NULL, 0, NULL },
-    { "/var_bad_range",    test_var_expand_bad_range,   NULL, NULL, 0, NULL },
-    { "/degree_cent",     test_degree_cent,            NULL, NULL, 0, NULL },
-    { "/topsort",         test_topsort,                NULL, NULL, 0, NULL },
-    { "/topsort_cycle",   test_topsort_cycle,          NULL, NULL, 0, NULL },
-    { "/dfs",             test_dfs,                    NULL, NULL, 0, NULL },
-    { "/dfs_max_depth",   test_dfs_max_depth,          NULL, NULL, 0, NULL },
-    { "/cluster_coeff",  test_cluster_coeff,          NULL, NULL, 0, NULL },
-    { "/random_walk",   test_random_walk,            NULL, NULL, 0, NULL },
-    { "/astar",         test_astar,                  NULL, NULL, 0, NULL },
-    { "/k_shortest",   test_k_shortest,             NULL, NULL, 0, NULL },
-    { "/betweenness",  test_betweenness,            NULL, NULL, 0, NULL },
-    { "/betweenness_s", test_betweenness_sampled,   NULL, NULL, 0, NULL },
-    { "/closeness",    test_closeness,             NULL, NULL, 0, NULL },
-    { "/closeness_s",  test_closeness_sampled,     NULL, NULL, 0, NULL },
-    { "/mst",          test_mst,                   NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL },  /* terminator */
+const test_entry_t csr_entries[] = {
+    { "csr/build", test_csr_build, NULL, NULL },
+    { "csr/sorted", test_csr_sorted, NULL, NULL },
+    { "csr/expand", test_expand, NULL, NULL },
+    { "csr/expand_reverse", test_expand_reverse, NULL, NULL },
+    { "csr/var_expand", test_var_expand, NULL, NULL },
+    { "csr/shortest_path", test_shortest_path, NULL, NULL },
+    { "csr/shortest_path_no", test_shortest_path_no_path, NULL, NULL },
+    { "csr/wco_join", test_wco_join_triangle, NULL, NULL },
+    { "csr/wco_chain", test_wco_join_chain, NULL, NULL },
+    { "csr/factorized", test_expand_factorized, NULL, NULL },
+    { "csr/sip_expand", test_sip_expand, NULL, NULL },
+    { "csr/sip_auto", test_sip_auto_build, NULL, NULL },
+    { "csr/sjoin", test_sjoin_filter, NULL, NULL },
+    { "csr/asp_join", test_asp_join, NULL, NULL },
+    { "csr/fact_group", test_factorized_group, NULL, NULL },
+    { "csr/multi_table", test_multi_table, NULL, NULL },
+    { "csr/expand_both", test_expand_both, NULL, NULL },
+    { "csr/var_rev", test_var_expand_reverse, NULL, NULL },
+    { "csr/var_both", test_var_expand_both, NULL, NULL },
+    { "csr/sp_reverse", test_shortest_path_reverse, NULL, NULL },
+    { "csr/save_load", test_csr_save_load, NULL, NULL },
+    { "csr/out_of_range", test_csr_out_of_range, NULL, NULL },
+    { "csr/empty", test_csr_empty, NULL, NULL },
+    { "csr/type_check", test_csr_type_validation, NULL, NULL },
+    { "csr/self_loop", test_self_loop, NULL, NULL },
+    { "csr/empty_src", test_expand_empty_src, NULL, NULL },
+    { "csr/rel_build", test_rel_build, NULL, NULL },
+    { "csr/sp_both", test_shortest_path_both, NULL, NULL },
+    { "csr/var_depth0", test_var_expand_depth0, NULL, NULL },
+    { "csr/wco_unsorted", test_wco_unsorted, NULL, NULL },
+    { "csr/expand_oob_src", test_expand_oob_src, NULL, NULL },
+    { "csr/triangle_exact", test_triangle_exact, NULL, NULL },
+    { "csr/wco_chain4", test_wco_chain4, NULL, NULL },
+    { "csr/sp_self", test_shortest_path_self, NULL, NULL },
+    { "csr/save_load_rev", test_save_load_rev, NULL, NULL },
+    { "csr/wco_4clique", test_wco_4clique, NULL, NULL },
+    { "csr/fvec_mat", test_fvec_materialize, NULL, NULL },
+    { "csr/fvec_empty", test_fvec_empty, NULL, NULL },
+    { "csr/fvec_semijoin", test_fvec_semijoin, NULL, NULL },
+    { "csr/fact_rev", test_factorized_reverse, NULL, NULL },
+    { "csr/wco_empty", test_wco_empty_result, NULL, NULL },
+    { "csr/var_bad_range", test_var_expand_bad_range, NULL, NULL },
+    { "csr/degree_cent", test_degree_cent, NULL, NULL },
+    { "csr/topsort", test_topsort, NULL, NULL },
+    { "csr/topsort_cycle", test_topsort_cycle, NULL, NULL },
+    { "csr/dfs", test_dfs, NULL, NULL },
+    { "csr/dfs_max_depth", test_dfs_max_depth, NULL, NULL },
+    { "csr/cluster_coeff", test_cluster_coeff, NULL, NULL },
+    { "csr/random_walk", test_random_walk, NULL, NULL },
+    { "csr/astar", test_astar, NULL, NULL },
+    { "csr/k_shortest", test_k_shortest, NULL, NULL },
+    { "csr/betweenness", test_betweenness, NULL, NULL },
+    { "csr/betweenness_s", test_betweenness_sampled, NULL, NULL },
+    { "csr/closeness", test_closeness, NULL, NULL },
+    { "csr/closeness_s", test_closeness_sampled, NULL, NULL },
+    { "csr/mst", test_mst, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_csr_suite = {
-    "/csr",          /* prefix */
-    csr_tests,       /* tests */
-    NULL,            /* suites */
-    1,               /* iterations */
-    0,               /* options */
-};
+

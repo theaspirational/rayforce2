@@ -1,0 +1,8 @@
+;; Invariants for `time` — time literal type.
+
+(type 12:30:45.000) -- 'time
+
+;; extractors
+(hh 12:30:45.000) -- 12
+(minute 12:30:45.000) -- 30
+(ss 12:30:45.000) -- 45

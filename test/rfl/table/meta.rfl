@@ -1,0 +1,8 @@
+;; Invariants for `meta` — per-table metadata dict.
+
+(set T (table [a b c] (list [1 2] [1.0 2.0] ['x 'y])))
+(type (meta T)) -- 'DICT
+
+;; meta exposes at least type and len fields
+(at (meta T) 'type) -- 'TABLE
+(at (meta T) 'len) -- 3

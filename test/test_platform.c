@@ -21,7 +21,8 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "core/platform.h"
 #include "mem/heap.h"
@@ -30,49 +31,43 @@
 
 /* ---- test_vm_alloc_free ------------------------------------------------ */
 
-static MunitResult test_vm_alloc_free(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_vm_alloc_free(void) {
     size_t size = 4096;
     void* p = ray_vm_alloc(size);
-    munit_assert_ptr_not_null(p);
+    TEST_ASSERT_NOT_NULL(p);
 
     /* Should be writable */
     memset(p, 0xAB, size);
 
     ray_vm_free(p, size);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- test_vm_alloc_aligned --------------------------------------------- */
 
-static MunitResult test_vm_alloc_aligned(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_vm_alloc_aligned(void) {
     size_t alignment = 64 * 1024;  /* 64 KB alignment */
     size_t size = 4096;
     void* p = ray_vm_alloc_aligned(size, alignment);
-    munit_assert_ptr_not_null(p);
+    TEST_ASSERT_NOT_NULL(p);
 
     /* Verify alignment */
-    munit_assert_size((uintptr_t)p % alignment, ==, 0);
+    TEST_ASSERT_EQ_U((uintptr_t)p % alignment, 0);
 
     /* Should be writable */
     memset(p, 0xCD, size);
 
     ray_vm_free(p, size);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- test_thread_count ------------------------------------------------- */
 
-static MunitResult test_thread_count(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_thread_count(void) {
     uint32_t count = ray_thread_count();
-    munit_assert_uint(count, >=, 1);
+    TEST_ASSERT((count) >= (1), "count >= 1");
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- test_thread_create_join ------------------------------------------- */
@@ -84,37 +79,29 @@ static void thread_fn(void* arg) {
     atomic_store(&g_thread_ran, 1);
 }
 
-static MunitResult test_thread_create_join(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_thread_create_join(void) {
     atomic_store(&g_thread_ran, 0);
 
     ray_thread_t t;
     ray_err_t err = ray_thread_create(&t, thread_fn, NULL);
-    munit_assert_int(err, ==, RAY_OK);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
 
     err = ray_thread_join(t);
-    munit_assert_int(err, ==, RAY_OK);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
 
-    munit_assert_int(atomic_load(&g_thread_ran), ==, 1);
+    TEST_ASSERT_EQ_I(atomic_load(&g_thread_ran), 1);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Suite definition -------------------------------------------------- */
 
-static MunitTest platform_tests[] = {
-    { "/vm_alloc_free",      test_vm_alloc_free,      NULL, NULL, 0, NULL },
-    { "/vm_alloc_aligned",   test_vm_alloc_aligned,   NULL, NULL, 0, NULL },
-    { "/thread_count",       test_thread_count,       NULL, NULL, 0, NULL },
-    { "/thread_create_join", test_thread_create_join,  NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL },
+const test_entry_t platform_entries[] = {
+    { "platform/vm_alloc_free", test_vm_alloc_free, NULL, NULL },
+    { "platform/vm_alloc_aligned", test_vm_alloc_aligned, NULL, NULL },
+    { "platform/thread_count", test_thread_count, NULL, NULL },
+    { "platform/thread_create_join", test_thread_create_join, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_platform_suite = {
-    "/platform",
-    platform_tests,
-    NULL,
-    0,
-    0,
-};
+

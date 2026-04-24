@@ -21,12 +21,14 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/ops.h"
 #include "ops/rowsel.h"
 #include <string.h>
+#include <math.h>
 #include <stdint.h>
 
 /* -----------------------------------------------------------------------
@@ -89,8 +91,7 @@ static ray_t* make_selection(const uint8_t* mask, int64_t n) {
  * Smoke test — basic table creation + SUM
  * ----------------------------------------------------------------------- */
 
-static MunitResult test_audit_smoke(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_audit_smoke(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -99,15 +100,15 @@ static MunitResult test_audit_smoke(const void* params, void* data) {
     ray_op_t* s   = ray_sum(g, val);
 
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 150);  /* 10+20+30+40+50 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 150);  /* 10+20+30+40+50 */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -116,8 +117,7 @@ static MunitResult test_audit_smoke(const void* params, void* data) {
 
 /* Selection mask=[0,0,1,1,1] (rows where id>1) + GROUP BY id, SUM(val)
  * Expected: 2 groups — {id=2: sum=70, id=3: sum=50}, total=120 */
-static MunitResult test_sel_group_sum(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_group_sum(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -126,7 +126,7 @@ static MunitResult test_sel_group_sum(const void* params, void* data) {
     /* Set selection: rows 2,3,4 pass (id>1) */
     uint8_t mask[] = {0, 0, 1, 1, 1};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -138,11 +138,11 @@ static MunitResult test_sel_group_sum(const void* params, void* data) {
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     int64_t nrows = ray_table_nrows(result);
-    munit_assert_int(nrows, ==, 2);  /* groups: id=2, id=3 */
+    TEST_ASSERT_EQ_I(nrows, 2);  /* groups: id=2, id=3 */
 
     /* Verify sums: id=2: 30+40=70, id=3: 50 */
     ray_t* id_col  = ray_table_get_col_idx(result, 0);
@@ -156,9 +156,9 @@ static MunitResult test_sel_group_sum(const void* params, void* data) {
         if (id == 2) sum2 = s;
         else if (id == 3) sum3 = s;
     }
-    munit_assert_int(total, ==, 120);
-    munit_assert_int(sum2, ==, 70);
-    munit_assert_int(sum3, ==, 50);
+    TEST_ASSERT_EQ_I(total, 120);
+    TEST_ASSERT_EQ_I(sum2, 70);
+    TEST_ASSERT_EQ_I(sum3, 50);
 
     ray_release(result);
     ray_release(sel);
@@ -166,12 +166,11 @@ static MunitResult test_sel_group_sum(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Same selection + GROUP BY id, COUNT(val) → 2 groups */
-static MunitResult test_sel_group_count(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_group_count(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -179,7 +178,7 @@ static MunitResult test_sel_group_count(const void* params, void* data) {
 
     uint8_t mask[] = {0, 0, 1, 1, 1};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -191,11 +190,11 @@ static MunitResult test_sel_group_count(const void* params, void* data) {
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     int64_t nrows = ray_table_nrows(result);
-    munit_assert_int(nrows, ==, 2);  /* groups: id=2, id=3 */
+    TEST_ASSERT_EQ_I(nrows, 2);  /* groups: id=2, id=3 */
 
     /* Verify counts: id=2: 2 rows, id=3: 1 row */
     ray_t* id_col  = ray_table_get_col_idx(result, 0);
@@ -207,8 +206,8 @@ static MunitResult test_sel_group_count(const void* params, void* data) {
         if (id == 2) cnt2 = c;
         else if (id == 3) cnt3 = c;
     }
-    munit_assert_int(cnt2, ==, 2);
-    munit_assert_int(cnt3, ==, 1);
+    TEST_ASSERT_EQ_I(cnt2, 2);
+    TEST_ASSERT_EQ_I(cnt3, 1);
 
     ray_release(result);
     ray_release(sel);
@@ -216,12 +215,11 @@ static MunitResult test_sel_group_count(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Selection + scalar SUM(val) (no GROUP BY keys) → 120 */
-static MunitResult test_sel_group_scalar(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_group_scalar(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -229,7 +227,7 @@ static MunitResult test_sel_group_scalar(const void* params, void* data) {
 
     uint8_t mask[] = {0, 0, 1, 1, 1};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -239,14 +237,14 @@ static MunitResult test_sel_group_scalar(const void* params, void* data) {
 
     ray_op_t* grp = ray_group(g, NULL, 0, agg_ops, agg_ins, 1);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     int64_t nrows = ray_table_nrows(result);
-    munit_assert_int(nrows, ==, 1);
+    TEST_ASSERT_EQ_I(nrows, 1);
 
     ray_t* sum_col = ray_table_get_col_idx(result, 0);
-    munit_assert_int(((int64_t*)ray_data(sum_col))[0], ==, 120);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(sum_col))[0], 120);
 
     ray_release(result);
     ray_release(sel);
@@ -254,7 +252,7 @@ static MunitResult test_sel_group_scalar(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -263,8 +261,7 @@ static MunitResult test_sel_group_scalar(const void* params, void* data) {
 
 /* Selection mask=[1,0,1,0,1] (rows 0,2,4) + SORT by val DESC
  * Expected: [50,30,10], nrows==3 */
-static MunitResult test_sel_sort(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_sort(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -272,7 +269,7 @@ static MunitResult test_sel_sort(const void* params, void* data) {
 
     uint8_t mask[] = {1, 0, 1, 0, 1};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -284,18 +281,18 @@ static MunitResult test_sel_sort(const void* params, void* data) {
     ray_op_t* sort_op = ray_sort_op(g, tbl_op, keys, descs, nulls_first, 1);
 
     ray_t* result = ray_execute(g, sort_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     /* Verify descending order: [50, 30, 10] */
     int64_t name_val = ray_sym_intern("val", 3);
     ray_t* val_col = ray_table_get_col(result, name_val);
-    munit_assert_ptr_not_null(val_col);
+    TEST_ASSERT_NOT_NULL(val_col);
     int64_t* vdata = (int64_t*)ray_data(val_col);
-    munit_assert_int(vdata[0], ==, 50);
-    munit_assert_int(vdata[1], ==, 30);
-    munit_assert_int(vdata[2], ==, 10);
+    TEST_ASSERT_EQ_I(vdata[0], 50);
+    TEST_ASSERT_EQ_I(vdata[1], 30);
+    TEST_ASSERT_EQ_I(vdata[2], 10);
 
     ray_release(result);
     ray_release(sel);
@@ -303,7 +300,7 @@ static MunitResult test_sel_sort(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* The full reported bug chain: selection + GROUP BY + SORT.
@@ -312,8 +309,7 @@ static MunitResult test_sel_sort(const void* params, void* data) {
  * GROUP BY id, SUM(val) → {2: 30+40+80=150, 3: 50+60+90=200}.
  * SORT by id ASC → [(2,150), (3,200)].
  * Verify nrows==2, ids=[2,3], vals=[150,200]. */
-static MunitResult test_sel_group_sort(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_group_sort(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table_10();
 
@@ -321,7 +317,7 @@ static MunitResult test_sel_group_sort(const void* params, void* data) {
 
     uint8_t mask[] = {0, 0, 1, 1, 1, 1, 0, 1, 1, 0};
     ray_t* sel = make_selection(mask, 10);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -341,24 +337,24 @@ static MunitResult test_sel_group_sort(const void* params, void* data) {
     ray_op_t* sort_op = ray_sort_op(g, grp, sort_keys, descs, nulls_first, 1);
 
     ray_t* result = ray_execute(g, sort_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     int64_t nrows = ray_table_nrows(result);
-    munit_assert_int(nrows, ==, 2);
+    TEST_ASSERT_EQ_I(nrows, 2);
 
     /* Verify sorted: id=[2,3], sum=[150,200] */
     ray_t* id_col  = ray_table_get_col_idx(result, 0);
     ray_t* sum_col = ray_table_get_col_idx(result, 1);
-    munit_assert_ptr_not_null(id_col);
-    munit_assert_ptr_not_null(sum_col);
+    TEST_ASSERT_NOT_NULL(id_col);
+    TEST_ASSERT_NOT_NULL(sum_col);
 
     int64_t* ids  = (int64_t*)ray_data(id_col);
     int64_t* sums = (int64_t*)ray_data(sum_col);
-    munit_assert_int(ids[0], ==, 2);
-    munit_assert_int(ids[1], ==, 3);
-    munit_assert_int(sums[0], ==, 150);
-    munit_assert_int(sums[1], ==, 200);
+    TEST_ASSERT_EQ_I(ids[0], 2);
+    TEST_ASSERT_EQ_I(ids[1], 3);
+    TEST_ASSERT_EQ_I(sums[0], 150);
+    TEST_ASSERT_EQ_I(sums[1], 200);
 
     ray_release(result);
     ray_release(sel);
@@ -366,7 +362,7 @@ static MunitResult test_sel_group_sort(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -378,8 +374,7 @@ static MunitResult test_sel_group_sort(const void* params, void* data) {
  * Right: id=[2,3], label=[200,300].
  * Selection: mask=[0,0,1,1,1] (rows 2,3,4).
  * INNER JOIN on id → 3 rows (id=2 twice, id=3 once). */
-static MunitResult test_sel_join(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_join(void) {
     ray_heap_init();
     ray_t* left = make_audit_table();
 
@@ -400,7 +395,7 @@ static MunitResult test_sel_join(const void* params, void* data) {
 
     uint8_t mask[] = {0, 0, 1, 1, 1};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -412,9 +407,9 @@ static MunitResult test_sel_join(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 0);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     ray_release(result);
     ray_release(sel);
@@ -423,14 +418,13 @@ static MunitResult test_sel_join(const void* params, void* data) {
     ray_release(left);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Selection + WINDOW ROW_NUMBER() OVER (ORDER BY val ASC).
  * Table: make_audit_table(). Selection: mask=[1,1,1,0,0] (3 rows).
  * Result: nrows==3, with row numbers 1,2,3. */
-static MunitResult test_sel_window(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_window(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -438,7 +432,7 @@ static MunitResult test_sel_window(const void* params, void* data) {
 
     uint8_t mask[] = {1, 1, 1, 0, 0};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -459,9 +453,9 @@ static MunitResult test_sel_window(const void* params, void* data) {
                                 0, 0);
 
     ray_t* result = ray_execute(g, win);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     ray_release(result);
     ray_release(sel);
@@ -469,15 +463,14 @@ static MunitResult test_sel_window(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Selection + inner ASOF JOIN.
  * Left: time=[100,200,300,400,500], val=[1.0..5.0]. Selection: [1,1,0,0,1].
  * Right: time=[90,150,450], bid=[0.9,1.5,4.5].
  * Inner ASOF → nrows==3. */
-static MunitResult test_sel_asof_join(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_asof_join(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -510,7 +503,7 @@ static MunitResult test_sel_asof_join(const void* params, void* data) {
 
     uint8_t mask[] = {1, 1, 0, 0, 1};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -520,9 +513,9 @@ static MunitResult test_sel_asof_join(const void* params, void* data) {
     ray_op_t* aj = ray_asof_join(g, left_op, right_op, tkey, NULL, 0, 0);
 
     ray_t* result = ray_execute(g, aj);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     ray_release(result);
     ray_release(sel);
@@ -531,7 +524,7 @@ static MunitResult test_sel_asof_join(const void* params, void* data) {
     ray_release(left);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -541,8 +534,7 @@ static MunitResult test_sel_asof_join(const void* params, void* data) {
 /* Two selections ANDed: mask_a=[0,0,1,1,1,1,0,1,1,0], mask_b=[1,1,1,1,1,1,0,0,0,0].
  * AND → [0,0,1,1,1,1,0,0,0,0] → rows 2,3,4,5.
  * GROUP BY id, SUM(val) → 2 groups {2:70, 3:110}. */
-static MunitResult test_sel_chained(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_chained(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table_10();
 
@@ -556,7 +548,7 @@ static MunitResult test_sel_chained(const void* params, void* data) {
     uint8_t mask_and[10];
     for (int i = 0; i < 10; i++) mask_and[i] = mask_a[i] & mask_b[i];
     g->selection = make_selection(mask_and, 10);
-    munit_assert_ptr_not_null(g->selection);
+    TEST_ASSERT_NOT_NULL(g->selection);
 
     ray_op_t* key = ray_scan(g, "id");
     ray_op_t* val = ray_scan(g, "val");
@@ -566,21 +558,20 @@ static MunitResult test_sel_chained(const void* params, void* data) {
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* All rows filtered out (mask all zeros). GROUP BY → 0-row result. */
-static MunitResult test_sel_all_filtered(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_all_filtered(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -588,7 +579,7 @@ static MunitResult test_sel_all_filtered(const void* params, void* data) {
 
     uint8_t mask[] = {0, 0, 0, 0, 0};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -600,8 +591,8 @@ static MunitResult test_sel_all_filtered(const void* params, void* data) {
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 0);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 0);
 
     ray_release(result);
     ray_release(sel);
@@ -609,12 +600,11 @@ static MunitResult test_sel_all_filtered(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* All rows pass (mask all ones). GROUP BY id, SUM(val) → 3 groups, total=150. */
-static MunitResult test_sel_none_filtered(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sel_none_filtered(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -622,7 +612,7 @@ static MunitResult test_sel_none_filtered(const void* params, void* data) {
 
     uint8_t mask[] = {1, 1, 1, 1, 1};
     ray_t* sel = make_selection(mask, 5);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -634,9 +624,9 @@ static MunitResult test_sel_none_filtered(const void* params, void* data) {
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     /* Sum all values across groups */
     ray_t* sum_col = ray_table_get_col_idx(result, 1);
@@ -644,7 +634,7 @@ static MunitResult test_sel_none_filtered(const void* params, void* data) {
     for (int64_t i = 0; i < 3; i++) {
         total += ((int64_t*)ray_data(sum_col))[i];
     }
-    munit_assert_int(total, ==, 150);
+    TEST_ASSERT_EQ_I(total, 150);
 
     ray_release(result);
     ray_release(sel);
@@ -652,7 +642,7 @@ static MunitResult test_sel_none_filtered(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -660,8 +650,7 @@ static MunitResult test_sel_none_filtered(const void* params, void* data) {
  * ----------------------------------------------------------------------- */
 
 /* FILTER(table, id>1) → lazy path creates RAY_SEL. Verify nrows==3. */
-static MunitResult test_filter_lazy(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_filter_lazy(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -673,22 +662,21 @@ static MunitResult test_filter_lazy(const void* params, void* data) {
     ray_op_t* filt = ray_filter(g, tbl_op, pred);
 
     ray_t* result = ray_execute(g, filt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Chained FILTER: FILTER(FILTER(table, id>1), val<50).
  * id>1: rows (2,30),(2,40),(3,50). val<50: (2,30),(2,40) → nrows==2. */
-static MunitResult test_filter_lazy_chained(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_filter_lazy_chained(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -704,22 +692,21 @@ static MunitResult test_filter_lazy_chained(const void* params, void* data) {
     ray_op_t* filt2 = ray_filter(g, filt1, pred2);
 
     ray_t* result = ray_execute(g, filt2);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* HAVING fusion: GROUP BY id, SUM(val) → FILTER(GROUP, sum>40).
  * Groups: {1:30, 2:70, 3:50}. HAVING >40 → {2:70, 3:50} → nrows==2. */
-static MunitResult test_having_fusion(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_having_fusion(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -738,16 +725,16 @@ static MunitResult test_having_fusion(const void* params, void* data) {
     ray_op_t* having = ray_filter(g, grp, pred);
 
     ray_t* result = ray_execute(g, having);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* HAVING with selection: 10-row table + selection + GROUP + HAVING.
@@ -755,8 +742,7 @@ static MunitResult test_having_fusion(const void* params, void* data) {
  * id=[2,2,3,3,2,3], val=[30,40,50,60,80,90].
  * GROUP BY id, SUM(val) → {2: 30+40+80=150, 3: 50+60+90=200}.
  * HAVING sum>160 → {3:200} → nrows==1. */
-static MunitResult test_having_with_selection(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_having_with_selection(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table_10();
 
@@ -764,7 +750,7 @@ static MunitResult test_having_with_selection(const void* params, void* data) {
 
     uint8_t mask[] = {0, 0, 1, 1, 1, 1, 0, 1, 1, 0};
     ray_t* sel = make_selection(mask, 10);
-    munit_assert_false(RAY_IS_ERR(sel));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(sel));
     ray_retain(sel);
     g->selection = sel;
 
@@ -782,9 +768,9 @@ static MunitResult test_having_with_selection(const void* params, void* data) {
     ray_op_t* having = ray_filter(g, grp, pred);
 
     ray_t* result = ray_execute(g, having);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 1);
 
     ray_release(result);
     ray_release(sel);
@@ -792,7 +778,7 @@ static MunitResult test_having_with_selection(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -800,8 +786,7 @@ static MunitResult test_having_with_selection(const void* params, void* data) {
  * ----------------------------------------------------------------------- */
 
 /* Small table GROUP BY (sequential path). 3 groups, total sum = 150. */
-static MunitResult test_group_small(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_group_small(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -814,9 +799,9 @@ static MunitResult test_group_small(const void* params, void* data) {
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     /* Verify total sum across all groups is 150 */
     ray_t* sum_col = ray_table_get_col_idx(result, 1);
@@ -824,19 +809,18 @@ static MunitResult test_group_small(const void* params, void* data) {
     for (int64_t i = 0; i < 3; i++) {
         total += ((int64_t*)ray_data(sum_col))[i];
     }
-    munit_assert_int(total, ==, 150);
+    TEST_ASSERT_EQ_I(total, 150);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* GROUP BY with 4 aggregates: SUM, COUNT, MIN, MAX. ncols==5, nrows==3. */
-static MunitResult test_group_multi_agg(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_group_multi_agg(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -852,22 +836,21 @@ static MunitResult test_group_multi_agg(const void* params, void* data) {
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 4);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
-    munit_assert_int(ray_table_ncols(result), ==, 5);  /* id + 4 aggs */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 5);  /* id + 4 aggs */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* GROUP BY val (each row unique group). COUNT(val). nrows==5. */
-static MunitResult test_group_single_row_groups(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_group_single_row_groups(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -880,16 +863,16 @@ static MunitResult test_group_single_row_groups(const void* params, void* data) 
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 5);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -898,8 +881,7 @@ static MunitResult test_group_single_row_groups(const void* params, void* data) 
 
 /* Multi-column sort: SORT BY id DESC, val ASC.
  * Expected: ids=[3,2,2,1,1], within id=2 vals=[30,40], within id=1 vals=[10,20]. */
-static MunitResult test_sort_small(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sort_small(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -913,9 +895,9 @@ static MunitResult test_sort_small(const void* params, void* data) {
     ray_op_t* sort_op = ray_sort_op(g, tbl_op, keys, descs, nulls_first, 2);
 
     ray_t* result = ray_execute(g, sort_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 5);
 
     int64_t name_id  = ray_sym_intern("id", 2);
     int64_t name_val = ray_sym_intern("val", 3);
@@ -925,32 +907,31 @@ static MunitResult test_sort_small(const void* params, void* data) {
     int64_t* vals = (int64_t*)ray_data(val_col);
 
     /* ids should be [3,2,2,1,1] */
-    munit_assert_int(ids[0], ==, 3);
-    munit_assert_int(ids[1], ==, 2);
-    munit_assert_int(ids[2], ==, 2);
-    munit_assert_int(ids[3], ==, 1);
-    munit_assert_int(ids[4], ==, 1);
+    TEST_ASSERT_EQ_I(ids[0], 3);
+    TEST_ASSERT_EQ_I(ids[1], 2);
+    TEST_ASSERT_EQ_I(ids[2], 2);
+    TEST_ASSERT_EQ_I(ids[3], 1);
+    TEST_ASSERT_EQ_I(ids[4], 1);
 
     /* within id=2: vals=[30,40] (ASC) */
-    munit_assert_int(vals[1], ==, 30);
-    munit_assert_int(vals[2], ==, 40);
+    TEST_ASSERT_EQ_I(vals[1], 30);
+    TEST_ASSERT_EQ_I(vals[2], 40);
 
     /* within id=1: vals=[10,20] (ASC) */
-    munit_assert_int(vals[3], ==, 10);
-    munit_assert_int(vals[4], ==, 20);
+    TEST_ASSERT_EQ_I(vals[3], 10);
+    TEST_ASSERT_EQ_I(vals[4], 20);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* INNER JOIN: Left=make_audit_table(), Right: id=[1,2], x=[100,200].
  * id=1 matches 2 left rows, id=2 matches 2 left rows → 4 result rows. */
-static MunitResult test_join_small(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_join_small(void) {
     ray_heap_init();
     ray_t* left = make_audit_table();
 
@@ -976,9 +957,9 @@ static MunitResult test_join_small(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 0);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
 
     ray_release(result);
     ray_release(right);
@@ -986,12 +967,11 @@ static MunitResult test_join_small(const void* params, void* data) {
     ray_release(left);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Filter on vector input (eager path). val > 30 → 2 rows (40, 50). */
-static MunitResult test_filter_eager(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_filter_eager(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -1003,15 +983,15 @@ static MunitResult test_filter_eager(const void* params, void* data) {
     ray_op_t* cnt = ray_count(g, filtered);
 
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 2);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -1019,8 +999,7 @@ static MunitResult test_filter_eager(const void* params, void* data) {
  * ----------------------------------------------------------------------- */
 
 /* Empty table (0 rows): GROUP BY id, SUM(val) → should not crash. */
-static MunitResult test_group_empty_table(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_group_empty_table(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1052,12 +1031,11 @@ static MunitResult test_group_empty_table(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Empty 1-column table. SORT by val ASC → 0-row result, no crash. */
-static MunitResult test_sort_empty_table(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_sort_empty_table(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1078,7 +1056,7 @@ static MunitResult test_sort_empty_table(const void* params, void* data) {
     ray_t* result = ray_execute(g, sort_op);
     /* Accept either empty result or error — just must not crash */
     if (result && !RAY_IS_ERR(result)) {
-        munit_assert_int(ray_table_nrows(result), ==, 0);
+        TEST_ASSERT_EQ_I(ray_table_nrows(result), 0);
         ray_release(result);
     }
 
@@ -1086,13 +1064,12 @@ static MunitResult test_sort_empty_table(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Left: make_audit_table(). Right: empty table (0 rows with id column).
  * INNER JOIN → 0 result rows. */
-static MunitResult test_join_empty_table(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_join_empty_table(void) {
     ray_heap_init();
     ray_t* left = make_audit_table();
 
@@ -1114,7 +1091,7 @@ static MunitResult test_join_empty_table(const void* params, void* data) {
     ray_t* result = ray_execute(g, join_op);
     /* Accept either empty result or error — just must not crash */
     if (result && !RAY_IS_ERR(result)) {
-        munit_assert_int(ray_table_nrows(result), ==, 0);
+        TEST_ASSERT_EQ_I(ray_table_nrows(result), 0);
         ray_release(result);
     }
 
@@ -1123,7 +1100,7 @@ static MunitResult test_join_empty_table(const void* params, void* data) {
     ray_release(left);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -1133,8 +1110,7 @@ static MunitResult test_join_empty_table(const void* params, void* data) {
 /* Integer division by zero: val / 0 → each element should produce NaN (F64 null)
  * because ray_div forces F64 output, and F64 div-by-zero returns NaN.
  * SUM of all-NaN = NaN. */
-static MunitResult test_const_fold_div_zero(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_const_fold_div_zero(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -1145,20 +1121,19 @@ static MunitResult test_const_fold_div_zero(const void* params, void* data) {
     ray_op_t* s = ray_sum(g, div_op);
 
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_true(isnan(result->f64));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(isnan(result->f64));
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* INT64_MIN / -1 overflow: should not trap, accept any result. */
-static MunitResult test_const_fold_int_overflow(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_const_fold_int_overflow(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1177,21 +1152,20 @@ static MunitResult test_const_fold_int_overflow(const void* params, void* data) 
 
     ray_t* result = ray_execute(g, s);
     /* Just verify no crash/trap — accept any result */
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Predicate pushdown must NOT push filter past GROUP BY.
  * GROUP BY id, SUM(val) → FILTER(GROUP, sum_col > 40).
  * Groups: {1:30, 2:70, 3:50}. After filter >40: {2:70, 3:50} → nrows==2. */
-static MunitResult test_predicate_pushdown_group(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_predicate_pushdown_group(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -1210,23 +1184,22 @@ static MunitResult test_predicate_pushdown_group(const void* params, void* data)
     ray_op_t* having = ray_filter(g, grp, pred);
 
     ray_t* result = ray_execute(g, having);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* DCE must preserve GROUP key and agg_in SCAN nodes.
  * Build GROUP BY, optimize, then execute optimized plan.
  * If DCE kills needed nodes, execution crashes. */
-static MunitResult test_dce_preserves_group_keys(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_dce_preserves_group_keys(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -1239,26 +1212,25 @@ static MunitResult test_dce_preserves_group_keys(const void* params, void* data)
 
     ray_op_t* grp = ray_group(g, keys, 1, agg_ops, agg_ins, 1);
     ray_op_t* opt = ray_optimize(g, grp);
-    munit_assert_ptr_not_null(opt);
+    TEST_ASSERT_NOT_NULL(opt);
 
     ray_t* result = ray_execute(g, opt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Filter reorder correctness: two chained filters.
  * FILTER(FILTER(table, id>1), val<50). COUNT result.
  * id>1: rows (2,30),(2,40),(3,50). val<50: (2,30),(2,40) → count==2. */
-static MunitResult test_filter_reorder_correctness(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_filter_reorder_correctness(void) {
     ray_heap_init();
     ray_t* tbl = make_audit_table();
 
@@ -1277,15 +1249,15 @@ static MunitResult test_filter_reorder_correctness(const void* params, void* dat
     ray_op_t* cnt = ray_count(g, f2);
 
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 2);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* -----------------------------------------------------------------------
@@ -1465,47 +1437,38 @@ static MunitResult test_filter_reorder_correctness(const void* params, void* dat
  * Test array + suite registration
  * ----------------------------------------------------------------------- */
 
-static MunitTest audit_tests[] = {
-    { "/smoke",                  test_audit_smoke,            NULL, NULL, 0, NULL },
-    { "/sel_group_sum",          test_sel_group_sum,          NULL, NULL, 0, NULL },
-    { "/sel_group_count",        test_sel_group_count,        NULL, NULL, 0, NULL },
-    { "/sel_group_scalar",       test_sel_group_scalar,       NULL, NULL, 0, NULL },
-    { "/sel_sort",               test_sel_sort,               NULL, NULL, 0, NULL },
-    { "/sel_group_sort",         test_sel_group_sort,         NULL, NULL, 0, NULL },
-    /* Task 4: Selection + JOIN / WINDOW / ASOF */
-    { "/sel_join",               test_sel_join,               NULL, NULL, 0, NULL },
-    { "/sel_window",             test_sel_window,             NULL, NULL, 0, NULL },
-    { "/sel_asof_join",          test_sel_asof_join,          NULL, NULL, 0, NULL },
-    /* Task 5: Chained selection + boundary cases */
-    { "/sel_chained",            test_sel_chained,            NULL, NULL, 0, NULL },
-    { "/sel_all_filtered",       test_sel_all_filtered,       NULL, NULL, 0, NULL },
-    { "/sel_none_filtered",      test_sel_none_filtered,      NULL, NULL, 0, NULL },
-    /* Task 6: FILTER lazy/eager + HAVING fusion */
-    { "/filter_lazy",            test_filter_lazy,            NULL, NULL, 0, NULL },
-    { "/filter_lazy_chained",    test_filter_lazy_chained,    NULL, NULL, 0, NULL },
-    { "/having_fusion",          test_having_fusion,          NULL, NULL, 0, NULL },
-    { "/having_with_selection",  test_having_with_selection,  NULL, NULL, 0, NULL },
-    /* Task 7: Category 2 — GROUP BY fallback path tests */
-    { "/group_small",            test_group_small,            NULL, NULL, 0, NULL },
-    { "/group_multi_agg",        test_group_multi_agg,        NULL, NULL, 0, NULL },
-    { "/group_single_row_groups",test_group_single_row_groups,NULL, NULL, 0, NULL },
-    /* Task 8: Category 2 — SORT/JOIN/FILTER fallback tests */
-    { "/sort_small",             test_sort_small,             NULL, NULL, 0, NULL },
-    { "/join_small",             test_join_small,             NULL, NULL, 0, NULL },
-    { "/filter_eager",           test_filter_eager,           NULL, NULL, 0, NULL },
-    /* Task 9: Category 3 — Error path edge cases (empty tables) */
-    { "/group_empty_table",      test_group_empty_table,      NULL, NULL, 0, NULL },
-    { "/sort_empty_table",       test_sort_empty_table,       NULL, NULL, 0, NULL },
-    { "/join_empty_table",       test_join_empty_table,       NULL, NULL, 0, NULL },
-    /* Task 10: Category 4 — Optimizer correctness tests */
-    { "/const_fold_div_zero",          test_const_fold_div_zero,          NULL, NULL, 0, NULL },
-    { "/const_fold_int_overflow",      test_const_fold_int_overflow,      NULL, NULL, 0, NULL },
-    { "/predicate_pushdown_group",     test_predicate_pushdown_group,     NULL, NULL, 0, NULL },
-    { "/dce_preserves_group_keys",     test_dce_preserves_group_keys,     NULL, NULL, 0, NULL },
-    { "/filter_reorder_correctness",   test_filter_reorder_correctness,   NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL }
+const test_entry_t audit_entries[] = {
+    { "audit/smoke", test_audit_smoke, NULL, NULL },
+    { "audit/sel_group_sum", test_sel_group_sum, NULL, NULL },
+    { "audit/sel_group_count", test_sel_group_count, NULL, NULL },
+    { "audit/sel_group_scalar", test_sel_group_scalar, NULL, NULL },
+    { "audit/sel_sort", test_sel_sort, NULL, NULL },
+    { "audit/sel_group_sort", test_sel_group_sort, NULL, NULL },
+    { "audit/sel_join", test_sel_join, NULL, NULL },
+    { "audit/sel_window", test_sel_window, NULL, NULL },
+    { "audit/sel_asof_join", test_sel_asof_join, NULL, NULL },
+    { "audit/sel_chained", test_sel_chained, NULL, NULL },
+    { "audit/sel_all_filtered", test_sel_all_filtered, NULL, NULL },
+    { "audit/sel_none_filtered", test_sel_none_filtered, NULL, NULL },
+    { "audit/filter_lazy", test_filter_lazy, NULL, NULL },
+    { "audit/filter_lazy_chained", test_filter_lazy_chained, NULL, NULL },
+    { "audit/having_fusion", test_having_fusion, NULL, NULL },
+    { "audit/having_with_selection", test_having_with_selection, NULL, NULL },
+    { "audit/group_small", test_group_small, NULL, NULL },
+    { "audit/group_multi_agg", test_group_multi_agg, NULL, NULL },
+    { "audit/group_single_row_groups", test_group_single_row_groups, NULL, NULL },
+    { "audit/sort_small", test_sort_small, NULL, NULL },
+    { "audit/join_small", test_join_small, NULL, NULL },
+    { "audit/filter_eager", test_filter_eager, NULL, NULL },
+    { "audit/group_empty_table", test_group_empty_table, NULL, NULL },
+    { "audit/sort_empty_table", test_sort_empty_table, NULL, NULL },
+    { "audit/join_empty_table", test_join_empty_table, NULL, NULL },
+    { "audit/const_fold_div_zero", test_const_fold_div_zero, NULL, NULL },
+    { "audit/const_fold_int_overflow", test_const_fold_int_overflow, NULL, NULL },
+    { "audit/predicate_pushdown_group", test_predicate_pushdown_group, NULL, NULL },
+    { "audit/dce_preserves_group_keys", test_dce_preserves_group_keys, NULL, NULL },
+    { "audit/filter_reorder_correctness", test_filter_reorder_correctness, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_audit_suite = {
-    "/audit", audit_tests, NULL, 1, 0
-};
+

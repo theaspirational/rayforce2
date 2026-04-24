@@ -1,0 +1,17 @@
+;; Invariants for `/` (integer division, floor).
+
+;; identity: (/ a 1) == a
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (== (/ A 1) A))
+
+;; (/ (* a b) b) == a  for non-zero b
+(set A (- (rand 256 200) 100))
+(set B (+ (rand 256 10) 1))
+(count A) -- (sum (== (/ (* A B) B) A))
+
+;; floor semantic: 7/2 == 3
+(/ 7 2) -- 3
+(/ 10 3) -- 3
+
+;; divide-by-zero yields typed null (not an error in rayforce2)
+(/ 5 0) -- 0Nl

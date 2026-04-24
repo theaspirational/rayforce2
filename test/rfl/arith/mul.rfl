@@ -1,0 +1,29 @@
+;; Invariants for `*` on i64 vectors.
+
+;; commutativity:  (* a b) == (* b a)
+(set A (- (rand 256 400) 200))
+(set B (- (rand 256 400) 200))
+(count A) -- (sum (== (* A B) (* B A)))
+
+;; associativity:  (* (* a b) c) == (* a (* b c))  — narrow range to avoid overflow
+(set A (- (rand 256 20) 10))
+(set B (- (rand 256 20) 10))
+(set C (- (rand 256 20) 10))
+(count A) -- (sum (== (* (* A B) C) (* A (* B C))))
+
+;; identity:  (* a 1) == a  and  (* 1 a) == a
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (== (* A 1) A))
+(count A) -- (sum (== (* 1 A) A))
+
+;; zero annihilates:  (* a 0) == 0
+(count A) -- (sum (== (* A 0) 0))
+
+;; distributivity over +:  (* a (+ b c)) == (+ (* a b) (* a c))
+(set A (- (rand 256 100) 50))
+(set B (- (rand 256 100) 50))
+(set C (- (rand 256 100) 50))
+(count A) -- (sum (== (* A (+ B C)) (+ (* A B) (* A C))))
+
+;; concrete
+(* [2 3 4] [5 6 7]) -- [10 18 28]

@@ -21,7 +21,8 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/ops.h"
@@ -35,15 +36,14 @@
  * reduction path in exec.c.
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_parallel_sum(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_parallel_sum(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     int64_t n = 100000;
     ray_t* vec = ray_vec_new(RAY_I64, n);
-    munit_assert_ptr_not_null(vec);
-    munit_assert_false(RAY_IS_ERR(vec));
+    TEST_ASSERT_NOT_NULL(vec);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(vec));
     vec->len = n;
 
     int64_t* vals = (int64_t*)ray_data(vec);
@@ -60,9 +60,9 @@ static MunitResult test_parallel_sum(const void* params, void* data) {
     ray_op_t* sum_op = ray_sum(g, scan);
 
     ray_t* result = ray_execute(g, sum_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, expected);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, expected);
 
     ray_release(result);
     ray_graph_free(g);
@@ -70,23 +70,22 @@ static MunitResult test_parallel_sum(const void* params, void* data) {
     ray_release(vec);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: parallel binary add via executor
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_parallel_add(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_parallel_add(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     int64_t n = 100000;
     ray_t* a_vec = ray_vec_new(RAY_I64, n);
     ray_t* b_vec = ray_vec_new(RAY_I64, n);
-    munit_assert_false(RAY_IS_ERR(a_vec));
-    munit_assert_false(RAY_IS_ERR(b_vec));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(a_vec));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(b_vec));
     a_vec->len = n;
     b_vec->len = n;
 
@@ -106,14 +105,14 @@ static MunitResult test_parallel_add(const void* params, void* data) {
     ray_op_t* add = ray_add(g, sa, sb);
 
     ray_t* result = ray_execute(g, add);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_I64);
-    munit_assert_int(ray_len(result), ==, n);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_I64);
+    TEST_ASSERT_EQ_I(ray_len(result), n);
 
     /* Every element should be n (i + (n - i)) */
     int64_t* rdata = (int64_t*)ray_data(result);
     for (int64_t i = 0; i < n; i++) {
-        munit_assert_int(rdata[i], ==, n);
+        TEST_ASSERT_EQ_I(rdata[i], n);
     }
 
     ray_release(result);
@@ -123,23 +122,22 @@ static MunitResult test_parallel_add(const void* params, void* data) {
     ray_release(b_vec);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: parallel group-by sum via executor
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_parallel_group_sum(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_parallel_group_sum(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     int64_t n = 100000;
     ray_t* id_vec = ray_vec_new(RAY_I64, n);
     ray_t* v_vec  = ray_vec_new(RAY_I64, n);
-    munit_assert_false(RAY_IS_ERR(id_vec));
-    munit_assert_false(RAY_IS_ERR(v_vec));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(id_vec));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(v_vec));
     id_vec->len = n;
     v_vec->len = n;
 
@@ -176,21 +174,21 @@ static MunitResult test_parallel_group_sum(const void* params, void* data) {
     uint16_t agg_ops[] = { OP_SUM };
 
     ray_op_t* grp = ray_group(g, key_arr, 1, agg_ops, agg_ins, 1);
-    munit_assert_ptr_not_null(grp);
+    TEST_ASSERT_NOT_NULL(grp);
 
     ray_t* result = ray_execute(g, grp);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Result should have 4 groups */
     int64_t nrows = ray_table_nrows(result);
-    munit_assert_int(nrows, ==, 4);
+    TEST_ASSERT_EQ_I(nrows, 4);
 
     /* Extract key and sum columns by index (0=key, 1=agg) */
     ray_t* res_ids = ray_table_get_col_idx(result, 0);
     ray_t* res_sums = ray_table_get_col_idx(result, 1);
-    munit_assert_ptr_not_null(res_ids);
-    munit_assert_ptr_not_null(res_sums);
+    TEST_ASSERT_NOT_NULL(res_ids);
+    TEST_ASSERT_NOT_NULL(res_sums);
 
     int64_t* rids = (int64_t*)ray_data(res_ids);
     int64_t* rsums = (int64_t*)ray_data(res_sums);
@@ -199,8 +197,8 @@ static MunitResult test_parallel_group_sum(const void* params, void* data) {
     int64_t expected_sums[] = {25000, 50000, 75000, 100000};
     for (int64_t i = 0; i < 4; i++) {
         int64_t gid = rids[i];
-        munit_assert_true(gid >= 0 && gid <= 3);
-        munit_assert_int(rsums[i], ==, expected_sums[gid]);
+        TEST_ASSERT_TRUE(gid >= 0 && gid <= 3);
+        TEST_ASSERT_EQ_I(rsums[i], expected_sums[gid]);
     }
 
     ray_release(result);
@@ -210,21 +208,20 @@ static MunitResult test_parallel_group_sum(const void* params, void* data) {
     ray_release(v_vec);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: parallel min/max via executor
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_parallel_min_max(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_parallel_min_max(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     int64_t n = 100000;
     ray_t* vec = ray_vec_new(RAY_F64, n);
-    munit_assert_false(RAY_IS_ERR(vec));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(vec));
     vec->len = n;
 
     double* vals = (double*)ray_data(vec);
@@ -241,9 +238,9 @@ static MunitResult test_parallel_min_max(const void* params, void* data) {
     ray_op_t* min_op = ray_min_op(g, scan);
 
     ray_t* min_result = ray_execute(g, min_op);
-    munit_assert_false(RAY_IS_ERR(min_result));
-    munit_assert_int(min_result->type, ==, -RAY_F64);
-    munit_assert_double_equal(min_result->f64, -50000.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(min_result));
+    TEST_ASSERT_EQ_I(min_result->type, -RAY_F64);
+    TEST_ASSERT_EQ_F(min_result->f64, -50000.0, 1e-6);
 
     ray_release(min_result);
     ray_graph_free(g);
@@ -254,9 +251,9 @@ static MunitResult test_parallel_min_max(const void* params, void* data) {
     ray_op_t* max_op = ray_max_op(g, scan);
 
     ray_t* max_result = ray_execute(g, max_op);
-    munit_assert_false(RAY_IS_ERR(max_result));
-    munit_assert_int(max_result->type, ==, -RAY_F64);
-    munit_assert_double_equal(max_result->f64, 49999.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(max_result));
+    TEST_ASSERT_EQ_I(max_result->type, -RAY_F64);
+    TEST_ASSERT_EQ_F(max_result->f64, 49999.0, 1e-6);
 
     ray_release(max_result);
     ray_graph_free(g);
@@ -264,21 +261,20 @@ static MunitResult test_parallel_min_max(const void* params, void* data) {
     ray_release(vec);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Test: ray_cancel() causes ray_execute() to return RAY_ERR_CANCEL
  * -------------------------------------------------------------------------- */
 
-static MunitResult test_cancel(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_cancel(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     int64_t n = 100000;
     ray_t* vec = ray_vec_new(RAY_I64, n);
-    munit_assert_false(RAY_IS_ERR(vec));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(vec));
     vec->len = n;
     int64_t* vals = (int64_t*)ray_data(vec);
     for (int64_t i = 0; i < n; i++) vals[i] = i + 1;
@@ -305,10 +301,10 @@ static MunitResult test_cancel(const void* params, void* data) {
     scan = ray_scan(g, "val");
     sum_op = ray_sum(g, scan);
     result = ray_execute(g, sum_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
     int64_t expected = n * (n + 1) / 2;
-    munit_assert_int(result->i64, ==, expected);
+    TEST_ASSERT_EQ_I(result->i64, expected);
 
     ray_release(result);
     ray_graph_free(g);
@@ -316,26 +312,20 @@ static MunitResult test_cancel(const void* params, void* data) {
     ray_release(vec);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* --------------------------------------------------------------------------
  * Suite definition
  * -------------------------------------------------------------------------- */
 
-static MunitTest pool_tests[] = {
-    { "/parallel_sum",       test_parallel_sum,       NULL, NULL, 0, NULL },
-    { "/parallel_add",       test_parallel_add,       NULL, NULL, 0, NULL },
-    { "/parallel_group_sum", test_parallel_group_sum,  NULL, NULL, 0, NULL },
-    { "/parallel_min_max",   test_parallel_min_max,   NULL, NULL, 0, NULL },
-    { "/cancel",             test_cancel,             NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL },
+const test_entry_t pool_entries[] = {
+    { "pool/parallel_sum", test_parallel_sum, NULL, NULL },
+    { "pool/parallel_add", test_parallel_add, NULL, NULL },
+    { "pool/parallel_group_sum", test_parallel_group_sum, NULL, NULL },
+    { "pool/parallel_min_max", test_parallel_min_max, NULL, NULL },
+    { "pool/cancel", test_cancel, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_pool_suite = {
-    "/pool",         /* prefix */
-    pool_tests,      /* tests */
-    NULL,            /* child suites */
-    1,               /* iterations */
-    0,               /* options */
-};
+

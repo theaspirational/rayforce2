@@ -1,0 +1,14 @@
+;; Invariants for `-` on i64 vectors.
+
+;; self-inverse:  (- a a) == 0   (rand never emits null)
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (== (- A A) 0))
+
+;; identity:  (- a 0) == a
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (== (- A 0) A))
+
+;; add-inverse:  (- (+ a b) b) == a
+(set A (- (rand 256 100000) 50000))
+(set B (- (rand 256 100000) 50000))
+(count A) -- (sum (== (- (+ A B) B) A))

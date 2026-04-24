@@ -21,7 +21,8 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "ops/ops.h"
@@ -60,8 +61,7 @@ static ray_t* make_exec_table(void) {
 }
 
 /* ---- NEG ---- */
-static MunitResult test_exec_neg_i64(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_neg_i64(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -71,19 +71,18 @@ static MunitResult test_exec_neg_i64(const void* params, void* data) {
     ray_op_t* s = ray_sum(g, neg_op);
 
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, -550);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, -550);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_exec_neg_f64(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_neg_f64(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -93,20 +92,19 @@ static MunitResult test_exec_neg_f64(const void* params, void* data) {
     ray_op_t* s = ray_sum(g, neg_op);
 
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, -60.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, -60.0, 1e-6);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- ABS ---- */
-static MunitResult test_exec_abs(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_abs(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -118,20 +116,19 @@ static MunitResult test_exec_abs(const void* params, void* data) {
     ray_op_t* s = ray_sum(g, abs_op);
 
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 550);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 550);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- NOT ---- */
-static MunitResult test_exec_not(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_not(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -144,20 +141,19 @@ static MunitResult test_exec_not(const void* params, void* data) {
     ray_op_t* cnt = ray_count(g, filtered);
 
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 4);  /* 10,20,30,40 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 4);  /* 10,20,30,40 */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- ISNULL ---- */
-static MunitResult test_exec_isnull(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_isnull(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -176,20 +172,19 @@ static MunitResult test_exec_isnull(const void* params, void* data) {
     ray_op_t* cnt = ray_count(g, filtered);
 
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 0);  /* no nulls in raw data */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 0);  /* no nulls in raw data */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- SQRT / LOG / EXP ---- */
-static MunitResult test_exec_math_ops(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_math_ops(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -206,8 +201,8 @@ static MunitResult test_exec_math_ops(const void* params, void* data) {
     ray_op_t* sq = ray_sqrt_op(g, x);
     ray_op_t* s = ray_sum(g, sq);
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 15.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 15.0, 1e-6);
     ray_release(result);
     ray_graph_free(g);
 
@@ -218,20 +213,19 @@ static MunitResult test_exec_math_ops(const void* params, void* data) {
     ray_op_t* ex = ray_exp_op(g, lg);
     s = ray_sum(g, ex);
     result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 55.0, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 55.0, 1e-3);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- CEIL / FLOOR ---- */
-static MunitResult test_exec_ceil_floor(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_ceil_floor(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -248,8 +242,8 @@ static MunitResult test_exec_ceil_floor(const void* params, void* data) {
     ray_op_t* c = ray_ceil_op(g, x);
     ray_op_t* s = ray_sum(g, c);
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 6.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 6.0, 1e-6);
     ray_release(result);
     ray_graph_free(g);
 
@@ -259,23 +253,22 @@ static MunitResult test_exec_ceil_floor(const void* params, void* data) {
     ray_op_t* f = ray_floor_op(g, x);
     s = ray_sum(g, f);
     result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 1.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 1.0, 1e-6);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ======================================================================
  * Binary element-wise ops
  * ====================================================================== */
 
-static MunitResult test_exec_binary_arithmetic(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_binary_arithmetic(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -287,9 +280,9 @@ static MunitResult test_exec_binary_arithmetic(const void* params, void* data) {
     ray_op_t* add_op = ray_add(g, v1, id1);
     ray_op_t* s = ray_sum(g, add_op);
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* sum(v1)=550, sum(id1)=19, sum(v1+id1)=569 */
-    munit_assert_int(result->i64, ==, 569);
+    TEST_ASSERT_EQ_I(result->i64, 569);
     ray_release(result);
     ray_graph_free(g);
 
@@ -300,8 +293,8 @@ static MunitResult test_exec_binary_arithmetic(const void* params, void* data) {
     ray_op_t* sub_op = ray_sub(g, v1, id1);
     s = ray_sum(g, sub_op);
     result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 531);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 531);
     ray_release(result);
     ray_graph_free(g);
 
@@ -312,9 +305,9 @@ static MunitResult test_exec_binary_arithmetic(const void* params, void* data) {
     ray_op_t* mul_op = ray_mul(g, v1, id1);
     s = ray_sum(g, mul_op);
     result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* 10*1+20*1+30*2+40*2+50*3+60*3+70*1+80*2+90*3+100*1 = 1100 */
-    munit_assert_int(result->i64, ==, 1100);
+    TEST_ASSERT_EQ_I(result->i64, 1100);
     ray_release(result);
     ray_graph_free(g);
 
@@ -325,9 +318,9 @@ static MunitResult test_exec_binary_arithmetic(const void* params, void* data) {
     ray_op_t* div_op = ray_div(g, v1, id1);
     s = ray_sum(g, div_op);
     result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* 10/1+20/1+15+20+50/3+60/3+70/1+40+30+100/1 = 341.666... */
-    munit_assert_double_equal(result->f64, 341.666, 2);
+    TEST_ASSERT_EQ_F(result->f64, 341.666, 1e-2);
     ray_release(result);
     ray_graph_free(g);
 
@@ -338,21 +331,20 @@ static MunitResult test_exec_binary_arithmetic(const void* params, void* data) {
     ray_op_t* mod_op = ray_mod(g, v1, id1);
     s = ray_sum(g, mod_op);
     result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* 10%1+20%1+30%2+40%2+50%3+60%3+70%1+80%2+90%3+100%1 = 2 */
-    munit_assert_int(result->i64, ==, 2);
+    TEST_ASSERT_EQ_I(result->i64, 2);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Comparison ops ---- */
-static MunitResult test_exec_comparisons(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_comparisons(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
 
@@ -364,8 +356,8 @@ static MunitResult test_exec_comparisons(const void* params, void* data) {
     ray_op_t* filtered = ray_filter(g, v1, pred);
     ray_op_t* cnt = ray_count(g, filtered);
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 1);
     ray_release(result);
     ray_graph_free(g);
 
@@ -377,8 +369,8 @@ static MunitResult test_exec_comparisons(const void* params, void* data) {
     filtered = ray_filter(g, v1, pred);
     cnt = ray_count(g, filtered);
     result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 9);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 9);
     ray_release(result);
     ray_graph_free(g);
 
@@ -390,8 +382,8 @@ static MunitResult test_exec_comparisons(const void* params, void* data) {
     filtered = ray_filter(g, v1, pred);
     cnt = ray_count(g, filtered);
     result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 4);  /* 10,20,30,40 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 4);  /* 10,20,30,40 */
     ray_release(result);
     ray_graph_free(g);
 
@@ -403,8 +395,8 @@ static MunitResult test_exec_comparisons(const void* params, void* data) {
     filtered = ray_filter(g, v1, pred);
     cnt = ray_count(g, filtered);
     result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 5);
     ray_release(result);
     ray_graph_free(g);
 
@@ -416,8 +408,8 @@ static MunitResult test_exec_comparisons(const void* params, void* data) {
     filtered = ray_filter(g, v1, pred);
     cnt = ray_count(g, filtered);
     result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 5);  /* 60,70,80,90,100 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 5);  /* 60,70,80,90,100 */
     ray_release(result);
     ray_graph_free(g);
 
@@ -432,8 +424,8 @@ static MunitResult test_exec_comparisons(const void* params, void* data) {
     filtered = ray_filter(g, v1, both);
     cnt = ray_count(g, filtered);
     result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 5);  /* 30,40,50,60,70 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 5);  /* 30,40,50,60,70 */
     ray_release(result);
     ray_graph_free(g);
 
@@ -448,20 +440,19 @@ static MunitResult test_exec_comparisons(const void* params, void* data) {
     filtered = ray_filter(g, v1, either);
     cnt = ray_count(g, filtered);
     result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 2);  /* 10, 100 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 2);  /* 10, 100 */
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- MIN2 / MAX2 ---- */
-static MunitResult test_exec_min2_max2(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_min2_max2(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
 
@@ -471,9 +462,9 @@ static MunitResult test_exec_min2_max2(const void* params, void* data) {
     ray_op_t* mn = ray_min2(g, v1, id1);
     ray_op_t* s = ray_sum(g, mn);
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* min2(v1,id1) per row: 1,1,2,2,3,3,1,2,3,1 = sum(id1) = 19 */
-    munit_assert_int(result->i64, ==, 19);
+    TEST_ASSERT_EQ_I(result->i64, 19);
     ray_release(result);
     ray_graph_free(g);
 
@@ -483,21 +474,20 @@ static MunitResult test_exec_min2_max2(const void* params, void* data) {
     ray_op_t* mx = ray_max2(g, v1, id1);
     s = ray_sum(g, mx);
     result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* max2(v1,id1) per row: all v1 values since v1 > id1 -> sum = 550 */
-    munit_assert_int(result->i64, ==, 550);
+    TEST_ASSERT_EQ_I(result->i64, 550);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- IF (ternary) ---- */
-static MunitResult test_exec_if(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_if(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
 
@@ -511,23 +501,22 @@ static MunitResult test_exec_if(const void* params, void* data) {
     ray_op_t* s = ray_sum(g, if_op);
 
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 5);  /* 5 values > 50 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 5);  /* 5 values > 50 */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ======================================================================
  * Reduction ops
  * ====================================================================== */
 
-static MunitResult test_exec_reductions(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_reductions(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
 
@@ -536,9 +525,9 @@ static MunitResult test_exec_reductions(const void* params, void* data) {
     ray_op_t* id1 = ray_scan(g, "id1");
     ray_op_t* prod_op = ray_prod(g, id1);
     ray_t* result = ray_execute(g, prod_op);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* id1 = {1,1,2,2,3,3,1,2,3,1} -> prod = 216 */
-    munit_assert_int(result->i64, ==, 216);
+    TEST_ASSERT_EQ_I(result->i64, 216);
     ray_release(result);
     ray_graph_free(g);
 
@@ -547,8 +536,8 @@ static MunitResult test_exec_reductions(const void* params, void* data) {
     ray_op_t* v1 = ray_scan(g, "v1");
     ray_op_t* min_op = ray_min_op(g, v1);
     result = ray_execute(g, min_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 10);
     ray_release(result);
     ray_graph_free(g);
 
@@ -557,8 +546,8 @@ static MunitResult test_exec_reductions(const void* params, void* data) {
     v1 = ray_scan(g, "v1");
     ray_op_t* max_op = ray_max_op(g, v1);
     result = ray_execute(g, max_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 100);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 100);
     ray_release(result);
     ray_graph_free(g);
 
@@ -567,8 +556,8 @@ static MunitResult test_exec_reductions(const void* params, void* data) {
     v1 = ray_scan(g, "v1");
     ray_op_t* avg_op = ray_avg(g, v1);
     result = ray_execute(g, avg_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 55.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 55.0, 1e-6);
     ray_release(result);
     ray_graph_free(g);
 
@@ -577,8 +566,8 @@ static MunitResult test_exec_reductions(const void* params, void* data) {
     v1 = ray_scan(g, "v1");
     ray_op_t* first_op = ray_first(g, v1);
     result = ray_execute(g, first_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 10);
     ray_release(result);
     ray_graph_free(g);
 
@@ -587,20 +576,19 @@ static MunitResult test_exec_reductions(const void* params, void* data) {
     v1 = ray_scan(g, "v1");
     ray_op_t* last_op = ray_last(g, v1);
     result = ray_execute(g, last_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 100);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 100);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- SORT ---- */
-static MunitResult test_exec_sort(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_sort(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
 
@@ -614,15 +602,15 @@ static MunitResult test_exec_sort(const void* params, void* data) {
     ray_op_t* sort_op = ray_sort_op(g, tbl_op, keys, descs, nulls_first, 1);
 
     ray_t* result = ray_execute(g, sort_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 10);
 
     /* Verify ascending order */
     ray_t* sorted_col = ray_table_get_col_idx(result, 1); /* v1 is col 1 */
     int64_t* sdata = (int64_t*)ray_data(sorted_col);
     for (int i = 0; i < 9; i++) {
-        munit_assert_true(sdata[i] <= sdata[i + 1]);
+        TEST_ASSERT_TRUE(sdata[i] <= sdata[i + 1]);
     }
 
     ray_release(result);
@@ -637,15 +625,15 @@ static MunitResult test_exec_sort(const void* params, void* data) {
     uint8_t nulls_first2[] = { 0 };
     sort_op = ray_sort_op(g, tbl_op, keys2, descs2, nulls_first2, 1);
     result = ray_execute(g, sort_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 10);
 
     /* Verify descending order */
     sorted_col = ray_table_get_col_idx(result, 1);
     sdata = (int64_t*)ray_data(sorted_col);
     for (int i = 0; i < 9; i++) {
-        munit_assert_true(sdata[i] >= sdata[i + 1]);
+        TEST_ASSERT_TRUE(sdata[i] >= sdata[i + 1]);
     }
 
     ray_release(result);
@@ -653,12 +641,11 @@ static MunitResult test_exec_sort(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- HEAD / TAIL ---- */
-static MunitResult test_exec_head_tail(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_head_tail(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
 
@@ -668,8 +655,8 @@ static MunitResult test_exec_head_tail(const void* params, void* data) {
     ray_op_t* head_op = ray_head(g, v1, 3);
     ray_op_t* s = ray_sum(g, head_op);
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 60);  /* 10+20+30 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 60);  /* 10+20+30 */
     ray_release(result);
     ray_graph_free(g);
 
@@ -679,20 +666,19 @@ static MunitResult test_exec_head_tail(const void* params, void* data) {
     ray_op_t* tail_op = ray_tail(g, v1, 3);
     s = ray_sum(g, tail_op);
     result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 270);  /* 80+90+100 */
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 270);  /* 80+90+100 */
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- JOIN ---- */
-static MunitResult test_exec_join(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -730,12 +716,12 @@ static MunitResult test_exec_join(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 0);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* 1->1, 2->2(twice), 3->1 = 4 result rows */
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
     /* Joined table should have columns from both sides */
-    munit_assert_true(ray_table_ncols(result) >= 3);
+    TEST_ASSERT_TRUE(ray_table_ncols(result) >= 3);
 
     ray_release(result);
     ray_graph_free(g);
@@ -743,12 +729,11 @@ static MunitResult test_exec_join(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- LARGE JOIN (radix-partitioned path) ---- */
-static MunitResult test_exec_join_large(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join_large(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -805,24 +790,24 @@ static MunitResult test_exec_join_large(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 0);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* 50K keys, 2 left x 2 right = 4 matches per key, total = 200K rows */
-    munit_assert_int(ray_table_nrows(result), ==, 200000);
-    munit_assert_int(ray_table_ncols(result), ==, 3);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 200000);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 3);
 
     /* Validate data: sum of "score" column should equal the expected value.
      * Each right row (score = i*10) matches 2 left rows, so each right row
      * appears twice in the output. Expected sum = 2 * sum(i*10 for i=0..99999)
      * = 2 * 10 * (99999 * 100000 / 2) = 99999000000 */
     ray_t* score_col = ray_table_get_col(result, n_score);
-    munit_assert_true(score_col != NULL);
+    TEST_ASSERT_TRUE(score_col != NULL);
     int64_t* scores = (int64_t*)ray_data(score_col);
     int64_t score_sum = 0;
     for (int64_t i = 0; i < 200000; i++)
         score_sum += scores[i];
     int64_t expected_sum = (int64_t)2 * 10 * ((int64_t)99999 * 100000 / 2);
-    munit_assert_true(score_sum == expected_sum);
+    TEST_ASSERT_TRUE(score_sum == expected_sum);
 
     ray_release(result);
     ray_graph_free(g);
@@ -830,12 +815,11 @@ static MunitResult test_exec_join_large(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- JOIN: small left x large right (asymmetric radix path) ---- */
-static MunitResult test_exec_join_fallback(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join_fallback(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -891,21 +875,21 @@ static MunitResult test_exec_join_fallback(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 0);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* 100 left rows * 1000 right matches each = 100K output rows */
-    munit_assert_int(ray_table_nrows(result), ==, 100000);
-    munit_assert_int(ray_table_ncols(result), ==, 3);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 100000);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 3);
 
     /* Validate: every output row's "val" should be id * 7 */
     ray_t* res_id_col = ray_table_get_col(result, n_id);
     ray_t* res_val_col = ray_table_get_col(result, n_val);
-    munit_assert_true(res_id_col != NULL);
-    munit_assert_true(res_val_col != NULL);
+    TEST_ASSERT_TRUE(res_id_col != NULL);
+    TEST_ASSERT_TRUE(res_val_col != NULL);
     int64_t* res_ids = (int64_t*)ray_data(res_id_col);
     int64_t* res_vals = (int64_t*)ray_data(res_val_col);
     for (int64_t i = 0; i < ray_table_nrows(result); i++)
-        munit_assert_true(res_vals[i] == res_ids[i] * 7);
+        TEST_ASSERT_TRUE(res_vals[i] == res_ids[i] * 7);
 
     ray_release(result);
     ray_graph_free(g);
@@ -913,12 +897,11 @@ static MunitResult test_exec_join_fallback(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- JOIN: empty tables ---- */
-static MunitResult test_exec_join_empty(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join_empty(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -954,8 +937,8 @@ static MunitResult test_exec_join_empty(const void* params, void* data) {
         ray_op_t* ka[] = { k };
         ray_op_t* j = ray_join(g, l, ka, r, ka, 1, 0);
         ray_t* res = ray_execute(g, j);
-        munit_assert_false(RAY_IS_ERR(res));
-        munit_assert_int(ray_table_nrows(res), ==, 0);
+        TEST_ASSERT_FALSE(RAY_IS_ERR(res));
+        TEST_ASSERT_EQ_I(ray_table_nrows(res), 0);
         ray_release(res);
         ray_graph_free(g);
     }
@@ -969,8 +952,8 @@ static MunitResult test_exec_join_empty(const void* params, void* data) {
         ray_op_t* ka[] = { k };
         ray_op_t* j = ray_join(g, l, ka, r, ka, 1, 0);
         ray_t* res = ray_execute(g, j);
-        munit_assert_false(RAY_IS_ERR(res));
-        munit_assert_int(ray_table_nrows(res), ==, 0);
+        TEST_ASSERT_FALSE(RAY_IS_ERR(res));
+        TEST_ASSERT_EQ_I(ray_table_nrows(res), 0);
         ray_release(res);
         ray_graph_free(g);
     }
@@ -984,8 +967,8 @@ static MunitResult test_exec_join_empty(const void* params, void* data) {
         ray_op_t* ka[] = { k };
         ray_op_t* j = ray_join(g, l, ka, r, ka, 1, 1);
         ray_t* res = ray_execute(g, j);
-        munit_assert_false(RAY_IS_ERR(res));
-        munit_assert_int(ray_table_nrows(res), ==, 3);
+        TEST_ASSERT_FALSE(RAY_IS_ERR(res));
+        TEST_ASSERT_EQ_I(ray_table_nrows(res), 3);
         ray_release(res);
         ray_graph_free(g);
     }
@@ -999,8 +982,8 @@ static MunitResult test_exec_join_empty(const void* params, void* data) {
         ray_op_t* ka[] = { k };
         ray_op_t* j = ray_join(g, l, ka, r, ka, 1, 2);
         ray_t* res = ray_execute(g, j);
-        munit_assert_false(RAY_IS_ERR(res));
-        munit_assert_int(ray_table_nrows(res), ==, 3);
+        TEST_ASSERT_FALSE(RAY_IS_ERR(res));
+        TEST_ASSERT_EQ_I(ray_table_nrows(res), 3);
         ray_release(res);
         ray_graph_free(g);
     }
@@ -1014,8 +997,8 @@ static MunitResult test_exec_join_empty(const void* params, void* data) {
         ray_op_t* ka[] = { k };
         ray_op_t* j = ray_join(g, l, ka, r, ka, 1, 2);
         ray_t* res = ray_execute(g, j);
-        munit_assert_false(RAY_IS_ERR(res));
-        munit_assert_int(ray_table_nrows(res), ==, 3);
+        TEST_ASSERT_FALSE(RAY_IS_ERR(res));
+        TEST_ASSERT_EQ_I(ray_table_nrows(res), 3);
         ray_release(res);
         ray_graph_free(g);
     }
@@ -1024,12 +1007,11 @@ static MunitResult test_exec_join_empty(const void* params, void* data) {
     ray_release(empty);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- LEFT OUTER JOIN (radix path, >64K rows) ---- */
-static MunitResult test_exec_join_left_large(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join_left_large(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1083,13 +1065,13 @@ static MunitResult test_exec_join_left_large(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 1);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* LEFT OUTER: all 100K left rows preserved.
      * Even keys (0,2,4,...,99998) match right side: 50K matched rows.
      * Odd keys (1,3,5,...,99999) have no match: 50K unmatched rows.
      * Total = 100K rows. */
-    munit_assert_int(ray_table_nrows(result), ==, 100000);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 100000);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1097,12 +1079,11 @@ static MunitResult test_exec_join_left_large(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- FULL OUTER JOIN (radix path, >64K rows) ---- */
-static MunitResult test_exec_join_full_large(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join_full_large(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1138,11 +1119,11 @@ static MunitResult test_exec_join_full_large(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 2);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* Left 0..39999 unmatched (40K), overlap 40000..79999 matched (40K),
      * Right 80000..119999 unmatched (40K). Total = 120K. */
-    munit_assert_int(ray_table_nrows(result), ==, 120000);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 120000);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1150,12 +1131,11 @@ static MunitResult test_exec_join_full_large(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- JOIN: skewed keys (all rows hash to same partition) ---- */
-static MunitResult test_exec_join_skewed(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join_skewed(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1210,16 +1190,16 @@ static MunitResult test_exec_join_skewed(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 0);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 100000);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 100000);
 
     /* Verify all score values: all should be 42 * 7 = 294 */
     ray_t* score_col = ray_table_get_col(result, n_score);
-    munit_assert_ptr_not_null(score_col);
+    TEST_ASSERT_NOT_NULL(score_col);
     int64_t* scores = (int64_t*)ray_data(score_col);
     for (int64_t i = 0; i < ray_table_nrows(result); i++)
-        munit_assert_int(scores[i], ==, 294);
+        TEST_ASSERT_EQ_I(scores[i], 294);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1227,12 +1207,11 @@ static MunitResult test_exec_join_skewed(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- JOIN: threshold boundary (just above RAY_PARALLEL_THRESHOLD) ---- */
-static MunitResult test_exec_join_boundary(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join_boundary(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1268,23 +1247,23 @@ static MunitResult test_exec_join_boundary(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 1, 0);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* 1:1 key mapping -> exactly n result rows */
-    munit_assert_int(ray_table_nrows(result), ==, n);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), n);
 
     /* Verify join correctness: every id in [0, n) appears exactly once.
      * Use a seen-bitmap to detect duplicates (sum check is insufficient). */
     ray_t* res_id = ray_table_get_col(result, n_id);
-    munit_assert_ptr_not_null(res_id);
+    TEST_ASSERT_NOT_NULL(res_id);
     int64_t* res_ids = (int64_t*)ray_data(res_id);
     ray_t* seen_hdr = ray_alloc((size_t)n * sizeof(bool));
-    munit_assert_ptr_not_null(seen_hdr);
+    TEST_ASSERT_NOT_NULL(seen_hdr);
     bool* seen = (bool*)ray_data(seen_hdr);
     memset(seen, 0, (size_t)n * sizeof(bool));
     for (int64_t i = 0; i < n; i++) {
-        munit_assert_true(res_ids[i] >= 0 && res_ids[i] < n);
-        munit_assert_false(seen[res_ids[i]]);
+        TEST_ASSERT_TRUE(res_ids[i] >= 0 && res_ids[i] < n);
+        TEST_ASSERT_FALSE(seen[res_ids[i]]);
         seen[res_ids[i]] = true;
     }
     ray_free(seen_hdr);
@@ -1295,12 +1274,11 @@ static MunitResult test_exec_join_boundary(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- JOIN: multi-key composite join (I64 + F64 mixed keys) ---- */
-static MunitResult test_exec_join_multikey(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_join_multikey(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1347,19 +1325,19 @@ static MunitResult test_exec_join_multikey(const void* params, void* data) {
     ray_op_t* join_op = ray_join(g, left_op, lk_arr, right_op, rk_arr, 2, 0);
 
     ray_t* result = ray_execute(g, join_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* Matches: (1,10)->1, (2,20)->1. No match: (1,20), (2,10), (3,10).
      * Total = 2 result rows. */
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     /* Verify joined score values: should be {1000, 2000} in some order */
     ray_t* score_col = ray_table_get_col(result, n_score);
-    munit_assert_ptr_not_null(score_col);
+    TEST_ASSERT_NOT_NULL(score_col);
     int64_t* scores = (int64_t*)ray_data(score_col);
     int64_t score_sum = scores[0] + scores[1];
-    munit_assert_int(score_sum, ==, 3000);
-    munit_assert_true((scores[0] == 1000 && scores[1] == 2000) ||
+    TEST_ASSERT_EQ_I(score_sum, 3000);
+    TEST_ASSERT_TRUE((scores[0] == 1000 && scores[1] == 2000) ||
                       (scores[0] == 2000 && scores[1] == 1000));
 
     ray_release(result);
@@ -1368,12 +1346,11 @@ static MunitResult test_exec_join_multikey(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- WINDOW ---- */
-static MunitResult test_exec_window(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_window(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1411,23 +1388,22 @@ static MunitResult test_exec_window(const void* params, void* data) {
                                 0, 0);
 
     ray_t* result = ray_execute(g, win);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 6);
     /* Window adds a column (row_number) to the 2-col input */
-    munit_assert_true(ray_table_ncols(result) >= 3);
+    TEST_ASSERT_TRUE(ray_table_ncols(result) >= 3);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- SELECT (column projection) ---- */
-static MunitResult test_exec_select(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_select(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
 
@@ -1439,29 +1415,28 @@ static MunitResult test_exec_select(const void* params, void* data) {
     ray_op_t* sel = ray_select(g, tbl_op, cols, 2);
 
     ray_t* result = ray_execute(g, sel);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_ncols(result), ==, 2);
-    munit_assert_int(ray_table_nrows(result), ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 10);
 
     /* Verify first column is v1 (I64) and has correct values */
     ray_t* c0 = ray_table_get_col_idx(result, 0);
-    munit_assert_ptr_not_null(c0);
-    munit_assert_int(c0->type, ==, RAY_I64);
+    TEST_ASSERT_NOT_NULL(c0);
+    TEST_ASSERT_EQ_I(c0->type, RAY_I64);
     int64_t* c0_data = (int64_t*)ray_data(c0);
-    munit_assert_int(c0_data[0], ==, 10);
+    TEST_ASSERT_EQ_I(c0_data[0], 10);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- STDDEV / VAR ---- */
-static MunitResult test_exec_stddev(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_stddev(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1477,8 +1452,8 @@ static MunitResult test_exec_stddev(const void* params, void* data) {
     ray_op_t* x = ray_scan(g, "x");
     ray_op_t* var_op = ray_var_pop(g, x);
     ray_t* result = ray_execute(g, var_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 4.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 4.0, 1e-6);
     ray_release(result);
     ray_graph_free(g);
 
@@ -1486,8 +1461,8 @@ static MunitResult test_exec_stddev(const void* params, void* data) {
     x = ray_scan(g, "x");
     ray_op_t* stddev_op = ray_stddev_pop(g, x);
     result = ray_execute(g, stddev_op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 2.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 2.0, 1e-6);
     ray_release(result);
     ray_graph_free(g);
 
@@ -1496,8 +1471,8 @@ static MunitResult test_exec_stddev(const void* params, void* data) {
     x = ray_scan(g, "x");
     ray_op_t* var_s = ray_var(g, x);
     result = ray_execute(g, var_s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 32.0 / 7.0, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 32.0 / 7.0, 1e-5);
     ray_release(result);
     ray_graph_free(g);
 
@@ -1506,20 +1481,19 @@ static MunitResult test_exec_stddev(const void* params, void* data) {
     x = ray_scan(g, "x");
     ray_op_t* stddev_s = ray_stddev(g, x);
     result = ray_execute(g, stddev_s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, sqrt(32.0 / 7.0), 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, sqrt(32.0 / 7.0), 1e-5);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- COUNT_DISTINCT ---- */
-static MunitResult test_exec_count_distinct(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_count_distinct(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
 
@@ -1528,8 +1502,8 @@ static MunitResult test_exec_count_distinct(const void* params, void* data) {
     ray_op_t* id1 = ray_scan(g, "id1");
     ray_op_t* cd = ray_count_distinct(g, id1);
     ray_t* result = ray_execute(g, cd);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
     ray_graph_free(g);
 
@@ -1538,8 +1512,8 @@ static MunitResult test_exec_count_distinct(const void* params, void* data) {
     ray_op_t* v1 = ray_scan(g, "v1");
     cd = ray_count_distinct(g, v1);
     result = ray_execute(g, cd);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 10);
     ray_release(result);
     ray_graph_free(g);
 
@@ -1556,8 +1530,8 @@ static MunitResult test_exec_count_distinct(const void* params, void* data) {
     ray_op_t* fop = ray_scan(g, "f");
     cd = ray_count_distinct(g, fop);
     result = ray_execute(g, cd);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
     ray_graph_free(g);
     ray_release(ftbl);
@@ -1574,8 +1548,8 @@ static MunitResult test_exec_count_distinct(const void* params, void* data) {
     ray_op_t* x = ray_scan(g, "x");
     cd = ray_count_distinct(g, x);
     result = ray_execute(g, cd);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 1);
     ray_release(result);
     ray_graph_free(g);
 
@@ -1583,12 +1557,11 @@ static MunitResult test_exec_count_distinct(const void* params, void* data) {
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- ASOF JOIN ---- */
-static MunitResult test_exec_asof_join(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_asof_join(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1639,29 +1612,29 @@ static MunitResult test_exec_asof_join(const void* params, void* data) {
     ray_op_t* aj = ray_asof_join(g, left_op, right_op, tkey, eq_keys, 1, 0);
 
     ray_t* result = ray_execute(g, aj);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* All 5 left rows should have matches */
-    munit_assert_int(ray_table_nrows(result), ==, 5);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 5);
     /* Should have left cols + bid (time/sym deduplicated) */
-    munit_assert_int(ray_table_ncols(result), ==, 4);  /* time, sym, price, bid */
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 4);  /* time, sym, price, bid */
 
     /* Verify bid values — DuckDB semantics: best right.time <= left.time per partition.
      * Output preserves original left-table row order. */
     ray_t* bid_col = ray_table_get_col(result, n_bid);
-    munit_assert_ptr_not_null(bid_col);
+    TEST_ASSERT_NOT_NULL(bid_col);
     double* bid_data = (double*)ray_data(bid_col);
     /* Original left order: (t=100,s=1), (t=200,s=1), (t=300,s=2), (t=400,s=1), (t=500,s=2) */
     /* t=100,s=1: right s=1,t=90 -> bid=9.5 */
-    munit_assert_double(bid_data[0], ==, 9.5);
+    TEST_ASSERT((bid_data[0]) == (9.5), "double == failed");
     /* t=200,s=1: right s=1,t=150 -> bid=15.0 */
-    munit_assert_double(bid_data[1], ==, 15.0);
+    TEST_ASSERT((bid_data[1]) == (15.0), "double == failed");
     /* t=300,s=2: right s=2,t=250 -> bid=25.0 */
-    munit_assert_double(bid_data[2], ==, 25.0);
+    TEST_ASSERT((bid_data[2]) == (25.0), "double == failed");
     /* t=400,s=1: right s=1,t=350 -> bid=35.0 */
-    munit_assert_double(bid_data[3], ==, 35.0);
+    TEST_ASSERT((bid_data[3]) == (35.0), "double == failed");
     /* t=500,s=2: right s=2,t=450 -> bid=45.0 */
-    munit_assert_double(bid_data[4], ==, 45.0);
+    TEST_ASSERT((bid_data[4]) == (45.0), "double == failed");
 
     ray_release(result);
     ray_graph_free(g);
@@ -1669,12 +1642,11 @@ static MunitResult test_exec_asof_join(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- ASOF LEFT JOIN ---- */
-static MunitResult test_exec_asof_left_join(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_asof_left_join(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1709,16 +1681,16 @@ static MunitResult test_exec_asof_left_join(const void* params, void* data) {
     ray_op_t* aj = ray_asof_join(g, left_op, right_op, tkey, NULL, 0, 1);
 
     ray_t* result = ray_execute(g, aj);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* Left outer: all 3 left rows preserved */
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     /* Verify: time=50 has no match (before any right row), bid should be 0 (NULL fill) */
     ray_t* bid_col = ray_table_get_col(result, n_bid);
-    munit_assert_ptr_not_null(bid_col);
+    TEST_ASSERT_NOT_NULL(bid_col);
     double* bid_data = (double*)ray_data(bid_col);
-    munit_assert_double(bid_data[0], ==, 0.0);   /* t=50: no match */
-    munit_assert_double(bid_data[1], ==, 0.8);   /* t=100: right t=80 */
-    munit_assert_double(bid_data[2], ==, 1.5);   /* t=200: right t=150 */
+    TEST_ASSERT((bid_data[0]) == (0.0), "double == failed");   /* t=50: no match */
+    TEST_ASSERT((bid_data[1]) == (0.8), "double == failed");   /* t=100: right t=80 */
+    TEST_ASSERT((bid_data[2]) == (1.5), "double == failed");   /* t=200: right t=150 */
 
     ray_release(result);
     ray_graph_free(g);
@@ -1726,12 +1698,11 @@ static MunitResult test_exec_asof_left_join(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- ASOF JOIN: empty right ---- */
-static MunitResult test_exec_asof_empty(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_asof_empty(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1762,8 +1733,8 @@ static MunitResult test_exec_asof_empty(const void* params, void* data) {
     /* Inner ASOF with empty right → 0 rows */
     ray_op_t* aj = ray_asof_join(g, left_op, right_op, tkey, NULL, 0, 0);
     ray_t* result = ray_execute(g, aj);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 0);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 0);
 
     ray_release(result);
     ray_graph_free(g);
@@ -1771,12 +1742,11 @@ static MunitResult test_exec_asof_empty(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- ASOF NULL-KEY HANDLING ---- */
-static MunitResult test_exec_asof_null_keys(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_asof_null_keys(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1827,21 +1797,21 @@ static MunitResult test_exec_asof_null_keys(const void* params, void* data) {
     /* LEFT OUTER so null-keyed left rows still appear with null right cols */
     ray_op_t* aj = ray_asof_join(g, left_op, right_op, tkey, eq_keys, 1, 1);
     ray_t* result = ray_execute(g, aj);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
 
     ray_t* bid_col = ray_table_get_col(result, n_bid);
-    munit_assert_ptr_not_null(bid_col);
-    munit_assert_true((bid_col->attrs & RAY_ATTR_HAS_NULLS) != 0);
+    TEST_ASSERT_NOT_NULL(bid_col);
+    TEST_ASSERT_TRUE((bid_col->attrs & RAY_ATTR_HAS_NULLS) != 0);
     /* Left row 0: non-null keys (t=100, s=1) → match right row 2 (t=250 ... no, 250>100)
      * Actually: rt[0]=50 s=null (excluded), rt[1]=150 t=null (excluded), rt[2]=250 s=1
      * Best right.time <= 100 where sym=1 is rt[0], but rt[0] is excluded (null sym).
      * No match → bid[0] = null. */
-    munit_assert_true(ray_vec_is_null(bid_col, 0));
+    TEST_ASSERT_TRUE(ray_vec_is_null(bid_col, 0));
     /* Left row 1: null sym key → no match → bid[1] = null */
-    munit_assert_true(ray_vec_is_null(bid_col, 1));
+    TEST_ASSERT_TRUE(ray_vec_is_null(bid_col, 1));
     /* Left row 2: null time key → no match → bid[2] = null */
-    munit_assert_true(ray_vec_is_null(bid_col, 2));
+    TEST_ASSERT_TRUE(ray_vec_is_null(bid_col, 2));
 
     ray_release(result);
     ray_graph_free(g);
@@ -1849,12 +1819,11 @@ static MunitResult test_exec_asof_null_keys(const void* params, void* data) {
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Follow-up: match exists only through non-null right rows. */
-static MunitResult test_exec_asof_null_keys_match(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_asof_null_keys_match(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -1897,13 +1866,13 @@ static MunitResult test_exec_asof_null_keys_match(const void* params, void* data
     ray_op_t* eq_keys[] = { skey };
     ray_op_t* aj = ray_asof_join(g, left_op, right_op, tkey, eq_keys, 1, 0);
     ray_t* result = ray_execute(g, aj);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 1);
 
     ray_t* bid_col = ray_table_get_col(result, n_bid);
     double* bid_data = (double*)ray_data(bid_col);
-    munit_assert_double(bid_data[0], ==, 8.0);  /* rt=80, not rt=50 (later valid) */
-    munit_assert_false(ray_vec_is_null(bid_col, 0));
+    TEST_ASSERT((bid_data[0]) == (8.0), "double == failed");  /* rt=80, not rt=50 (later valid) */
+    TEST_ASSERT_FALSE(ray_vec_is_null(bid_col, 0));
 
     ray_release(result);
     ray_graph_free(g);
@@ -1911,7 +1880,7 @@ static MunitResult test_exec_asof_null_keys_match(const void* params, void* data
     ray_release(right);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- STRING HELPER ---- */
@@ -1934,8 +1903,7 @@ static ray_t* make_sym_table(void) {
 }
 
 /* ---- UPPER ---- */
-static MunitResult test_exec_upper(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_upper(void) {
     ray_heap_init();
     ray_t* tbl = make_sym_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -1944,24 +1912,23 @@ static MunitResult test_exec_upper(const void* params, void* data) {
     ray_op_t* up = ray_upper(g, name_col);
 
     ray_t* result = ray_execute(g, up);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     int64_t *rdata = (int64_t*)ray_data(result);
     ray_t* s = ray_sym_str(rdata[0]);
-    munit_assert_string_equal(ray_str_ptr(s), "HELLO");
+    TEST_ASSERT_STR_EQ(ray_str_ptr(s), "HELLO");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- LOWER ---- */
-static MunitResult test_exec_lower(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_lower(void) {
     ray_heap_init();
     ray_t* tbl = make_sym_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -1970,24 +1937,23 @@ static MunitResult test_exec_lower(const void* params, void* data) {
     ray_op_t* lo = ray_lower(g, name_col);
 
     ray_t* result = ray_execute(g, lo);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     int64_t *rdata = (int64_t*)ray_data(result);
     ray_t* s = ray_sym_str(rdata[1]);
-    munit_assert_string_equal(ray_str_ptr(s), "world");
+    TEST_ASSERT_STR_EQ(ray_str_ptr(s), "world");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- STRLEN ---- */
-static MunitResult test_exec_strlen(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_strlen(void) {
     ray_heap_init();
     ray_t* tbl = make_sym_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -1996,27 +1962,26 @@ static MunitResult test_exec_strlen(const void* params, void* data) {
     ray_op_t* slen = ray_strlen(g, name_col);
 
     ray_t* result = ray_execute(g, slen);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     int64_t *rdata = (int64_t*)ray_data(result);
-    munit_assert_int(rdata[0], ==, 5);   /* "hello" */
-    munit_assert_int(rdata[1], ==, 5);   /* "WORLD" */
-    munit_assert_int(rdata[2], ==, 7);   /* "  foo  " */
-    munit_assert_int(rdata[3], ==, 7);   /* "bar_baz" */
-    munit_assert_int(rdata[4], ==, 0);   /* "" */
+    TEST_ASSERT_EQ_I(rdata[0], 5);   /* "hello" */
+    TEST_ASSERT_EQ_I(rdata[1], 5);   /* "WORLD" */
+    TEST_ASSERT_EQ_I(rdata[2], 7);   /* "  foo  " */
+    TEST_ASSERT_EQ_I(rdata[3], 7);   /* "bar_baz" */
+    TEST_ASSERT_EQ_I(rdata[4], 0);   /* "" */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- TRIM ---- */
-static MunitResult test_exec_trim(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_trim(void) {
     ray_heap_init();
     ray_t* tbl = make_sym_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -2025,24 +1990,23 @@ static MunitResult test_exec_trim(const void* params, void* data) {
     ray_op_t* tr = ray_trim_op(g, name_col);
 
     ray_t* result = ray_execute(g, tr);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     int64_t *rdata = (int64_t*)ray_data(result);
     ray_t* s = ray_sym_str(rdata[2]);
-    munit_assert_string_equal(ray_str_ptr(s), "foo");
+    TEST_ASSERT_STR_EQ(ray_str_ptr(s), "foo");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- LIKE ---- */
-static MunitResult test_exec_like(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_like(void) {
     ray_heap_init();
     ray_t* tbl = make_sym_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -2053,20 +2017,19 @@ static MunitResult test_exec_like(const void* params, void* data) {
     ray_op_t* cnt = ray_count(g, ray_filter(g, name_col, lk));
 
     ray_t* result = ray_execute(g, cnt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 1);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- CONCAT ---- */
-static MunitResult test_exec_concat(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_concat(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2105,24 +2068,23 @@ static MunitResult test_exec_concat(const void* params, void* data) {
     ray_op_t* cat = ray_concat(g, args, 3);
 
     ray_t* result = ray_execute(g, cat);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->len, ==, 1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->len, 1);
 
     int64_t *rdata = (int64_t*)ray_data(result);
     ray_t* s = ray_sym_str(rdata[0]);
-    munit_assert_string_equal(ray_str_ptr(s), "hello world");
+    TEST_ASSERT_STR_EQ(ray_str_ptr(s), "hello world");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- EXTRACT ---- */
-static MunitResult test_exec_extract(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_extract(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2143,9 +2105,9 @@ static MunitResult test_exec_extract(const void* params, void* data) {
     ray_op_t* col = ray_scan(g, "ts");
     ray_op_t* yr = ray_extract(g, col, RAY_EXTRACT_YEAR);
     ray_t* result = ray_execute(g, yr);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     int64_t *rdata = (int64_t*)ray_data(result);
-    munit_assert_int(rdata[0], ==, 2024);
+    TEST_ASSERT_EQ_I(rdata[0], 2024);
     ray_release(result);
     ray_graph_free(g);
 
@@ -2154,9 +2116,9 @@ static MunitResult test_exec_extract(const void* params, void* data) {
     col = ray_scan(g, "ts");
     ray_op_t* mo = ray_extract(g, col, RAY_EXTRACT_MONTH);
     result = ray_execute(g, mo);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     rdata = (int64_t*)ray_data(result);
-    munit_assert_int(rdata[0], ==, 6);
+    TEST_ASSERT_EQ_I(rdata[0], 6);
     ray_release(result);
     ray_graph_free(g);
 
@@ -2165,21 +2127,20 @@ static MunitResult test_exec_extract(const void* params, void* data) {
     col = ray_scan(g, "ts");
     ray_op_t* dy = ray_extract(g, col, RAY_EXTRACT_DAY);
     result = ray_execute(g, dy);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     rdata = (int64_t*)ray_data(result);
-    munit_assert_int(rdata[0], ==, 15);
+    TEST_ASSERT_EQ_I(rdata[0], 15);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- DATE_TRUNC ---- */
-static MunitResult test_exec_date_trunc(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_date_trunc(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2197,22 +2158,21 @@ static MunitResult test_exec_date_trunc(const void* params, void* data) {
     ray_op_t* trunc = ray_date_trunc(g, col, RAY_EXTRACT_MONTH);
 
     ray_t* result = ray_execute(g, trunc);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     int64_t *rdata = (int64_t*)ray_data(result);
-    munit_assert_true(rdata[0] < ts);
-    munit_assert_true(rdata[0] > 0);
+    TEST_ASSERT_TRUE(rdata[0] < ts);
+    TEST_ASSERT_TRUE(rdata[0] > 0);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- CAST ---- */
-static MunitResult test_exec_cast(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_cast(void) {
     ray_heap_init();
     ray_t* tbl = make_exec_table();
     ray_graph_t* g = ray_graph_new(tbl);
@@ -2222,15 +2182,15 @@ static MunitResult test_exec_cast(const void* params, void* data) {
     ray_op_t* s = ray_sum(g, casted);
 
     ray_t* result = ray_execute(g, s);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 550.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 550.0, 1e-6);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Helper: create table with RAY_STR "name" column — 5 rows */
@@ -2250,8 +2210,7 @@ static ray_t* make_str_table(void) {
 }
 
 /* ---- RAY_STR EQ ---- */
-static MunitResult test_exec_str_eq(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_eq(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2262,28 +2221,27 @@ static MunitResult test_exec_str_eq(const void* params, void* data) {
     ray_op_t* eq = ray_eq(g, name, lit);
 
     ray_t* result = ray_execute(g, eq);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_BOOL);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_BOOL);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     uint8_t* d = (uint8_t*)ray_data(result);
-    munit_assert_int(d[0], ==, 1);  /* "hello" == "hello" */
-    munit_assert_int(d[1], ==, 0);  /* "WORLD" != "hello" */
-    munit_assert_int(d[2], ==, 0);
-    munit_assert_int(d[3], ==, 0);
-    munit_assert_int(d[4], ==, 0);
+    TEST_ASSERT_EQ_I(d[0], 1);  /* "hello" == "hello" */
+    TEST_ASSERT_EQ_I(d[1], 0);  /* "WORLD" != "hello" */
+    TEST_ASSERT_EQ_I(d[2], 0);
+    TEST_ASSERT_EQ_I(d[3], 0);
+    TEST_ASSERT_EQ_I(d[4], 0);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR NE ---- */
-static MunitResult test_exec_str_ne(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_ne(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2294,28 +2252,27 @@ static MunitResult test_exec_str_ne(const void* params, void* data) {
     ray_op_t* ne = ray_ne(g, name, lit);
 
     ray_t* result = ray_execute(g, ne);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_BOOL);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_BOOL);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     uint8_t* d = (uint8_t*)ray_data(result);
-    munit_assert_int(d[0], ==, 0);  /* "hello" != "hello" -> false */
-    munit_assert_int(d[1], ==, 1);  /* "WORLD" != "hello" -> true */
-    munit_assert_int(d[2], ==, 1);
-    munit_assert_int(d[3], ==, 1);
-    munit_assert_int(d[4], ==, 1);
+    TEST_ASSERT_EQ_I(d[0], 0);  /* "hello" != "hello" -> false */
+    TEST_ASSERT_EQ_I(d[1], 1);  /* "WORLD" != "hello" -> true */
+    TEST_ASSERT_EQ_I(d[2], 1);
+    TEST_ASSERT_EQ_I(d[3], 1);
+    TEST_ASSERT_EQ_I(d[4], 1);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR LT ---- */
-static MunitResult test_exec_str_lt(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_lt(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2326,30 +2283,29 @@ static MunitResult test_exec_str_lt(const void* params, void* data) {
     ray_op_t* lt = ray_lt(g, name, lit);
 
     ray_t* result = ray_execute(g, lt);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_BOOL);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_BOOL);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     uint8_t* d = (uint8_t*)ray_data(result);
     /* Lexicographic: "  foo  " < "hello", "WORLD" < "hello" (uppercase < lowercase),
        "bar_baz" < "hello", "" < "hello" */
-    munit_assert_int(d[0], ==, 0);  /* "hello" < "hello" -> false */
-    munit_assert_int(d[1], ==, 1);  /* "WORLD" < "hello" -> true (W=0x57 < h=0x68) */
-    munit_assert_int(d[2], ==, 1);  /* "  foo  " < "hello" -> true (space=0x20 < h=0x68) */
-    munit_assert_int(d[3], ==, 1);  /* "bar_baz" < "hello" -> true */
-    munit_assert_int(d[4], ==, 1);  /* "" < "hello" -> true */
+    TEST_ASSERT_EQ_I(d[0], 0);  /* "hello" < "hello" -> false */
+    TEST_ASSERT_EQ_I(d[1], 1);  /* "WORLD" < "hello" -> true (W=0x57 < h=0x68) */
+    TEST_ASSERT_EQ_I(d[2], 1);  /* "  foo  " < "hello" -> true (space=0x20 < h=0x68) */
+    TEST_ASSERT_EQ_I(d[3], 1);  /* "bar_baz" < "hello" -> true */
+    TEST_ASSERT_EQ_I(d[4], 1);  /* "" < "hello" -> true */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR LE ---- */
-static MunitResult test_exec_str_le(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_le(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2360,27 +2316,26 @@ static MunitResult test_exec_str_le(const void* params, void* data) {
     ray_op_t* cmp = ray_le(g, name, lit);
     ray_t* result = ray_execute(g, cmp);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_BOOL);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_BOOL);
+    TEST_ASSERT_EQ_I(result->len, 5);
     uint8_t* d = (uint8_t*)ray_data(result);
-    munit_assert_int(d[0], ==, 1);  /* "hello" <= "hello" -> true */
-    munit_assert_int(d[1], ==, 1);  /* "WORLD" <= "hello" -> true (W=0x57 < h=0x68) */
-    munit_assert_int(d[2], ==, 1);  /* "  foo  " <= "hello" -> true (space < h) */
-    munit_assert_int(d[3], ==, 1);  /* "bar_baz" <= "hello" -> true (b < h) */
-    munit_assert_int(d[4], ==, 1);  /* "" <= "hello" -> true */
+    TEST_ASSERT_EQ_I(d[0], 1);  /* "hello" <= "hello" -> true */
+    TEST_ASSERT_EQ_I(d[1], 1);  /* "WORLD" <= "hello" -> true (W=0x57 < h=0x68) */
+    TEST_ASSERT_EQ_I(d[2], 1);  /* "  foo  " <= "hello" -> true (space < h) */
+    TEST_ASSERT_EQ_I(d[3], 1);  /* "bar_baz" <= "hello" -> true (b < h) */
+    TEST_ASSERT_EQ_I(d[4], 1);  /* "" <= "hello" -> true */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR GT ---- */
-static MunitResult test_exec_str_gt(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_gt(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2391,27 +2346,26 @@ static MunitResult test_exec_str_gt(const void* params, void* data) {
     ray_op_t* cmp = ray_gt(g, name, lit);
     ray_t* result = ray_execute(g, cmp);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_BOOL);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_BOOL);
+    TEST_ASSERT_EQ_I(result->len, 5);
     uint8_t* d = (uint8_t*)ray_data(result);
-    munit_assert_int(d[0], ==, 0);  /* "hello" > "hello" -> false */
-    munit_assert_int(d[1], ==, 0);  /* "WORLD" > "hello" -> false */
-    munit_assert_int(d[2], ==, 0);  /* "  foo  " > "hello" -> false */
-    munit_assert_int(d[3], ==, 0);  /* "bar_baz" > "hello" -> false */
-    munit_assert_int(d[4], ==, 0);  /* "" > "hello" -> false */
+    TEST_ASSERT_EQ_I(d[0], 0);  /* "hello" > "hello" -> false */
+    TEST_ASSERT_EQ_I(d[1], 0);  /* "WORLD" > "hello" -> false */
+    TEST_ASSERT_EQ_I(d[2], 0);  /* "  foo  " > "hello" -> false */
+    TEST_ASSERT_EQ_I(d[3], 0);  /* "bar_baz" > "hello" -> false */
+    TEST_ASSERT_EQ_I(d[4], 0);  /* "" > "hello" -> false */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR GE ---- */
-static MunitResult test_exec_str_ge(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_ge(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2422,27 +2376,26 @@ static MunitResult test_exec_str_ge(const void* params, void* data) {
     ray_op_t* cmp = ray_ge(g, name, lit);
     ray_t* result = ray_execute(g, cmp);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_BOOL);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_BOOL);
+    TEST_ASSERT_EQ_I(result->len, 5);
     uint8_t* d = (uint8_t*)ray_data(result);
-    munit_assert_int(d[0], ==, 1);  /* "hello" >= "hello" -> true */
-    munit_assert_int(d[1], ==, 0);  /* "WORLD" >= "hello" -> false */
-    munit_assert_int(d[2], ==, 0);  /* "  foo  " >= "hello" -> false */
-    munit_assert_int(d[3], ==, 0);  /* "bar_baz" >= "hello" -> false */
-    munit_assert_int(d[4], ==, 0);  /* "" >= "hello" -> false */
+    TEST_ASSERT_EQ_I(d[0], 1);  /* "hello" >= "hello" -> true */
+    TEST_ASSERT_EQ_I(d[1], 0);  /* "WORLD" >= "hello" -> false */
+    TEST_ASSERT_EQ_I(d[2], 0);  /* "  foo  " >= "hello" -> false */
+    TEST_ASSERT_EQ_I(d[3], 0);  /* "bar_baz" >= "hello" -> false */
+    TEST_ASSERT_EQ_I(d[4], 0);  /* "" >= "hello" -> false */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR STRLEN ---- */
-static MunitResult test_exec_str_strlen(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_strlen(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2452,27 +2405,26 @@ static MunitResult test_exec_str_strlen(const void* params, void* data) {
     ray_op_t* slen = ray_strlen(g, name);
     ray_t* result = ray_execute(g, slen);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_I64);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_I64);
+    TEST_ASSERT_EQ_I(result->len, 5);
     int64_t* d = (int64_t*)ray_data(result);
-    munit_assert_int(d[0], ==, 5);   /* "hello" */
-    munit_assert_int(d[1], ==, 5);   /* "WORLD" */
-    munit_assert_int(d[2], ==, 7);   /* "  foo  " */
-    munit_assert_int(d[3], ==, 7);   /* "bar_baz" */
-    munit_assert_int(d[4], ==, 0);   /* "" */
+    TEST_ASSERT_EQ_I(d[0], 5);   /* "hello" */
+    TEST_ASSERT_EQ_I(d[1], 5);   /* "WORLD" */
+    TEST_ASSERT_EQ_I(d[2], 7);   /* "  foo  " */
+    TEST_ASSERT_EQ_I(d[3], 7);   /* "bar_baz" */
+    TEST_ASSERT_EQ_I(d[4], 0);   /* "" */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- GRAPH DUMP (smoke test) ---- */
-static MunitResult test_graph_dump(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_graph_dump(void) {
     ray_heap_init();
     ray_t *tbl = make_exec_table();
     ray_graph_t *g = ray_graph_new(tbl);
@@ -2486,18 +2438,17 @@ static MunitResult test_graph_dump(const void* params, void* data) {
     FILE *devnull = fopen("/dev/null", "w");
     if (devnull) { ray_graph_dump(g, opt, devnull); fclose(devnull); }
     ray_t *result = ray_execute(g, opt);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR UPPER ---- */
-static MunitResult test_exec_str_upper(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_upper(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2507,34 +2458,33 @@ static MunitResult test_exec_str_upper(const void* params, void* data) {
     ray_op_t* up = ray_upper(g, name);
     ray_t* result = ray_execute(g, up);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     size_t len;
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s0, "HELLO");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s0, "HELLO");
 
     const char* s1 = ray_str_vec_get(result, 1, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s1, "WORLD");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s1, "WORLD");
 
     const char* s4 = ray_str_vec_get(result, 4, &len);
     (void)s4;
-    munit_assert_size(len, ==, 0);
+    TEST_ASSERT_EQ_U(len, 0);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR LOWER ---- */
-static MunitResult test_exec_str_lower(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_lower(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2544,42 +2494,41 @@ static MunitResult test_exec_str_lower(const void* params, void* data) {
     ray_op_t* lo = ray_lower(g, name);
     ray_t* result = ray_execute(g, lo);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     size_t len;
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s0, "hello");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s0, "hello");
 
     const char* s1 = ray_str_vec_get(result, 1, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s1, "world");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s1, "world");
 
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 7);
-    munit_assert_memory_equal(7, s2, "  foo  ");
+    TEST_ASSERT_EQ_U(len, 7);
+    TEST_ASSERT_MEM_EQ(7, s2, "  foo  ");
 
     const char* s3 = ray_str_vec_get(result, 3, &len);
-    munit_assert_size(len, ==, 7);
-    munit_assert_memory_equal(7, s3, "bar_baz");
+    TEST_ASSERT_EQ_U(len, 7);
+    TEST_ASSERT_MEM_EQ(7, s3, "bar_baz");
 
     const char* s4 = ray_str_vec_get(result, 4, &len);
     (void)s4;
-    munit_assert_size(len, ==, 0);
+    TEST_ASSERT_EQ_U(len, 0);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR TRIM ---- */
-static MunitResult test_exec_str_trim(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_trim(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2589,37 +2538,36 @@ static MunitResult test_exec_str_trim(const void* params, void* data) {
     ray_op_t* tr = ray_trim_op(g, name);
     ray_t* result = ray_execute(g, tr);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     size_t len;
     /* "  foo  " -> "foo" */
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 3);
-    munit_assert_memory_equal(3, s2, "foo");
+    TEST_ASSERT_EQ_U(len, 3);
+    TEST_ASSERT_MEM_EQ(3, s2, "foo");
 
     /* "hello" unchanged */
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s0, "hello");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s0, "hello");
 
     /* "" stays empty */
     const char* s4 = ray_str_vec_get(result, 4, &len);
     (void)s4;
-    munit_assert_size(len, ==, 0);
+    TEST_ASSERT_EQ_U(len, 0);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR SUBSTR ---- */
-static MunitResult test_exec_str_substr(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_substr(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2631,42 +2579,41 @@ static MunitResult test_exec_str_substr(const void* params, void* data) {
     ray_op_t* sub = ray_substr(g, name, start, len_op);
     ray_t* result = ray_execute(g, sub);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     size_t len;
     /* "hello" -> "hel" */
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 3);
-    munit_assert_memory_equal(3, s0, "hel");
+    TEST_ASSERT_EQ_U(len, 3);
+    TEST_ASSERT_MEM_EQ(3, s0, "hel");
 
     /* "WORLD" -> "WOR" */
     const char* s1 = ray_str_vec_get(result, 1, &len);
-    munit_assert_size(len, ==, 3);
-    munit_assert_memory_equal(3, s1, "WOR");
+    TEST_ASSERT_EQ_U(len, 3);
+    TEST_ASSERT_MEM_EQ(3, s1, "WOR");
 
     /* "bar_baz" -> "bar" */
     const char* s3 = ray_str_vec_get(result, 3, &len);
-    munit_assert_size(len, ==, 3);
-    munit_assert_memory_equal(3, s3, "bar");
+    TEST_ASSERT_EQ_U(len, 3);
+    TEST_ASSERT_MEM_EQ(3, s3, "bar");
 
     /* "" -> "" */
     const char* s4 = ray_str_vec_get(result, 4, &len);
     (void)s4;
-    munit_assert_size(len, ==, 0);
+    TEST_ASSERT_EQ_U(len, 0);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR REPLACE ---- */
-static MunitResult test_exec_str_replace(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_replace(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2678,41 +2625,40 @@ static MunitResult test_exec_str_replace(const void* params, void* data) {
     ray_op_t* rep = ray_replace(g, name, from, to);
     ray_t* result = ray_execute(g, rep);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     size_t len;
     /* "hello" -> "hell0" */
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s0, "hell0");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s0, "hell0");
 
     /* "WORLD" -> "WORLD" (no lowercase o) */
     const char* s1 = ray_str_vec_get(result, 1, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s1, "WORLD");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s1, "WORLD");
 
     /* "  foo  " -> "  f00  " */
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 7);
-    munit_assert_memory_equal(7, s2, "  f00  ");
+    TEST_ASSERT_EQ_U(len, 7);
+    TEST_ASSERT_MEM_EQ(7, s2, "  f00  ");
 
     /* "" -> "" */
     const char* s4 = ray_str_vec_get(result, 4, &len);
     (void)s4;
-    munit_assert_size(len, ==, 0);
+    TEST_ASSERT_EQ_U(len, 0);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_exec_str_concat(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_concat(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2743,33 +2689,32 @@ static MunitResult test_exec_str_concat(const void* params, void* data) {
     ray_op_t* cat = ray_concat(g, args, 2);
     ray_t* result = ray_execute(g, cat);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 3);
 
     size_t len;
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 8);
-    munit_assert_memory_equal(8, s0, "John Doe");
+    TEST_ASSERT_EQ_U(len, 8);
+    TEST_ASSERT_MEM_EQ(8, s0, "John Doe");
 
     const char* s1 = ray_str_vec_get(result, 1, &len);
-    munit_assert_size(len, ==, 10);
-    munit_assert_memory_equal(10, s1, "Jane Smith");
+    TEST_ASSERT_EQ_U(len, 10);
+    TEST_ASSERT_MEM_EQ(10, s1, "Jane Smith");
 
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 6);
-    munit_assert_memory_equal(6, s2, "Bob Jr");
+    TEST_ASSERT_EQ_U(len, 6);
+    TEST_ASSERT_MEM_EQ(6, s2, "Bob Jr");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_exec_str_if(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_if(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2785,36 +2730,35 @@ static MunitResult test_exec_str_if(const void* params, void* data) {
     ray_op_t* if_op = ray_if(g, cond, then_col, else_col);
     ray_t* result = ray_execute(g, if_op);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     size_t len;
     /* row 0: "hello" == "hello" → true → "hello" */
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s0, "hello");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s0, "hello");
 
     /* row 1: "WORLD" != "hello" → false → UPPER("WORLD") = "WORLD" */
     const char* s1 = ray_str_vec_get(result, 1, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s1, "WORLD");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s1, "WORLD");
 
     /* row 2: "  foo  " != "hello" → false → UPPER("  foo  ") = "  FOO  " */
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 7);
-    munit_assert_memory_equal(7, s2, "  FOO  ");
+    TEST_ASSERT_EQ_U(len, 7);
+    TEST_ASSERT_MEM_EQ(7, s2, "  FOO  ");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_exec_str_if_scalar(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_if_scalar(void) {
     ray_heap_init();
     (void)ray_sym_init();
     ray_t* tbl = make_str_table();
@@ -2829,35 +2773,34 @@ static MunitResult test_exec_str_if_scalar(const void* params, void* data) {
     ray_op_t* if_op = ray_if(g, cond, then_v, else_v);
     ray_t* result = ray_execute(g, if_op);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_true(RAY_IS_SYM(result->type));  /* scalar str branches → RAY_SYM output */
-    munit_assert_int(result->len, ==, 5);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(RAY_IS_SYM(result->type));  /* scalar str branches → RAY_SYM output */
+    TEST_ASSERT_EQ_I(result->len, 5);
 
     /* row 0: "hello" == "hello" → true → "YES" */
     int64_t sid0 = ray_read_sym(ray_data(result), 0, result->type, result->attrs);
     ray_t* sym0 = ray_sym_str(sid0);
-    munit_assert_ptr_not_null(sym0);
-    munit_assert_size(ray_str_len(sym0), ==, 3);
-    munit_assert_memory_equal(3, ray_str_ptr(sym0), "YES");
+    TEST_ASSERT_NOT_NULL(sym0);
+    TEST_ASSERT_EQ_U(ray_str_len(sym0), 3);
+    TEST_ASSERT_MEM_EQ(3, ray_str_ptr(sym0), "YES");
 
     /* row 1: "WORLD" != "hello" → false → "NO" */
     int64_t sid1 = ray_read_sym(ray_data(result), 1, result->type, result->attrs);
     ray_t* sym1 = ray_sym_str(sid1);
-    munit_assert_ptr_not_null(sym1);
-    munit_assert_size(ray_str_len(sym1), ==, 2);
-    munit_assert_memory_equal(2, ray_str_ptr(sym1), "NO");
+    TEST_ASSERT_NOT_NULL(sym1);
+    TEST_ASSERT_EQ_U(ray_str_len(sym1), 2);
+    TEST_ASSERT_MEM_EQ(2, ray_str_ptr(sym1), "NO");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR EQ with length-1 broadcast ---- */
-static MunitResult test_exec_str_eq_len1_broadcast(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_eq_len1_broadcast(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2885,24 +2828,23 @@ static MunitResult test_exec_str_eq_len1_broadcast(const void* params, void* dat
     ray_op_t* eq   = ray_eq(g, name, tag);
     ray_t* result  = ray_execute(g, eq);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_BOOL);
-    munit_assert_int(result->len, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_BOOL);
+    TEST_ASSERT_EQ_I(result->len, 3);
     uint8_t* d = (uint8_t*)ray_data(result);
-    munit_assert_int(d[0], ==, 1);  /* alice == alice */
-    munit_assert_int(d[1], ==, 0);  /* bob != alice */
-    munit_assert_int(d[2], ==, 1);  /* alice == alice */
+    TEST_ASSERT_EQ_I(d[0], 1);  /* alice == alice */
+    TEST_ASSERT_EQ_I(d[1], 0);  /* bob != alice */
+    TEST_ASSERT_EQ_I(d[2], 1);  /* alice == alice */
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_exec_str_eq_empty_vec_scalar(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_eq_empty_vec_scalar(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2934,26 +2876,25 @@ static MunitResult test_exec_str_eq_empty_vec_scalar(const void* params, void* d
      * acceptable.  If it produces a result, verify contents. */
     if (RAY_IS_ERR(result)) {
         /* Valid error pointer — no crash, fix is working */
-        munit_assert_ptr_not_null(result);
+        TEST_ASSERT_NOT_NULL(result);
     } else {
-        munit_assert_int(result->type, ==, RAY_BOOL);
-        munit_assert_int(result->len, ==, 3);
+        TEST_ASSERT_EQ_I(result->type, RAY_BOOL);
+        TEST_ASSERT_EQ_I(result->len, 3);
         uint8_t* d = (uint8_t*)ray_data(result);
-        munit_assert_int(d[0], ==, 0);  /* "alice" != "" */
-        munit_assert_int(d[1], ==, 0);  /* "bob"   != "" */
-        munit_assert_int(d[2], ==, 1);  /* ""      == "" */
+        TEST_ASSERT_EQ_I(d[0], 0);  /* "alice" != "" */
+        TEST_ASSERT_EQ_I(d[1], 0);  /* "bob"   != "" */
+        TEST_ASSERT_EQ_I(d[2], 1);  /* ""      == "" */
         ray_release(result);
     }
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR UPPER with null ---- */
-static MunitResult test_exec_str_upper_null(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_upper_null(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -2973,35 +2914,34 @@ static MunitResult test_exec_str_upper_null(const void* params, void* data) {
     ray_op_t* up = ray_upper(g, name);
     ray_t* result = ray_execute(g, up);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 3);
 
     /* Row 0: "HELLO" */
     size_t len;
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s0, "HELLO");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s0, "HELLO");
 
     /* Row 1: null propagated */
-    munit_assert_true(ray_vec_is_null(result, 1));
+    TEST_ASSERT_TRUE(ray_vec_is_null(result, 1));
 
     /* Row 2: "FOO" */
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 3);
-    munit_assert_memory_equal(3, s2, "FOO");
+    TEST_ASSERT_EQ_U(len, 3);
+    TEST_ASSERT_MEM_EQ(3, s2, "FOO");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR STRLEN with null ---- */
-static MunitResult test_exec_str_strlen_null(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_strlen_null(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3021,24 +2961,23 @@ static MunitResult test_exec_str_strlen_null(const void* params, void* data) {
     ray_op_t* slen = ray_strlen(g, name);
     ray_t* result = ray_execute(g, slen);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_I64);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_I64);
     int64_t* d = (int64_t*)ray_data(result);
-    munit_assert_int(d[0], ==, 5);
-    munit_assert_true(ray_vec_is_null(result, 1));  /* null propagated */
-    munit_assert_int(d[2], ==, 3);
+    TEST_ASSERT_EQ_I(d[0], 5);
+    TEST_ASSERT_TRUE(ray_vec_is_null(result, 1));  /* null propagated */
+    TEST_ASSERT_EQ_I(d[2], 3);
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR SUBSTR with null ---- */
-static MunitResult test_exec_str_substr_null(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_substr_null(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3060,32 +2999,31 @@ static MunitResult test_exec_str_substr_null(const void* params, void* data) {
     ray_op_t* sub = ray_substr(g, name, start, len_op);
     ray_t* result = ray_execute(g, sub);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 3);
 
     size_t len;
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 3);
-    munit_assert_memory_equal(3, s0, "hel");
+    TEST_ASSERT_EQ_U(len, 3);
+    TEST_ASSERT_MEM_EQ(3, s0, "hel");
 
-    munit_assert_true(ray_vec_is_null(result, 1));
+    TEST_ASSERT_TRUE(ray_vec_is_null(result, 1));
 
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 3);
-    munit_assert_memory_equal(3, s2, "foo");
+    TEST_ASSERT_EQ_U(len, 3);
+    TEST_ASSERT_MEM_EQ(3, s2, "foo");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR REPLACE with null ---- */
-static MunitResult test_exec_str_replace_null(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_replace_null(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3107,32 +3045,31 @@ static MunitResult test_exec_str_replace_null(const void* params, void* data) {
     ray_op_t* rep = ray_replace(g, name, from, to);
     ray_t* result = ray_execute(g, rep);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 3);
 
     size_t len;
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 5);
-    munit_assert_memory_equal(5, s0, "hell0");
+    TEST_ASSERT_EQ_U(len, 5);
+    TEST_ASSERT_MEM_EQ(5, s0, "hell0");
 
-    munit_assert_true(ray_vec_is_null(result, 1));
+    TEST_ASSERT_TRUE(ray_vec_is_null(result, 1));
 
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 3);
-    munit_assert_memory_equal(3, s2, "f00");
+    TEST_ASSERT_EQ_U(len, 3);
+    TEST_ASSERT_MEM_EQ(3, s2, "f00");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- RAY_STR CONCAT with null ---- */
-static MunitResult test_exec_str_concat_null(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_str_concat_null(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3163,33 +3100,32 @@ static MunitResult test_exec_str_concat_null(const void* params, void* data) {
     ray_op_t* cat = ray_concat(g, args, 2);
     ray_t* result = ray_execute(g, cat);
 
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_STR);
-    munit_assert_int(result->len, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 3);
 
     size_t len;
     const char* s0 = ray_str_vec_get(result, 0, &len);
-    munit_assert_size(len, ==, 8);
-    munit_assert_memory_equal(8, s0, "John Doe");
+    TEST_ASSERT_EQ_U(len, 8);
+    TEST_ASSERT_MEM_EQ(8, s0, "John Doe");
 
     /* Row 1: null in first arg → entire row null */
-    munit_assert_true(ray_vec_is_null(result, 1));
+    TEST_ASSERT_TRUE(ray_vec_is_null(result, 1));
 
     const char* s2 = ray_str_vec_get(result, 2, &len);
-    munit_assert_size(len, ==, 6);
-    munit_assert_memory_equal(6, s2, "Bob Jr");
+    TEST_ASSERT_EQ_U(len, 6);
+    TEST_ASSERT_MEM_EQ(6, s2, "Bob Jr");
 
     ray_release(result);
     ray_graph_free(g);
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- I32 reduction ---- */
-static MunitResult test_exec_reduce_i32(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_reduce_i32(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3205,8 +3141,8 @@ static MunitResult test_exec_reduce_i32(const void* params, void* data) {
     ray_op_t* x = ray_scan(g, "x");
     ray_op_t* op = ray_sum(g, x);
     ray_t* result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 60);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 60);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3215,8 +3151,8 @@ static MunitResult test_exec_reduce_i32(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_count(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3225,8 +3161,8 @@ static MunitResult test_exec_reduce_i32(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_min_op(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 10);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3235,8 +3171,8 @@ static MunitResult test_exec_reduce_i32(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_max_op(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 30);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 30);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3245,20 +3181,19 @@ static MunitResult test_exec_reduce_i32(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_avg(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 20.0, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 20.0, 1e-6);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- I16 reduction ---- */
-static MunitResult test_exec_reduce_i16(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_reduce_i16(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3273,20 +3208,19 @@ static MunitResult test_exec_reduce_i16(const void* params, void* data) {
     ray_op_t* x = ray_scan(g, "x");
     ray_op_t* op = ray_sum(g, x);
     ray_t* result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 15);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 15);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- BOOL reduction ---- */
-static MunitResult test_exec_reduce_bool(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_reduce_bool(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3302,8 +3236,8 @@ static MunitResult test_exec_reduce_bool(const void* params, void* data) {
     ray_op_t* x = ray_scan(g, "x");
     ray_op_t* op = ray_sum(g, x);
     ray_t* result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 2);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3312,20 +3246,19 @@ static MunitResult test_exec_reduce_bool(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_count(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- I64 with nulls ---- */
-static MunitResult test_exec_reduce_i64_nulls(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_reduce_i64_nulls(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3343,8 +3276,8 @@ static MunitResult test_exec_reduce_i64_nulls(const void* params, void* data) {
     ray_op_t* x = ray_scan(g, "x");
     ray_op_t* op = ray_sum(g, x);
     ray_t* result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 90);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 90);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3353,8 +3286,8 @@ static MunitResult test_exec_reduce_i64_nulls(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_count(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3363,8 +3296,8 @@ static MunitResult test_exec_reduce_i64_nulls(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_min_op(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 10);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3373,20 +3306,19 @@ static MunitResult test_exec_reduce_i64_nulls(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_max_op(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 50);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 50);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- F64 with nulls ---- */
-static MunitResult test_exec_reduce_f64_nulls(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_reduce_f64_nulls(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3403,8 +3335,8 @@ static MunitResult test_exec_reduce_f64_nulls(const void* params, void* data) {
     ray_op_t* x = ray_scan(g, "x");
     ray_op_t* op = ray_avg(g, x);
     ray_t* result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_double_equal(result->f64, 2.5, 6);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_F(result->f64, 2.5, 1e-6);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3413,20 +3345,19 @@ static MunitResult test_exec_reduce_f64_nulls(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_count(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 2);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Empty vector reduction ---- */
-static MunitResult test_exec_reduce_empty(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_exec_reduce_empty(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -3441,8 +3372,8 @@ static MunitResult test_exec_reduce_empty(const void* params, void* data) {
     ray_op_t* x = ray_scan(g, "x");
     ray_op_t* op = ray_count(g, x);
     ray_t* result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 0);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 0);
     ray_release(result);
     ray_graph_free(g);
 
@@ -3451,20 +3382,19 @@ static MunitResult test_exec_reduce_empty(const void* params, void* data) {
     x = ray_scan(g, "x");
     op = ray_sum(g, x);
     result = ray_execute(g, op);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 0);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 0);
     ray_release(result);
     ray_graph_free(g);
 
     ray_release(tbl);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Lazy handle: basic wrap + materialize ---- */
-static MunitResult test_lazy_wrap_materialize(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_lazy_wrap_materialize(void) {
     ray_heap_init();
 
     int64_t raw[] = {1, 2, 3, 4, 5};
@@ -3475,22 +3405,21 @@ static MunitResult test_lazy_wrap_materialize(const void* params, void* data) {
     ray_op_t* sum_op = ray_sum(g, input);
 
     ray_t* lazy = ray_lazy_wrap(g, sum_op);
-    munit_assert_false(RAY_IS_ERR(lazy));
-    munit_assert_true(ray_is_lazy(lazy));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(lazy));
+    TEST_ASSERT_TRUE(ray_is_lazy(lazy));
 
     ray_t* result = ray_lazy_materialize(lazy);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->i64, ==, 15);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->i64, 15);
 
     ray_release(result);
     ray_release(vec);
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Lazy handle: chain two independent lazy handles ---- */
-static MunitResult test_lazy_chain(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_lazy_chain(void) {
     ray_heap_init();
 
     /* First lazy: sum of [1,2,3,4,5] = 15 */
@@ -3500,7 +3429,7 @@ static MunitResult test_lazy_chain(const void* params, void* data) {
     ray_op_t* in1 = ray_graph_input_vec(g1, vec1);
     ray_op_t* sum1 = ray_sum(g1, in1);
     ray_t* lazy1 = ray_lazy_wrap(g1, sum1);
-    munit_assert_false(RAY_IS_ERR(lazy1));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(lazy1));
 
     /* Second lazy: min of [10,20,30] = 10 */
     int64_t raw2[] = {10, 20, 30};
@@ -3509,46 +3438,44 @@ static MunitResult test_lazy_chain(const void* params, void* data) {
     ray_op_t* in2 = ray_graph_input_vec(g2, vec2);
     ray_op_t* min2 = ray_min_op(g2, in2);
     ray_t* lazy2 = ray_lazy_wrap(g2, min2);
-    munit_assert_false(RAY_IS_ERR(lazy2));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(lazy2));
 
     /* Materialize both independently */
     ray_t* r1 = ray_lazy_materialize(lazy1);
-    munit_assert_false(RAY_IS_ERR(r1));
-    munit_assert_int(r1->i64, ==, 15);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
+    TEST_ASSERT_EQ_I(r1->i64, 15);
 
     ray_t* r2 = ray_lazy_materialize(lazy2);
-    munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(r2->i64, ==, 10);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
+    TEST_ASSERT_EQ_I(r2->i64, 10);
 
     ray_release(r1);
     ray_release(r2);
     ray_release(vec1);
     ray_release(vec2);
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Lazy handle: materialize passthrough on non-lazy value ---- */
-static MunitResult test_lazy_materialize_passthrough(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_lazy_materialize_passthrough(void) {
     ray_heap_init();
 
     ray_t* atom = ray_i64(42);
-    munit_assert_false(ray_is_lazy(atom));
+    TEST_ASSERT_FALSE(ray_is_lazy(atom));
 
     ray_t* result = ray_lazy_materialize(atom);
     /* Should return the same pointer unchanged */
-    munit_assert_ptr_equal(result, atom);
-    munit_assert_int(result->i64, ==, 42);
+    TEST_ASSERT_EQ_PTR(result, atom);
+    TEST_ASSERT_EQ_I(result->i64, 42);
 
     ray_release(atom);
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Lazy handle: release without materialize (cleanup) ---- */
-static MunitResult test_lazy_release_no_materialize(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_lazy_release_no_materialize(void) {
     ray_heap_init();
 
     int64_t raw[] = {1, 2, 3, 4, 5};
@@ -3559,98 +3486,96 @@ static MunitResult test_lazy_release_no_materialize(const void* params, void* da
     ray_op_t* sum_op = ray_sum(g, input);
 
     ray_t* lazy = ray_lazy_wrap(g, sum_op);
-    munit_assert_false(RAY_IS_ERR(lazy));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(lazy));
 
     /* Release without materializing — should not leak under ASan */
     ray_release(lazy);
 
     ray_release(vec);
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ======================================================================
  * Suite
  * ====================================================================== */
 
-static MunitTest exec_tests[] = {
-    { "/neg_i64",        test_exec_neg_i64,           NULL, NULL, 0, NULL },
-    { "/neg_f64",        test_exec_neg_f64,           NULL, NULL, 0, NULL },
-    { "/abs",            test_exec_abs,               NULL, NULL, 0, NULL },
-    { "/not",            test_exec_not,               NULL, NULL, 0, NULL },
-    { "/isnull",         test_exec_isnull,            NULL, NULL, 0, NULL },
-    { "/math_ops",       test_exec_math_ops,          NULL, NULL, 0, NULL },
-    { "/ceil_floor",     test_exec_ceil_floor,        NULL, NULL, 0, NULL },
-    { "/binary_arith",   test_exec_binary_arithmetic, NULL, NULL, 0, NULL },
-    { "/comparisons",    test_exec_comparisons,       NULL, NULL, 0, NULL },
-    { "/min2_max2",      test_exec_min2_max2,         NULL, NULL, 0, NULL },
-    { "/if",             test_exec_if,                NULL, NULL, 0, NULL },
-    { "/reductions",     test_exec_reductions,        NULL, NULL, 0, NULL },
-    { "/reduce_i32",     test_exec_reduce_i32,        NULL, NULL, 0, NULL },
-    { "/reduce_i16",     test_exec_reduce_i16,        NULL, NULL, 0, NULL },
-    { "/reduce_bool",    test_exec_reduce_bool,       NULL, NULL, 0, NULL },
-    { "/reduce_i64_nulls", test_exec_reduce_i64_nulls, NULL, NULL, 0, NULL },
-    { "/reduce_f64_nulls", test_exec_reduce_f64_nulls, NULL, NULL, 0, NULL },
-    { "/reduce_empty",   test_exec_reduce_empty,      NULL, NULL, 0, NULL },
-    { "/sort",           test_exec_sort,              NULL, NULL, 0, NULL },
-    { "/head_tail",      test_exec_head_tail,         NULL, NULL, 0, NULL },
-    { "/join",           test_exec_join,              NULL, NULL, 0, NULL },
-    { "/join_large",     test_exec_join_large,        NULL, NULL, 0, NULL },
-    { "/join_fallback",  test_exec_join_fallback,     NULL, NULL, 0, NULL },
-    { "/join_empty",     test_exec_join_empty,        NULL, NULL, 0, NULL },
-    { "/join_left_large", test_exec_join_left_large, NULL, NULL, 0, NULL },
-    { "/join_full_large", test_exec_join_full_large, NULL, NULL, 0, NULL },
-    { "/join_skewed",    test_exec_join_skewed,       NULL, NULL, 0, NULL },
-    { "/join_boundary",  test_exec_join_boundary,     NULL, NULL, 0, NULL },
-    { "/join_multikey",  test_exec_join_multikey,     NULL, NULL, 0, NULL },
-    { "/window",         test_exec_window,            NULL, NULL, 0, NULL },
-    { "/select",         test_exec_select,            NULL, NULL, 0, NULL },
-    { "/stddev",         test_exec_stddev,            NULL, NULL, 0, NULL },
-    { "/count_distinct", test_exec_count_distinct,    NULL, NULL, 0, NULL },
-    { "/asof_join",      test_exec_asof_join,      NULL, NULL, 0, NULL },
-    { "/asof_left_join", test_exec_asof_left_join,  NULL, NULL, 0, NULL },
-    { "/asof_empty",     test_exec_asof_empty,      NULL, NULL, 0, NULL },
-    { "/asof_null_keys", test_exec_asof_null_keys,  NULL, NULL, 0, NULL },
-    { "/asof_null_keys_match", test_exec_asof_null_keys_match, NULL, NULL, 0, NULL },
-    { "/upper",          test_exec_upper,             NULL, NULL, 0, NULL },
-    { "/lower",          test_exec_lower,             NULL, NULL, 0, NULL },
-    { "/strlen",         test_exec_strlen,            NULL, NULL, 0, NULL },
-    { "/trim",           test_exec_trim,              NULL, NULL, 0, NULL },
-    { "/like",           test_exec_like,              NULL, NULL, 0, NULL },
-    { "/concat",         test_exec_concat,            NULL, NULL, 0, NULL },
-    { "/extract",        test_exec_extract,           NULL, NULL, 0, NULL },
-    { "/date_trunc",     test_exec_date_trunc,        NULL, NULL, 0, NULL },
-    { "/cast",           test_exec_cast,              NULL, NULL, 0, NULL },
-    { "/graph_dump",     test_graph_dump,             NULL, NULL, 0, NULL },
-    { "/str_eq",         test_exec_str_eq,            NULL, NULL, 0, NULL },
-    { "/str_ne",         test_exec_str_ne,            NULL, NULL, 0, NULL },
-    { "/str_lt",         test_exec_str_lt,            NULL, NULL, 0, NULL },
-    { "/str_le",         test_exec_str_le,            NULL, NULL, 0, NULL },
-    { "/str_gt",         test_exec_str_gt,            NULL, NULL, 0, NULL },
-    { "/str_ge",         test_exec_str_ge,            NULL, NULL, 0, NULL },
-    { "/str_strlen",     test_exec_str_strlen,        NULL, NULL, 0, NULL },
-    { "/str_upper",      test_exec_str_upper,         NULL, NULL, 0, NULL },
-    { "/str_lower",      test_exec_str_lower,         NULL, NULL, 0, NULL },
-    { "/str_trim",       test_exec_str_trim,          NULL, NULL, 0, NULL },
-    { "/str_substr",     test_exec_str_substr,        NULL, NULL, 0, NULL },
-    { "/str_replace",    test_exec_str_replace,       NULL, NULL, 0, NULL },
-    { "/str_concat",     test_exec_str_concat,        NULL, NULL, 0, NULL },
-    { "/str_if",         test_exec_str_if,            NULL, NULL, 0, NULL },
-    { "/str_if_scalar",  test_exec_str_if_scalar,     NULL, NULL, 0, NULL },
-    { "/str_eq_len1_broadcast", test_exec_str_eq_len1_broadcast, NULL, NULL, 0, NULL },
-    { "/str_eq_empty_vec_scalar", test_exec_str_eq_empty_vec_scalar, NULL, NULL, 0, NULL },
-    { "/str_upper_null", test_exec_str_upper_null,     NULL, NULL, 0, NULL },
-    { "/str_strlen_null", test_exec_str_strlen_null,   NULL, NULL, 0, NULL },
-    { "/str_substr_null", test_exec_str_substr_null,   NULL, NULL, 0, NULL },
-    { "/str_replace_null", test_exec_str_replace_null, NULL, NULL, 0, NULL },
-    { "/str_concat_null", test_exec_str_concat_null,   NULL, NULL, 0, NULL },
-    { "/lazy_wrap_materialize", test_lazy_wrap_materialize, NULL, NULL, 0, NULL },
-    { "/lazy_chain",            test_lazy_chain,            NULL, NULL, 0, NULL },
-    { "/lazy_materialize_passthrough", test_lazy_materialize_passthrough, NULL, NULL, 0, NULL },
-    { "/lazy_release_no_materialize",  test_lazy_release_no_materialize,  NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL }
+const test_entry_t exec_entries[] = {
+    { "exec/neg_i64", test_exec_neg_i64, NULL, NULL },
+    { "exec/neg_f64", test_exec_neg_f64, NULL, NULL },
+    { "exec/abs", test_exec_abs, NULL, NULL },
+    { "exec/not", test_exec_not, NULL, NULL },
+    { "exec/isnull", test_exec_isnull, NULL, NULL },
+    { "exec/math_ops", test_exec_math_ops, NULL, NULL },
+    { "exec/ceil_floor", test_exec_ceil_floor, NULL, NULL },
+    { "exec/binary_arith", test_exec_binary_arithmetic, NULL, NULL },
+    { "exec/comparisons", test_exec_comparisons, NULL, NULL },
+    { "exec/min2_max2", test_exec_min2_max2, NULL, NULL },
+    { "exec/if", test_exec_if, NULL, NULL },
+    { "exec/reductions", test_exec_reductions, NULL, NULL },
+    { "exec/reduce_i32", test_exec_reduce_i32, NULL, NULL },
+    { "exec/reduce_i16", test_exec_reduce_i16, NULL, NULL },
+    { "exec/reduce_bool", test_exec_reduce_bool, NULL, NULL },
+    { "exec/reduce_i64_nulls", test_exec_reduce_i64_nulls, NULL, NULL },
+    { "exec/reduce_f64_nulls", test_exec_reduce_f64_nulls, NULL, NULL },
+    { "exec/reduce_empty", test_exec_reduce_empty, NULL, NULL },
+    { "exec/sort", test_exec_sort, NULL, NULL },
+    { "exec/head_tail", test_exec_head_tail, NULL, NULL },
+    { "exec/join", test_exec_join, NULL, NULL },
+    { "exec/join_large", test_exec_join_large, NULL, NULL },
+    { "exec/join_fallback", test_exec_join_fallback, NULL, NULL },
+    { "exec/join_empty", test_exec_join_empty, NULL, NULL },
+    { "exec/join_left_large", test_exec_join_left_large, NULL, NULL },
+    { "exec/join_full_large", test_exec_join_full_large, NULL, NULL },
+    { "exec/join_skewed", test_exec_join_skewed, NULL, NULL },
+    { "exec/join_boundary", test_exec_join_boundary, NULL, NULL },
+    { "exec/join_multikey", test_exec_join_multikey, NULL, NULL },
+    { "exec/window", test_exec_window, NULL, NULL },
+    { "exec/select", test_exec_select, NULL, NULL },
+    { "exec/stddev", test_exec_stddev, NULL, NULL },
+    { "exec/count_distinct", test_exec_count_distinct, NULL, NULL },
+    { "exec/asof_join", test_exec_asof_join, NULL, NULL },
+    { "exec/asof_left_join", test_exec_asof_left_join, NULL, NULL },
+    { "exec/asof_empty", test_exec_asof_empty, NULL, NULL },
+    { "exec/asof_null_keys", test_exec_asof_null_keys, NULL, NULL },
+    { "exec/asof_null_keys_match", test_exec_asof_null_keys_match, NULL, NULL },
+    { "exec/upper", test_exec_upper, NULL, NULL },
+    { "exec/lower", test_exec_lower, NULL, NULL },
+    { "exec/strlen", test_exec_strlen, NULL, NULL },
+    { "exec/trim", test_exec_trim, NULL, NULL },
+    { "exec/like", test_exec_like, NULL, NULL },
+    { "exec/concat", test_exec_concat, NULL, NULL },
+    { "exec/extract", test_exec_extract, NULL, NULL },
+    { "exec/date_trunc", test_exec_date_trunc, NULL, NULL },
+    { "exec/cast", test_exec_cast, NULL, NULL },
+    { "exec/graph_dump", test_graph_dump, NULL, NULL },
+    { "exec/str_eq", test_exec_str_eq, NULL, NULL },
+    { "exec/str_ne", test_exec_str_ne, NULL, NULL },
+    { "exec/str_lt", test_exec_str_lt, NULL, NULL },
+    { "exec/str_le", test_exec_str_le, NULL, NULL },
+    { "exec/str_gt", test_exec_str_gt, NULL, NULL },
+    { "exec/str_ge", test_exec_str_ge, NULL, NULL },
+    { "exec/str_strlen", test_exec_str_strlen, NULL, NULL },
+    { "exec/str_upper", test_exec_str_upper, NULL, NULL },
+    { "exec/str_lower", test_exec_str_lower, NULL, NULL },
+    { "exec/str_trim", test_exec_str_trim, NULL, NULL },
+    { "exec/str_substr", test_exec_str_substr, NULL, NULL },
+    { "exec/str_replace", test_exec_str_replace, NULL, NULL },
+    { "exec/str_concat", test_exec_str_concat, NULL, NULL },
+    { "exec/str_if", test_exec_str_if, NULL, NULL },
+    { "exec/str_if_scalar", test_exec_str_if_scalar, NULL, NULL },
+    { "exec/str_eq_len1_broadcast", test_exec_str_eq_len1_broadcast, NULL, NULL },
+    { "exec/str_eq_empty_vec_scalar", test_exec_str_eq_empty_vec_scalar, NULL, NULL },
+    { "exec/str_upper_null", test_exec_str_upper_null, NULL, NULL },
+    { "exec/str_strlen_null", test_exec_str_strlen_null, NULL, NULL },
+    { "exec/str_substr_null", test_exec_str_substr_null, NULL, NULL },
+    { "exec/str_replace_null", test_exec_str_replace_null, NULL, NULL },
+    { "exec/str_concat_null", test_exec_str_concat_null, NULL, NULL },
+    { "exec/lazy_wrap_materialize", test_lazy_wrap_materialize, NULL, NULL },
+    { "exec/lazy_chain", test_lazy_chain, NULL, NULL },
+    { "exec/lazy_materialize_passthrough", test_lazy_materialize_passthrough, NULL, NULL },
+    { "exec/lazy_release_no_materialize", test_lazy_release_no_materialize, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_exec_suite = {
-    "/exec", exec_tests, NULL, 1, 0
-};
+

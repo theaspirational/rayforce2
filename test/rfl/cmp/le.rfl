@@ -1,0 +1,14 @@
+;; Invariants for `<=`.
+
+;; reflexive: (<= a a) is true
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (<= A A))
+
+;; (<= a b) == (or (< a b) (== a b))
+(set B (- (rand 256 200000) 100000))
+(count A) -- (sum (== (<= A B) (or (< A B) (== A B))))
+
+;; antisymmetric when equal: (<= a b) and (<= b a) implies (== a b)
+(<= 1 2) -- true
+(<= 2 1) -- false
+(<= 3 3) -- true

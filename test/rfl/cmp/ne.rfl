@@ -1,0 +1,15 @@
+;; Invariants for `!=`.
+
+;; irreflexive: (!= a a) is false
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (not (!= A A)))
+
+;; dual of ==:  (!= a b) == (not (== a b))
+(set B (- (rand 256 200000) 100000))
+(count A) -- (sum (== (!= A B) (not (== A B))))
+
+;; symmetric
+(count A) -- (sum (== (!= A B) (!= B A)))
+
+(!= 1 2) -- true
+(!= 3 3) -- false

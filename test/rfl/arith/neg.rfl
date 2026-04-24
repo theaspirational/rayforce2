@@ -1,0 +1,17 @@
+;; Invariants for `neg` (unary negation).
+
+;; involution:  (neg (neg a)) == a
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (== (neg (neg A)) A))
+
+;; additive inverse:  (+ a (neg a)) == 0
+(count A) -- (sum (== (+ A (neg A)) 0))
+
+;; distributes over +:  (neg (+ a b)) == (+ (neg a) (neg b))
+(set B (- (rand 256 200000) 100000))
+(count A) -- (sum (== (neg (+ A B)) (+ (neg A) (neg B))))
+
+;; concrete
+(neg 5) -- -5
+(neg 0) -- 0
+(neg -3) -- 3

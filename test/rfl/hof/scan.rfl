@@ -1,0 +1,10 @@
+;; Invariants for `scan` (prefix fold: (scan f v)).
+
+(scan + [1 2 3 4]) -- [1 3 6 10]
+
+;; count preserved
+(set V (rand 50 100))
+(count V) -- (count (scan + V))
+
+;; last element equals fold
+(last (scan + V)) -- (fold + 0 V)

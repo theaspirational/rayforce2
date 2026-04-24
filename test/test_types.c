@@ -21,78 +21,67 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "core/types.h"
 #include "ops/ops.h"
 
 /* ---- test_type_sizes_known_types --------------------------------------- */
 
-static MunitResult test_type_sizes_known_types(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_type_sizes_known_types(void) {
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_BOOL], 1);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_U8], 1);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_I16], 2);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_I32], 4);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_I64], 8);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_F32], 4);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_F64], 8);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_DATE], 4);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_TIME], 4);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_TIMESTAMP], 8);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_GUID], 16);
 
-    munit_assert_uint(ray_type_sizes[RAY_BOOL], ==, 1);
-    munit_assert_uint(ray_type_sizes[RAY_U8],   ==, 1);
-    munit_assert_uint(ray_type_sizes[RAY_I16],  ==, 2);
-    munit_assert_uint(ray_type_sizes[RAY_I32],  ==, 4);
-    munit_assert_uint(ray_type_sizes[RAY_I64],  ==, 8);
-    munit_assert_uint(ray_type_sizes[RAY_F32],  ==, 4);
-    munit_assert_uint(ray_type_sizes[RAY_F64],  ==, 8);
-    munit_assert_uint(ray_type_sizes[RAY_DATE], ==, 4);
-    munit_assert_uint(ray_type_sizes[RAY_TIME], ==, 4);
-    munit_assert_uint(ray_type_sizes[RAY_TIMESTAMP], ==, 8);
-    munit_assert_uint(ray_type_sizes[RAY_GUID], ==, 16);
-
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- test_elem_size_macro ---------------------------------------------- */
 
-static MunitResult test_elem_size_macro(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_elem_size_macro(void) {
     /* ray_elem_size(t) should match ray_type_sizes[t] */
-    munit_assert_uint(ray_elem_size(RAY_I64), ==, 8);
-    munit_assert_uint(ray_elem_size(RAY_I32), ==, 4);
-    munit_assert_uint(ray_elem_size(RAY_BOOL), ==, 1);
-    munit_assert_uint(ray_elem_size(RAY_GUID), ==, 16);
+    TEST_ASSERT_EQ_U(ray_elem_size(RAY_I64), 8);
+    TEST_ASSERT_EQ_U(ray_elem_size(RAY_I32), 4);
+    TEST_ASSERT_EQ_U(ray_elem_size(RAY_BOOL), 1);
+    TEST_ASSERT_EQ_U(ray_elem_size(RAY_GUID), 16);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- test_type_sizes_pointer_types ------------------------------------- */
 
-static MunitResult test_type_sizes_pointer_types(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_type_sizes_pointer_types(void) {
     /* LIST is pointer-sized (8 bytes) */
-    munit_assert_uint(ray_type_sizes[RAY_LIST],  ==, 8);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_LIST], 8);
 
     /* SYM default width is 8 (W64) */
-    munit_assert_uint(ray_type_sizes[RAY_SYM],   ==, 8);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_SYM], 8);
 
     /* STR is 16 bytes (ray_str_t) */
-    munit_assert_uint(ray_type_sizes[RAY_STR],   ==, 16);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_STR], 16);
 
     /* SEL has no fixed element size */
-    munit_assert_uint(ray_type_sizes[RAY_SEL],   ==, 0);
+    TEST_ASSERT_EQ_U(ray_type_sizes[RAY_SEL], 0);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Suite definition -------------------------------------------------- */
 
-static MunitTest types_tests[] = {
-    { "/sizes_known_types",  test_type_sizes_known_types,  NULL, NULL, 0, NULL },
-    { "/elem_size_macro",    test_elem_size_macro,         NULL, NULL, 0, NULL },
-    { "/sizes_pointer_types", test_type_sizes_pointer_types, NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL },
+const test_entry_t types_entries[] = {
+    { "types/sizes_known_types", test_type_sizes_known_types, NULL, NULL },
+    { "types/elem_size_macro", test_elem_size_macro, NULL, NULL },
+    { "types/sizes_pointer_types", test_type_sizes_pointer_types, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_types_suite = {
-    "/types",
-    types_tests,
-    NULL,
-    0,
-    0,
-};
+

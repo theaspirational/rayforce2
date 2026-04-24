@@ -1,0 +1,20 @@
+;; Invariants for `abs` (absolute value).
+
+;; non-negative:  (>= (abs a) 0)
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (>= (abs A) 0))
+
+;; idempotent:  (abs (abs a)) == (abs a)
+(count A) -- (sum (== (abs (abs A)) (abs A)))
+
+;; |x| == |-x|
+(count A) -- (sum (== (abs A) (abs (neg A))))
+
+;; abs dominates:  (>= (abs a) a)  and  (>= (abs a) (neg a))
+(count A) -- (sum (>= (abs A) A))
+(count A) -- (sum (>= (abs A) (neg A)))
+
+;; concrete
+(abs -5) -- 5
+(abs 5) -- 5
+(abs 0) -- 0

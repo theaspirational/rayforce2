@@ -1,0 +1,13 @@
+;; Invariants for `>=`.
+
+;; reflexive
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (>= A A))
+
+;; dual of <=
+(set B (- (rand 256 200000) 100000))
+(count A) -- (sum (== (>= A B) (<= B A)))
+
+(>= 2 1) -- true
+(>= 1 2) -- false
+(>= 3 3) -- true

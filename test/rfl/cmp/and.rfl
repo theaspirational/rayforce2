@@ -1,0 +1,27 @@
+;; Invariants for `and`.
+
+;; identity: (and a true) == a  and  (and true a) == a
+(and true true) -- true
+(and true false) -- false
+(and false true) -- false
+(and false false) -- false
+
+;; absorbing: (and a false) == false
+(set B [true false true false])
+(count B) -- (sum (== (and B false) [false false false false]))
+
+;; commutative
+(set X [true true false false])
+(set Y [true false true false])
+(count X) -- (sum (== (and X Y) (and Y X)))
+
+;; ---- Regression tests ported from test_lang_rf.inc::test_rf_and ----
+;; Ported from test_lang_rf.inc::test_rf_and.
+
+(and true false) -- false
+(and false true) -- false
+(and false false) -- false
+(and true true) -- true
+(and [true false true] [false true false]) -- [false false false]
+(and [true false true] [false true false] [true false true]) -- [false false false]
+(and [true false true] true) -- [true false true]

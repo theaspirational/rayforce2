@@ -1,0 +1,9 @@
+;; Invariants for `date` — concrete literal + extractor roundtrip.
+
+(type 2024.06.15) -- 'date
+(type 1970.01.01) -- 'date
+
+;; extractors recover components
+(yyyy 2024.06.15) -- 2024
+(mm 2024.06.15) -- 6
+(dd 2024.06.15) -- 15

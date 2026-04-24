@@ -21,7 +21,8 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "table/sym.h"
@@ -57,7 +58,7 @@ extern ray_runtime_t *__RUNTIME;
         fprintf(stderr, "  %s:%d: eval error: %.*s\n -- expr: %s\n", \
                 __FILE__, __LINE__, _en, _ep, expr); \
         if (_es) ray_release(_es); \
-        return MUNIT_FAIL; \
+        FAIL("explicit MUNIT_FAIL"); \
     } \
     ray_t* _re = ray_eval_str(expected); \
     if (_re && RAY_IS_ERR(_re)) { \
@@ -68,7 +69,7 @@ extern ray_runtime_t *__RUNTIME;
                 __FILE__, __LINE__, _en, _ep, expected); \
         if (_es) ray_release(_es); \
         if (_le && !RAY_IS_ERR(_le)) ray_release(_le); \
-        return MUNIT_FAIL; \
+        FAIL("explicit MUNIT_FAIL"); \
     } \
     ray_t* _ls = _le ? ray_fmt(_le, 0) : NULL; \
     ray_t* _rs = _re ? ray_fmt(_re, 0) : NULL; \
@@ -83,7 +84,7 @@ extern ray_runtime_t *__RUNTIME;
         if (_re && !RAY_IS_ERR(_re)) ray_release(_re); \
         if (_ls) ray_release(_ls); \
         if (_rs) ray_release(_rs); \
-        return MUNIT_FAIL; \
+        FAIL("explicit MUNIT_FAIL"); \
     } \
     if (_le && !RAY_IS_ERR(_le)) ray_release(_le); \
     if (_re && !RAY_IS_ERR(_re)) ray_release(_re); \
@@ -102,20 +103,17 @@ extern ray_runtime_t *__RUNTIME;
                 _s ? ray_str_ptr(_s) : "", expr); \
         if (_s) ray_release(_s); \
         ray_release(_le); \
-        return MUNIT_FAIL; \
+        FAIL("explicit MUNIT_FAIL"); \
     } \
 } while(0)
 
 /* ---- Setup / Teardown ---- */
 
-static void* lang_setup(const void* params, void* user_data) {
-    (void)params; (void)user_data;
+static void lang_setup(void) {
     ray_runtime_create(0, NULL);
-    return NULL;
 }
 
-static void lang_teardown(void* fixture) {
-    (void)fixture;
+static void lang_teardown(void) {
     ray_runtime_destroy(__RUNTIME);
 }
 
@@ -125,886 +123,821 @@ static ray_t* dummy_binary(ray_t* x, ray_t* y) { (void)y; return ray_retain(x), 
 static ray_t* dummy_vary(ray_t** args, int64_t n) { (void)n; return ray_retain(args[0]), args[0]; }
 
 /* ---- Test: create unary function object ---- */
-static MunitResult test_fn_unary(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_fn_unary(void) {
     ray_t* fn = ray_fn_unary("neg", RAY_FN_ATOMIC, dummy_unary);
-    munit_assert_ptr_not_null(fn);
-    munit_assert_false(RAY_IS_ERR(fn));
-    munit_assert_int(fn->type, ==, RAY_UNARY);
-    munit_assert_uint(fn->attrs & RAY_FN_ATOMIC, !=, 0);
+    TEST_ASSERT_NOT_NULL(fn);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(fn));
+    TEST_ASSERT_EQ_I(fn->type, RAY_UNARY);
+    TEST_ASSERT((fn->attrs & RAY_FN_ATOMIC) != (0), "fn->attrs & RAY_FN_ATOMIC != 0");
     ray_release(fn);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: create binary function object ---- */
-static MunitResult test_fn_binary(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_fn_binary(void) {
     ray_t* fn = ray_fn_binary("+", RAY_FN_ATOMIC, dummy_binary);
-    munit_assert_ptr_not_null(fn);
-    munit_assert_int(fn->type, ==, RAY_BINARY);
+    TEST_ASSERT_NOT_NULL(fn);
+    TEST_ASSERT_EQ_I(fn->type, RAY_BINARY);
     ray_release(fn);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: create vary function object ---- */
-static MunitResult test_fn_vary(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_fn_vary(void) {
     ray_t* fn = ray_fn_vary("list", RAY_FN_NONE, dummy_vary);
-    munit_assert_ptr_not_null(fn);
-    munit_assert_int(fn->type, ==, RAY_VARY);
+    TEST_ASSERT_NOT_NULL(fn);
+    TEST_ASSERT_EQ_I(fn->type, RAY_VARY);
     ray_release(fn);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lex integer ---- */
-static MunitResult test_lex_i64(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_lex_i64(void) {
     ray_t* result = ray_parse("42");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 42);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 42);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lex negative integer ---- */
-static MunitResult test_lex_neg_i64(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_lex_neg_i64(void) {
     ray_t* result = ray_parse("-7");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, -7);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, -7);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lex float ---- */
-static MunitResult test_lex_f64(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_lex_f64(void) {
     ray_t* result = ray_parse("3.14");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, -RAY_F64);
-    munit_assert_double(result->f64, ==, 3.14);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, -RAY_F64);
+    TEST_ASSERT((result->f64) == (3.14), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lex string ---- */
-static MunitResult test_lex_string(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_lex_string(void) {
     ray_t* result = ray_parse("\"hello\"");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, -RAY_STR);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, -RAY_STR);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lex symbol ---- */
-static MunitResult test_lex_symbol(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_lex_symbol(void) {
     ray_t* result = ray_parse("'AAPL");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, -RAY_SYM);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, -RAY_SYM);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lex true/false ---- */
-static MunitResult test_lex_bool(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_lex_bool(void) {
     ray_t* t = ray_parse("true");
-    munit_assert_ptr_not_null(t);
-    munit_assert_int(t->type, ==, -RAY_BOOL);
-    munit_assert_uint(t->b8, ==, 1);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQ_I(t->type, -RAY_BOOL);
+    TEST_ASSERT_EQ_U(t->b8, 1);
     ray_release(t);
 
     ray_t* f = ray_parse("false");
-    munit_assert_int(f->type, ==, -RAY_BOOL);
-    munit_assert_uint(f->b8, ==, 0);
+    TEST_ASSERT_EQ_I(f->type, -RAY_BOOL);
+    TEST_ASSERT_EQ_U(f->b8, 0);
     ray_release(f);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: parse s-expression ---- */
-static MunitResult test_parse_sexpr(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_parse_sexpr(void) {
     ray_t* result = ray_parse("(+ 1 2)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* Should be a list of 3 elements: [name:"+", 1, 2] */
-    munit_assert_int(result->type, ==, RAY_LIST);
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_EQ_I(result->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: parse nested s-expressions ---- */
-static MunitResult test_parse_nested(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_parse_nested(void) {
     ray_t* result = ray_parse("(+ (* 2 3) 4)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, RAY_LIST);
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     /* Second element should be a list (the nested (* 2 3)) */
     ray_t** elems = (ray_t**)ray_data(result);
-    munit_assert_int(elems[1]->type, ==, RAY_LIST);
-    munit_assert_int(ray_len(elems[1]), ==, 3);
+    TEST_ASSERT_EQ_I(elems[1]->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(ray_len(elems[1]), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: parse vector literal ---- */
-static MunitResult test_parse_vector(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_parse_vector(void) {
     ray_t* result = ray_parse("[1 2 3]");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* Should be a list of 3 i64 elements */
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: parse empty list ---- */
-static MunitResult test_parse_empty_list(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_parse_empty_list(void) {
     ray_t* result = ray_parse("()");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, RAY_LIST);
-    munit_assert_int(ray_len(result), ==, 0);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(ray_len(result), 0);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval literal passthrough ---- */
-static MunitResult test_eval_literal(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_literal(void) {
     ray_t* result = ray_eval_str("42");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 42);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 42);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval addition ---- */
-static MunitResult test_eval_add(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_add(void) {
     ray_t* result = ray_eval_str("(+ 1 2)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval nested arithmetic ---- */
-static MunitResult test_eval_nested_arith(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_nested_arith(void) {
     ray_t* result = ray_eval_str("(+ (* 2 3) 4)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 10);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 10);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval subtraction ---- */
-static MunitResult test_eval_sub(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_sub(void) {
     ray_t* result = ray_eval_str("(- 10 3)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->i64, ==, 7);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->i64, 7);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval division ---- */
-static MunitResult test_eval_div(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_div(void) {
     ray_t* result = ray_eval_str("(/ 10 3)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval comparison ---- */
-static MunitResult test_eval_cmp(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_cmp(void) {
     ray_t* result = ray_eval_str("(> 5 3)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_int(result->type, ==, -RAY_BOOL);
-    munit_assert_uint(result->b8, ==, 1);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQ_I(result->type, -RAY_BOOL);
+    TEST_ASSERT_EQ_U(result->b8, 1);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval set ---- */
-static MunitResult test_eval_set(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_set(void) {
     ray_t* result = ray_eval_str("(do (set x 10) x)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 10);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 10);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval if true ---- */
-static MunitResult test_eval_if_true(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_if_true(void) {
     ray_t* result = ray_eval_str("(if true 1 2)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 1);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 1);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval if false ---- */
-static MunitResult test_eval_if_false(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_if_false(void) {
     ray_t* result = ray_eval_str("(if false 1 2)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 2);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval let ---- */
-static MunitResult test_eval_let(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_let(void) {
     ray_t* result = ray_eval_str("(do (let x 5) (+ x 3))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 8);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 8);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval lambda ---- */
-static MunitResult test_eval_lambda(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_lambda(void) {
     ray_t* result = ray_eval_str("(do (set double (fn [x] (* x 2))) (double 5))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 10);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 10);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval lambda with multiple params ---- */
-static MunitResult test_eval_lambda_multi(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_lambda_multi(void) {
     ray_t* result = ray_eval_str("(do (set add3 (fn [a b c] (+ a (+ b c)))) (add3 1 2 3))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 6);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 6);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval lambda with let in body ---- */
-static MunitResult test_eval_lambda_let(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_lambda_let(void) {
     ray_t* result = ray_eval_str("(do (set f (fn [a b] (let c (+ a b)) (+ c 1))) (f 3 4))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 8);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 8);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: compile basic lambda ---- */
-static MunitResult test_compile_basic(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_compile_basic(void) {
     ray_t* result = ray_eval_str("(do (set f (fn [x] (+ x 1))) (f 10))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 11);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 11);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: compile closure ---- */
-static MunitResult test_compile_closure(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_compile_closure(void) {
     /* Verify compiled lambda with multiple body exprs and let binding */
     ray_t* result = ray_eval_str("(do (set f (fn [a b] (let c (+ a b)) (* c 2))) (f 3 4))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 14);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 14);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: VM recursive fibonacci ---- */
-static MunitResult test_vm_fib(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_vm_fib(void) {
     ray_t* result = ray_eval_str(
         "(do (set fib (fn [n] (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2)))))) (fib 10))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 55);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 55);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: VM tail-recursive loop ---- */
-static MunitResult test_vm_loop(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_vm_loop(void) {
     ray_t* result = ray_eval_str(
         "(do (set sum-to (fn [n acc] (if (== n 0) acc (sum-to (- n 1) (+ acc n))))) (sum-to 100 0))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 5050);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 5050);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: try catches division by zero ---- */
-static MunitResult test_eval_try(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_try(void) {
     ray_t* result = ray_eval_str("(try (/ 10 0) (fn [e] 0))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_true(result->i64 == 0 || result->i64 == INT64_MIN);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_TRUE(result->i64 == 0 || result->i64 == INT64_MIN);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: try catches explicit raise ---- */
-static MunitResult test_eval_raise(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_raise(void) {
     ray_t* result = ray_eval_str("(try (raise \"boom\") (fn [e] 42))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 42);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 42);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: vector + scalar auto-mapping ---- */
-static MunitResult test_eval_vector_add(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_vector_add(void) {
     ray_t* result = ray_eval_str("(+ [1 2 3] 10)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_I64);
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_I64);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     int64_t* elems = (int64_t*)ray_data(result);
-    munit_assert_int(elems[0], ==, 11);
-    munit_assert_int(elems[1], ==, 12);
-    munit_assert_int(elems[2], ==, 13);
+    TEST_ASSERT_EQ_I(elems[0], 11);
+    TEST_ASSERT_EQ_I(elems[1], 12);
+    TEST_ASSERT_EQ_I(elems[2], 13);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: vector + vector auto-mapping ---- */
-static MunitResult test_eval_vector_add_vec(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_vector_add_vec(void) {
     ray_t* result = ray_eval_str("(+ [1 2 3] [4 5 6])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_I64);
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_I64);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     int64_t* elems = (int64_t*)ray_data(result);
-    munit_assert_int(elems[0], ==, 5);
-    munit_assert_int(elems[1], ==, 7);
-    munit_assert_int(elems[2], ==, 9);
+    TEST_ASSERT_EQ_I(elems[0], 5);
+    TEST_ASSERT_EQ_I(elems[1], 7);
+    TEST_ASSERT_EQ_I(elems[2], 9);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: sum aggregation ---- */
-static MunitResult test_eval_sum(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_sum(void) {
     ray_t* result = ray_eval_str("(sum [1 2 3 4 5])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 15);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 15);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: count ---- */
-static MunitResult test_eval_count(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_count(void) {
     ray_t* result = ray_eval_str("(count [1 2 3])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: avg ---- */
-static MunitResult test_eval_avg(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_avg(void) {
     ray_t* result = ray_eval_str("(avg [2 4 6])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_F64);
-    munit_assert_double(result->f64, ==, 4.0);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_F64);
+    TEST_ASSERT((result->f64) == (4.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: min/max ---- */
-static MunitResult test_eval_min_max(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_min_max(void) {
     ray_t* mn = ray_eval_str("(min [5 2 8])");
-    munit_assert_ptr_not_null(mn);
-    munit_assert_false(RAY_IS_ERR(mn));
-    munit_assert_int(mn->type, ==, -RAY_I64);
-    munit_assert_int(mn->i64, ==, 2);
+    TEST_ASSERT_NOT_NULL(mn);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(mn));
+    TEST_ASSERT_EQ_I(mn->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(mn->i64, 2);
     ray_release(mn);
 
     ray_t* mx = ray_eval_str("(max [5 2 8])");
-    munit_assert_ptr_not_null(mx);
-    munit_assert_false(RAY_IS_ERR(mx));
-    munit_assert_int(mx->type, ==, -RAY_I64);
-    munit_assert_int(mx->i64, ==, 8);
+    TEST_ASSERT_NOT_NULL(mx);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(mx));
+    TEST_ASSERT_EQ_I(mx->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(mx->i64, 8);
     ray_release(mx);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: first/last ---- */
-static MunitResult test_eval_first_last(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_first_last(void) {
     ray_t* f = ray_eval_str("(first [1 2 3])");
-    munit_assert_ptr_not_null(f);
-    munit_assert_false(RAY_IS_ERR(f));
-    munit_assert_int(f->type, ==, -RAY_I64);
-    munit_assert_int(f->i64, ==, 1);
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(f));
+    TEST_ASSERT_EQ_I(f->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(f->i64, 1);
     ray_release(f);
 
     ray_t* l = ray_eval_str("(last [1 2 3])");
-    munit_assert_ptr_not_null(l);
-    munit_assert_false(RAY_IS_ERR(l));
-    munit_assert_int(l->type, ==, -RAY_I64);
-    munit_assert_int(l->i64, ==, 3);
+    TEST_ASSERT_NOT_NULL(l);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(l));
+    TEST_ASSERT_EQ_I(l->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(l->i64, 3);
     ray_release(l);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: map with binary fn and value ---- */
-static MunitResult test_eval_map(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_map(void) {
     ray_t* result = ray_eval_str("(map + 1 [1 2 3])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_LIST);
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     ray_t** elems = (ray_t**)ray_data(result);
-    munit_assert_int(elems[0]->i64, ==, 2);
-    munit_assert_int(elems[1]->i64, ==, 3);
-    munit_assert_int(elems[2]->i64, ==, 4);
+    TEST_ASSERT_EQ_I(elems[0]->i64, 2);
+    TEST_ASSERT_EQ_I(elems[1]->i64, 3);
+    TEST_ASSERT_EQ_I(elems[2]->i64, 4);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: pmap with binary fn and value ---- */
-static MunitResult test_eval_pmap(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_pmap(void) {
     ray_t* result = ray_eval_str("(pmap * 2 [1 2 3])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_LIST);
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     ray_t** elems = (ray_t**)ray_data(result);
-    munit_assert_int(elems[0]->i64, ==, 2);
-    munit_assert_int(elems[1]->i64, ==, 4);
-    munit_assert_int(elems[2]->i64, ==, 6);
+    TEST_ASSERT_EQ_I(elems[0]->i64, 2);
+    TEST_ASSERT_EQ_I(elems[1]->i64, 4);
+    TEST_ASSERT_EQ_I(elems[2]->i64, 6);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: fold (reduce) ---- */
-static MunitResult test_eval_fold(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_fold(void) {
     ray_t* result = ray_eval_str("(fold + [1 2 3 4 5])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 15);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 15);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: scan (running fold) ---- */
-static MunitResult test_eval_scan(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_scan(void) {
     ray_t* result = ray_eval_str("(scan + [1 2 3 4 5])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_LIST);
-    munit_assert_int(ray_len(result), ==, 5);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(ray_len(result), 5);
     ray_t** elems = (ray_t**)ray_data(result);
-    munit_assert_int(elems[0]->i64, ==, 1);
-    munit_assert_int(elems[1]->i64, ==, 3);
-    munit_assert_int(elems[2]->i64, ==, 6);
-    munit_assert_int(elems[3]->i64, ==, 10);
-    munit_assert_int(elems[4]->i64, ==, 15);
+    TEST_ASSERT_EQ_I(elems[0]->i64, 1);
+    TEST_ASSERT_EQ_I(elems[1]->i64, 3);
+    TEST_ASSERT_EQ_I(elems[2]->i64, 6);
+    TEST_ASSERT_EQ_I(elems[3]->i64, 10);
+    TEST_ASSERT_EQ_I(elems[4]->i64, 15);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: filter by boolean mask ---- */
-static MunitResult test_eval_filter(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_filter(void) {
     ray_t* result = ray_eval_str("(filter [1 2 3 4 5] [true false true false true])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     if (result->type == RAY_I64) {
         int64_t* d = (int64_t*)ray_data(result);
-        munit_assert_int(d[0], ==, 1);
-        munit_assert_int(d[1], ==, 3);
-        munit_assert_int(d[2], ==, 5);
+        TEST_ASSERT_EQ_I(d[0], 1);
+        TEST_ASSERT_EQ_I(d[1], 3);
+        TEST_ASSERT_EQ_I(d[2], 5);
     } else {
         ray_t** elems = (ray_t**)ray_data(result);
-        munit_assert_int(elems[0]->i64, ==, 1);
-        munit_assert_int(elems[1]->i64, ==, 3);
-        munit_assert_int(elems[2]->i64, ==, 5);
+        TEST_ASSERT_EQ_I(elems[0]->i64, 1);
+        TEST_ASSERT_EQ_I(elems[1]->i64, 3);
+        TEST_ASSERT_EQ_I(elems[2]->i64, 5);
     }
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: apply (zip-apply) ---- */
-static MunitResult test_eval_apply(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_apply(void) {
     ray_t* result = ray_eval_str("(apply + [1 2] [3 4])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_LIST);
-    munit_assert_int(ray_len(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(ray_len(result), 2);
     ray_t** elems = (ray_t**)ray_data(result);
-    munit_assert_int(elems[0]->i64, ==, 4);
-    munit_assert_int(elems[1]->i64, ==, 6);
+    TEST_ASSERT_EQ_I(elems[0]->i64, 4);
+    TEST_ASSERT_EQ_I(elems[1]->i64, 6);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: distinct ---- */
-static MunitResult test_eval_distinct(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_distinct(void) {
     ray_t* result = ray_eval_str("(distinct [1 1 2 2 3])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_true(result->type == RAY_LIST || ray_is_vec(result));
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(result->type == RAY_LIST || ray_is_vec(result));
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     if (result->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(result);
-        munit_assert_int(elems[0]->i64, ==, 1);
-        munit_assert_int(elems[1]->i64, ==, 2);
-        munit_assert_int(elems[2]->i64, ==, 3);
+        TEST_ASSERT_EQ_I(elems[0]->i64, 1);
+        TEST_ASSERT_EQ_I(elems[1]->i64, 2);
+        TEST_ASSERT_EQ_I(elems[2]->i64, 3);
     } else {
         int64_t* vals = (int64_t*)ray_data(result);
-        munit_assert_int(vals[0], ==, 1);
-        munit_assert_int(vals[1], ==, 2);
-        munit_assert_int(vals[2], ==, 3);
+        TEST_ASSERT_EQ_I(vals[0], 1);
+        TEST_ASSERT_EQ_I(vals[1], 2);
+        TEST_ASSERT_EQ_I(vals[2], 3);
     }
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: in ---- */
-static MunitResult test_eval_in(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_in(void) {
     ray_t* result = ray_eval_str("(in 2 [1 2 3])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_BOOL);
-    munit_assert_uint(result->b8, ==, 1);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_BOOL);
+    TEST_ASSERT_EQ_U(result->b8, 1);
     ray_release(result);
 
     ray_t* result2 = ray_eval_str("(in 9 [1 2 3])");
-    munit_assert_ptr_not_null(result2);
-    munit_assert_false(RAY_IS_ERR(result2));
-    munit_assert_int(result2->type, ==, -RAY_BOOL);
-    munit_assert_uint(result2->b8, ==, 0);
+    TEST_ASSERT_NOT_NULL(result2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result2));
+    TEST_ASSERT_EQ_I(result2->type, -RAY_BOOL);
+    TEST_ASSERT_EQ_U(result2->b8, 0);
     ray_release(result2);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: except ---- */
-static MunitResult test_eval_except(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_except(void) {
     ray_t* result = ray_eval_str("(except [1 2 3] [2])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_true(result->type == RAY_LIST || ray_is_vec(result));
-    munit_assert_int(ray_len(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(result->type == RAY_LIST || ray_is_vec(result));
+    TEST_ASSERT_EQ_I(ray_len(result), 2);
     if (result->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(result);
-        munit_assert_int(elems[0]->i64, ==, 1);
-        munit_assert_int(elems[1]->i64, ==, 3);
+        TEST_ASSERT_EQ_I(elems[0]->i64, 1);
+        TEST_ASSERT_EQ_I(elems[1]->i64, 3);
     } else {
         int64_t* vals = (int64_t*)ray_data(result);
-        munit_assert_int(vals[0], ==, 1);
-        munit_assert_int(vals[1], ==, 3);
+        TEST_ASSERT_EQ_I(vals[0], 1);
+        TEST_ASSERT_EQ_I(vals[1], 3);
     }
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: union ---- */
-static MunitResult test_eval_union(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_union(void) {
     ray_t* result = ray_eval_str("(union [1 2] [2 3])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_true(result->type == RAY_LIST || ray_is_vec(result));
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(result->type == RAY_LIST || ray_is_vec(result));
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     if (result->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(result);
-        munit_assert_int(elems[0]->i64, ==, 1);
-        munit_assert_int(elems[1]->i64, ==, 2);
-        munit_assert_int(elems[2]->i64, ==, 3);
+        TEST_ASSERT_EQ_I(elems[0]->i64, 1);
+        TEST_ASSERT_EQ_I(elems[1]->i64, 2);
+        TEST_ASSERT_EQ_I(elems[2]->i64, 3);
     } else {
         int64_t* vals = (int64_t*)ray_data(result);
-        munit_assert_int(vals[0], ==, 1);
-        munit_assert_int(vals[1], ==, 2);
-        munit_assert_int(vals[2], ==, 3);
+        TEST_ASSERT_EQ_I(vals[0], 1);
+        TEST_ASSERT_EQ_I(vals[1], 2);
+        TEST_ASSERT_EQ_I(vals[2], 3);
     }
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: sect (intersection) ---- */
-static MunitResult test_eval_sect(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_sect(void) {
     ray_t* result = ray_eval_str("(sect [1 2 3] [2 3 4])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_true(result->type == RAY_LIST || ray_is_vec(result));
-    munit_assert_int(ray_len(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(result->type == RAY_LIST || ray_is_vec(result));
+    TEST_ASSERT_EQ_I(ray_len(result), 2);
     if (result->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(result);
-        munit_assert_int(elems[0]->i64, ==, 2);
-        munit_assert_int(elems[1]->i64, ==, 3);
+        TEST_ASSERT_EQ_I(elems[0]->i64, 2);
+        TEST_ASSERT_EQ_I(elems[1]->i64, 3);
     } else {
         int64_t* vals = (int64_t*)ray_data(result);
-        munit_assert_int(vals[0], ==, 2);
-        munit_assert_int(vals[1], ==, 3);
+        TEST_ASSERT_EQ_I(vals[0], 2);
+        TEST_ASSERT_EQ_I(vals[1], 3);
     }
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: take positive ---- */
-static MunitResult test_eval_take(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_take(void) {
     ray_t* result = ray_eval_str("(take [1 2 3 4 5] 3)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_true(result->type == RAY_LIST || ray_is_vec(result));
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(result->type == RAY_LIST || ray_is_vec(result));
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     if (result->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(result);
-        munit_assert_int(elems[0]->i64, ==, 1);
-        munit_assert_int(elems[1]->i64, ==, 2);
-        munit_assert_int(elems[2]->i64, ==, 3);
+        TEST_ASSERT_EQ_I(elems[0]->i64, 1);
+        TEST_ASSERT_EQ_I(elems[1]->i64, 2);
+        TEST_ASSERT_EQ_I(elems[2]->i64, 3);
     } else {
         int64_t* vals = (int64_t*)ray_data(result);
-        munit_assert_int(vals[0], ==, 1);
-        munit_assert_int(vals[1], ==, 2);
-        munit_assert_int(vals[2], ==, 3);
+        TEST_ASSERT_EQ_I(vals[0], 1);
+        TEST_ASSERT_EQ_I(vals[1], 2);
+        TEST_ASSERT_EQ_I(vals[2], 3);
     }
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: take negative (from end) ---- */
-static MunitResult test_eval_take_neg(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_take_neg(void) {
     ray_t* result = ray_eval_str("(take [1 2 3 4 5] -3)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_true(result->type == RAY_LIST || ray_is_vec(result));
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_TRUE(result->type == RAY_LIST || ray_is_vec(result));
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     if (result->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(result);
-        munit_assert_int(elems[0]->i64, ==, 3);
-        munit_assert_int(elems[1]->i64, ==, 4);
-        munit_assert_int(elems[2]->i64, ==, 5);
+        TEST_ASSERT_EQ_I(elems[0]->i64, 3);
+        TEST_ASSERT_EQ_I(elems[1]->i64, 4);
+        TEST_ASSERT_EQ_I(elems[2]->i64, 5);
     } else {
         int64_t* vals = (int64_t*)ray_data(result);
-        munit_assert_int(vals[0], ==, 3);
-        munit_assert_int(vals[1], ==, 4);
-        munit_assert_int(vals[2], ==, 5);
+        TEST_ASSERT_EQ_I(vals[0], 3);
+        TEST_ASSERT_EQ_I(vals[1], 4);
+        TEST_ASSERT_EQ_I(vals[2], 5);
     }
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: at (index into vector) ---- */
-static MunitResult test_eval_at(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_at(void) {
     ray_t* result = ray_eval_str("(at [10 20 30] 1)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 20);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 20);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: find ---- */
-static MunitResult test_eval_find(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_find(void) {
     ray_t* result = ray_eval_str("(find [1 2 3] 2)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 1);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 1);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: reverse ---- */
-static MunitResult test_eval_reverse(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_reverse(void) {
     ray_t* result = ray_eval_str("(reverse [1 2 3])");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_I64);
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_I64);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     int64_t* data = (int64_t*)ray_data(result);
-    munit_assert_int(data[0], ==, 3);
-    munit_assert_int(data[1], ==, 2);
-    munit_assert_int(data[2], ==, 1);
+    TEST_ASSERT_EQ_I(data[0], 3);
+    TEST_ASSERT_EQ_I(data[1], 2);
+    TEST_ASSERT_EQ_I(data[2], 1);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: table construction ---- */
-static MunitResult test_eval_table(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_table(void) {
     ray_t* result = ray_eval_str("(table ['a 'b] (list [1 2 3] [10 20 30]))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_ncols(result), ==, 2);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: at table (column access) ---- */
-static MunitResult test_eval_at_table(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_at_table(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [1 2 3] [10 20 30]))) (at t 'a))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_I64);
-    munit_assert_int(ray_len(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_I64);
+    TEST_ASSERT_EQ_I(ray_len(result), 3);
     int64_t* data = (int64_t*)ray_data(result);
-    munit_assert_int(data[0], ==, 1);
-    munit_assert_int(data[1], ==, 2);
-    munit_assert_int(data[2], ==, 3);
+    TEST_ASSERT_EQ_I(data[0], 1);
+    TEST_ASSERT_EQ_I(data[1], 2);
+    TEST_ASSERT_EQ_I(data[2], 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: key table (column names) ---- */
-static MunitResult test_eval_key_table(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_key_table(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [1 2 3] [10 20 30]))) (key t))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_SYM);
-    munit_assert_int(ray_len(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_SYM);
+    TEST_ASSERT_EQ_I(ray_len(result), 2);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: count table (row count) ---- */
-static MunitResult test_eval_count_table(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_count_table(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [1 2 3] [10 20 30]))) (count t))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select all ---- */
-static MunitResult test_eval_select_all(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_all(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['name 'salary] (list [1 2 3] [50000 60000 70000]))) "
         "(select {from: t}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
-    munit_assert_int(ray_table_ncols(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 2);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select where ---- */
-static MunitResult test_eval_select_where(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_where(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['name 'salary] (list [1 2 3] [50000 60000 70000]))) "
         "(select {from: t where: (> salary 55000)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: WHERE with `in` and a literal sym vector ----
  * New in compile_expr_dag completeness pass. */
-static MunitResult test_eval_select_where_in_sym(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_where_in_sym(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B C A B C] [10 20 30 40 50 60]))) "
         "(select {from: t where: (in s [A C])}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* Should filter to A, C, A, C — 4 rows */
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: OP_IN type-mismatch must not leak via atom probe ----
@@ -1017,70 +950,66 @@ static MunitResult test_eval_select_where_in_sym(const void* params, void* fixtu
  * is empty, no false match. */
 
 /* ---- Test: lambda inlining in non-agg column expression ---- */
-static MunitResult test_eval_select_lambda_nonagg(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_lambda_nonagg(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p 'q] "
         "(list [A B A B] [10.0 20.0 30.0 40.0] [1 2 3 4]))) "
         "(select {from: t by: s m: ((fn [x y] (+ x y)) p q)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
-    munit_assert_int(m_col->type, ==, RAY_LIST);
+    TEST_ASSERT_NOT_NULL(m_col);
+    TEST_ASSERT_EQ_I(m_col->type, RAY_LIST);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lambda in WHERE predicate compiles (was: error domain) ---- */
-static MunitResult test_eval_select_lambda_where(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_lambda_where(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [10 20 30 40 50]))) "
         "(select {from: t where: ((fn [x] (> x 25)) p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* rows where p > 25: 30, 40, 50 — 3 rows */
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lambda as an aggregation argument ---- */
-static MunitResult test_eval_select_lambda_agg(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_lambda_agg(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B] [10.0 20.0 30.0 40.0]))) "
         "(select {from: t by: s tot: (sum ((fn [x] (* x 2.0)) p))}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t tot_id = ray_sym_intern("tot", 3);
     ray_t* tot_col = ray_table_get_col(result, tot_id);
-    munit_assert_ptr_not_null(tot_col);
+    TEST_ASSERT_NOT_NULL(tot_col);
     /* A: 2*(10+30) = 80; B: 2*(20+40) = 120 */
     double* td = (double*)ray_data(tot_col);
-    munit_assert_double(td[0], ==, 80.0);
-    munit_assert_double(td[1], ==, 120.0);
+    TEST_ASSERT((td[0]) == (80.0), "double == failed");
+    TEST_ASSERT((td[1]) == (120.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: `(let var val body)` binding in WHERE ---- */
-static MunitResult test_eval_select_let_binding(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_let_binding(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [10 20 30 40 50]))) "
         "(select {from: t where: (let threshold 25 (> p threshold))}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: nested lambda shadowing — inner `x` shadows outer ----
@@ -1088,22 +1017,21 @@ static MunitResult test_eval_select_let_binding(const void* params, void* fixtur
  * Expands to: (* (+ p 1) 10) — so each row becomes (p+1)*10.
  * The outer `x` is `p`; the inner `x` is `(+ x 1)` = `(+ p 1)`.
  * Verify p=3 gives 40, p=5 gives 60. */
-static MunitResult test_eval_select_lambda_nested_shadow(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_lambda_nested_shadow(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [3 5]))) "
         "(select {from: t m: ((fn [x] ((fn [x] (* x 10)) (+ x 1))) p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
+    TEST_ASSERT_NOT_NULL(m_col);
     int64_t* md = (int64_t*)ray_data(m_col);
-    munit_assert_int(md[0], ==, 40);
-    munit_assert_int(md[1], ==, 60);
+    TEST_ASSERT_EQ_I(md[0], 40);
+    TEST_ASSERT_EQ_I(md[1], 60);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: lambda arg reuse — actual compiled once, referenced twice ----
@@ -1111,34 +1039,32 @@ static MunitResult test_eval_select_lambda_nested_shadow(const void* params, voi
  * would recompute `(* p 2)` twice, but DAG-node sharing computes it
  * once and both inputs of `+` point at the same node.  Functionally:
  * each row becomes 4*p. */
-static MunitResult test_eval_select_lambda_arg_reuse(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_lambda_arg_reuse(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [10 20 30]))) "
         "(select {from: t m: ((fn [x] (+ x x)) (* p 2))}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
+    TEST_ASSERT_NOT_NULL(m_col);
     int64_t* md = (int64_t*)ray_data(m_col);
-    munit_assert_int(md[0], ==, 40);
-    munit_assert_int(md[1], ==, 80);
-    munit_assert_int(md[2], ==, 120);
+    TEST_ASSERT_EQ_I(md[0], 40);
+    TEST_ASSERT_EQ_I(md[1], 80);
+    TEST_ASSERT_EQ_I(md[2], 120);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: arity mismatch returns an error ---- */
-static MunitResult test_eval_select_lambda_arity_err(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_lambda_arity_err(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [1 2 3]))) "
         "(select {from: t where: ((fn [x y] (> x y)) p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_true(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_TRUE(RAY_IS_ERR(result));
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: `== 0N` / `!= 0N` null-check idiom ----
@@ -1150,79 +1076,75 @@ static MunitResult test_eval_select_lambda_arity_err(const void* params, void* f
  * apply null semantics, so `(== k 0N)` missed null rows and
  * `(!= k 0N)` leaked them through.  Now typed null atoms fall
  * through to `ray_const_atom` which preserves the null flag. */
-static MunitResult test_eval_select_where_eq_null_literal(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_where_eq_null_literal(void) {
     /* (== k 0Nl) should match the two null rows. */
     ray_t* r1 = ray_eval_str(
         "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
         "(select {from: t where: (== k 0Nl)}))");
-    munit_assert_ptr_not_null(r1);
-    munit_assert_false(RAY_IS_ERR(r1));
-    munit_assert_int(ray_table_nrows(r1), ==, 2);
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r1), 2);
     ray_release(r1);
     /* (!= k 0Nl) should return the 3 non-null rows. */
     ray_t* r2 = ray_eval_str(
         "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
         "(select {from: t where: (!= k 0Nl)}))");
-    munit_assert_ptr_not_null(r2);
-    munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(ray_table_nrows(r2), ==, 3);
+    TEST_ASSERT_NOT_NULL(r2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r2), 3);
     ray_release(r2);
     /* Bare `0N` (no suffix) must parse as i64 null — same match as 0Nl. */
     ray_t* r3 = ray_eval_str(
         "(do (set t (table ['k] (list [1 0N 3 0N 5]))) "
         "(select {from: t where: (== k 0N)}))");
-    munit_assert_ptr_not_null(r3);
-    munit_assert_false(RAY_IS_ERR(r3));
-    munit_assert_int(ray_table_nrows(r3), ==, 2);
+    TEST_ASSERT_NOT_NULL(r3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r3));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r3), 2);
     ray_release(r3);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Named-lambda call inside a SELECT — resolves through the global
  * env at compile time and inlines the body into the DAG, same as
  * the literal `((fn ...) ...)` case. */
-static MunitResult test_eval_select_named_lambda(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_named_lambda(void) {
     ray_t* r = ray_eval_str(
         "(do (set t (table [p] (list [10 20 30]))) "
         "    (set add1 (fn [x] (+ x 1))) "
         "    (select {from: t m: (add1 p)}))");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
-    munit_assert_int(ray_table_nrows(r), ==, 3);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r), 3);
     ray_t* m = ray_table_get_col(r, ray_sym_intern("m", 1));
-    munit_assert_ptr_not_null(m);
-    munit_assert_int(m->type, ==, RAY_I64);
+    TEST_ASSERT_NOT_NULL(m);
+    TEST_ASSERT_EQ_I(m->type, RAY_I64);
     int64_t* md = (int64_t*)ray_data(m);
-    munit_assert_int(md[0], ==, 11);
-    munit_assert_int(md[1], ==, 21);
-    munit_assert_int(md[2], ==, 31);
+    TEST_ASSERT_EQ_I(md[0], 11);
+    TEST_ASSERT_EQ_I(md[1], 21);
+    TEST_ASSERT_EQ_I(md[2], 31);
     ray_release(r);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Global scalar binding used inside a WHERE clause — the
  * compile-time name resolver folds `threshold` to a const node. */
-static MunitResult test_eval_select_global_scalar(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_global_scalar(void) {
     ray_t* r = ray_eval_str(
         "(do (set t (table [p] (list [10 20 30 40 50]))) "
         "    (set threshold 25) "
         "    (select {from: t where: (> p threshold)}))");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
-    munit_assert_int(ray_table_nrows(r), ==, 3);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r), 3);
     ray_release(r);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Multi-index pivot with mixed-type composite key: (sym, i64) index,
  * sym pivot col, i64 value col.  Regression against an older bug where
  * composite-key grouping dropped or duplicated rows.  Verify each
  * cell is the correct sum for its (a, b, c) combination. */
-static MunitResult test_eval_pivot_multi_index(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_pivot_multi_index(void) {
     ray_t* r = ray_eval_str(
         "(do (set t (table [a b c v] (list "
         "  ['A 'A 'B 'B 'A 'B] "
@@ -1230,22 +1152,22 @@ static MunitResult test_eval_pivot_multi_index(const void* params, void* fixture
         "  ['x 'y 'x 'y 'x 'y] "
         "  [100 200 300 400 500 600]))) "
         "(pivot t ['a 'b] 'c 'v sum))");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
     /* Expect 4 distinct (a, b) rows: (A,10), (A,20), (B,10), (B,20). */
-    munit_assert_int(ray_table_nrows(r), ==, 4);
+    TEST_ASSERT_EQ_I(ray_table_nrows(r), 4);
     ray_t* a_col = ray_table_get_col(r, ray_sym_intern("a", 1));
     ray_t* b_col = ray_table_get_col(r, ray_sym_intern("b", 1));
     ray_t* x_col = ray_table_get_col(r, ray_sym_intern("x", 1));
     ray_t* y_col = ray_table_get_col(r, ray_sym_intern("y", 1));
-    munit_assert_ptr_not_null(a_col);
-    munit_assert_ptr_not_null(b_col);
-    munit_assert_ptr_not_null(x_col);
-    munit_assert_ptr_not_null(y_col);
-    munit_assert_int(a_col->type, ==, RAY_SYM);
-    munit_assert_int(b_col->type, ==, RAY_I64);
-    munit_assert_int(x_col->type, ==, RAY_I64);
-    munit_assert_int(y_col->type, ==, RAY_I64);
+    TEST_ASSERT_NOT_NULL(a_col);
+    TEST_ASSERT_NOT_NULL(b_col);
+    TEST_ASSERT_NOT_NULL(x_col);
+    TEST_ASSERT_NOT_NULL(y_col);
+    TEST_ASSERT_EQ_I(a_col->type, RAY_SYM);
+    TEST_ASSERT_EQ_I(b_col->type, RAY_I64);
+    TEST_ASSERT_EQ_I(x_col->type, RAY_I64);
+    TEST_ASSERT_EQ_I(y_col->type, RAY_I64);
     /* Expected per-row: (A,10)→x=100,y=0; (A,20)→x=500,y=200;
      *                   (B,10)→x=300,y=600; (B,20)→x=0,y=400.
      * Build a lookup (a_sym, b) → (x, y) so we're independent of
@@ -1259,20 +1181,18 @@ static MunitResult test_eval_pivot_multi_index(const void* params, void* fixture
     for (int64_t i = 0; i < 4; i++) {
         int64_t a = (int64_t)ray_read_sym(ray_data(a_col), i, a_col->type, a_col->attrs);
         int64_t b = bd[i];
-        if (a == sym_A && b == 10) { seen_A10 = 1; munit_assert_int(xd[i], ==, 100); munit_assert_int(yd[i], ==, 0);   }
-        else if (a == sym_A && b == 20) { seen_A20 = 1; munit_assert_int(xd[i], ==, 500); munit_assert_int(yd[i], ==, 200); }
-        else if (a == sym_B && b == 10) { seen_B10 = 1; munit_assert_int(xd[i], ==, 300); munit_assert_int(yd[i], ==, 600); }
-        else if (a == sym_B && b == 20) { seen_B20 = 1; munit_assert_int(xd[i], ==, 0);   munit_assert_int(yd[i], ==, 400); }
-        else munit_assert_true(false);
+        if (a == sym_A && b == 10) { seen_A10 = 1; TEST_ASSERT_EQ_I(xd[i], 100); TEST_ASSERT_EQ_I(yd[i], 0);   }
+        else if (a == sym_A && b == 20) { seen_A20 = 1; TEST_ASSERT_EQ_I(xd[i], 500); TEST_ASSERT_EQ_I(yd[i], 200); }
+        else if (a == sym_B && b == 10) { seen_B10 = 1; TEST_ASSERT_EQ_I(xd[i], 300); TEST_ASSERT_EQ_I(yd[i], 600); }
+        else if (a == sym_B && b == 20) { seen_B20 = 1; TEST_ASSERT_EQ_I(xd[i], 0);   TEST_ASSERT_EQ_I(yd[i], 400); }
+        else TEST_ASSERT_TRUE(false);
     }
-    munit_assert_true(seen_A10 && seen_A20 && seen_B10 && seen_B20);
+    TEST_ASSERT_TRUE(seen_A10 && seen_A20 && seen_B10 && seen_B20);
     ray_release(r);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_eval_select_where_in_sym_vs_atom_mismatch(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_eval_select_where_in_sym_vs_atom_mismatch(void) {
     /* Intern the probe sym so we know its numeric ID, then embed
      * that ID as a decimal literal in the source string so the i64
      * col value equals the literal sym's interned ID.  Under the
@@ -1288,11 +1208,11 @@ static MunitResult test_eval_select_where_in_sym_vs_atom_mismatch(const void* pa
         (long long)target_id);
 
     ray_t* r1 = ray_eval_str(src);
-    munit_assert_ptr_not_null(r1);
-    munit_assert_false(RAY_IS_ERR(r1));
-    munit_assert_int(r1->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
+    TEST_ASSERT_EQ_I(r1->type, RAY_TABLE);
     /* With fix: 0 rows.  Without fix: 1 row (false collision). */
-    munit_assert_int(ray_table_nrows(r1), ==, 0);
+    TEST_ASSERT_EQ_I(ray_table_nrows(r1), 0);
     ray_release(r1);
 
     /* Same collision via not-in: should return ALL rows (1), not 0. */
@@ -1301,41 +1221,39 @@ static MunitResult test_eval_select_where_in_sym_vs_atom_mismatch(const void* pa
         "(select {from: tbug where: (not-in k 'op_in_collision_probe)}))",
         (long long)target_id);
     ray_t* r2 = ray_eval_str(src);
-    munit_assert_ptr_not_null(r2);
-    munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(ray_table_nrows(r2), ==, 1);
+    TEST_ASSERT_NOT_NULL(r2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r2), 1);
     ray_release(r2);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: OP_IN with an empty set + null column rows ----
  * Regression: exec_in had an early return for set_len == 0 that did
  * `memset(negate ? 1 : 0, col_len)` — flipping all rows, including
  * nulls, to true for `not-in`.  Null rows must still be excluded. */
-static MunitResult test_eval_select_where_in_empty_set_nulls(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_eval_select_where_in_empty_set_nulls(void) {
     /* not-in with empty set: source has [1 0Nl 3 0Nl 5], filter
      * `not-in []` should return 1, 3, 5 — not the two nulls. */
     ray_t* r1 = ray_eval_str(
         "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
         "(select {from: t where: (not-in k [])}))");
-    munit_assert_ptr_not_null(r1);
-    munit_assert_false(RAY_IS_ERR(r1));
-    munit_assert_int(ray_table_nrows(r1), ==, 3);
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r1), 3);
     ray_release(r1);
 
     /* in with empty set: no row passes. */
     ray_t* r2 = ray_eval_str(
         "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
         "(select {from: t where: (in k [])}))");
-    munit_assert_ptr_not_null(r2);
-    munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(ray_table_nrows(r2), ==, 0);
+    TEST_ASSERT_NOT_NULL(r2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r2), 0);
     ray_release(r2);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: OP_IN must not leak null rows through ----
@@ -1344,17 +1262,15 @@ static MunitResult test_eval_select_where_in_empty_set_nulls(const void* params,
  * on a column containing 0Nl nulls returned the null rows as
  * "true" (because null-sentinel != 1), leaking them through.
  * Null rows must never pass either `in` or `not-in`. */
-static MunitResult test_eval_select_where_in_nulls(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_eval_select_where_in_nulls(void) {
     /* not-in with null rows: source has [1 0Nl 3 0Nl 5], filter
      * `not-in [1]` should return only 3 and 5 — not the two nulls. */
     ray_t* r1 = ray_eval_str(
         "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
         "(select {from: t where: (not-in k [1])}))");
-    munit_assert_ptr_not_null(r1);
-    munit_assert_false(RAY_IS_ERR(r1));
-    munit_assert_int(ray_table_nrows(r1), ==, 2);
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r1), 2);
     ray_release(r1);
 
     /* in with null rows: source has [1 0Nl 3 0Nl 5], filter
@@ -1362,248 +1278,234 @@ static MunitResult test_eval_select_where_in_nulls(const void* params, void* fix
     ray_t* r2 = ray_eval_str(
         "(do (set t (table ['k] (list [1 0Nl 3 0Nl 5]))) "
         "(select {from: t where: (in k [1 3])}))");
-    munit_assert_ptr_not_null(r2);
-    munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(ray_table_nrows(r2), ==, 2);
+    TEST_ASSERT_NOT_NULL(r2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r2), 2);
     ray_release(r2);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: `in` with mixed numeric types (F64 col vs I64 set) ----
  * Regression: exec_in originally compared bit patterns which made
  * `(in price_f64 [1 2 3])` match nothing.  Now we promote to double
  * when either side is a float type and compare numerically. */
-static MunitResult test_eval_select_where_in_mixed_numeric(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_where_in_mixed_numeric(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [1.0 2.0 3.0 4.0]))) "
         "(select {from: t where: (in p [1 2])}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: WHERE with `in` and a literal i64 vector ---- */
-static MunitResult test_eval_select_where_in_i64(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_where_in_i64(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['k 'p] "
         "(list [1 2 3 4 5] [10 20 30 40 50]))) "
         "(select {from: t where: (in k [1 3 5])}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: pre-existing WHERE+by bug — WHERE was silently dropped
  * when `by:` was present.  Now fixed by pre-materializing the
  * filter before the GROUP op's inputs are built. */
-static MunitResult test_eval_select_by_where_filters(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_where_filters(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s where: (> p 25.0) tot: (sum p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     /* sum(A where p > 25) = 30+50 = 80; sum(B where p > 25) = 40+60 = 100 */
     int64_t tot_id = ray_sym_intern("tot", 3);
     ray_t* tot_col = ray_table_get_col(result, tot_id);
-    munit_assert_ptr_not_null(tot_col);
+    TEST_ASSERT_NOT_NULL(tot_col);
     double* td = (double*)ray_data(tot_col);
-    munit_assert_double(td[0], ==, 80.0);
-    munit_assert_double(td[1], ==, 100.0);
+    TEST_ASSERT((td[0]) == (80.0), "double == failed");
+    TEST_ASSERT((td[1]) == (100.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: WHERE with `in` + group-by end-to-end ---- */
-static MunitResult test_eval_select_by_where_in(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_where_in(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B C A B C A B C] [1 2 3 4 5 6 7 8 9]))) "
         "(select {from: t by: s where: (in s [A C]) tot: (sum p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     /* B should be filtered out, leaving only A and C. */
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: `if` conditional projection ---- */
-static MunitResult test_eval_select_if(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_if(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [10 20 30 40]))) "
         "(select {from: t m: (if (> p 25) 1 0)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
+    TEST_ASSERT_NOT_NULL(m_col);
     int64_t* md = (int64_t*)ray_data(m_col);
-    munit_assert_int(md[0], ==, 0);
-    munit_assert_int(md[1], ==, 0);
-    munit_assert_int(md[2], ==, 1);
-    munit_assert_int(md[3], ==, 1);
+    TEST_ASSERT_EQ_I(md[0], 0);
+    TEST_ASSERT_EQ_I(md[1], 0);
+    TEST_ASSERT_EQ_I(md[2], 1);
+    TEST_ASSERT_EQ_I(md[3], 1);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: equality against sym literal atom ---- */
-static MunitResult test_eval_select_where_sym_atom(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_where_sym_atom(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B] [10 20 30 40]))) "
         "(select {from: t where: (== s 'A)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: `as` type cast ---- */
-static MunitResult test_eval_select_cast(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_cast(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [10.5 20.5 30.5]))) "
         "(select {from: t m: (as 'I64 p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
-    munit_assert_int(m_col->type, ==, RAY_I64);
+    TEST_ASSERT_NOT_NULL(m_col);
+    TEST_ASSERT_EQ_I(m_col->type, RAY_I64);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: `round` on f64 column ---- */
-static MunitResult test_eval_select_round(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_round(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['p] (list [1.4 2.6 3.5]))) "
         "(select {from: t m: (round p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
+    TEST_ASSERT_NOT_NULL(m_col);
     double* md = (double*)ray_data(m_col);
-    munit_assert_double(md[0], ==, 1.0);
-    munit_assert_double(md[1], ==, 3.0);
-    munit_assert_double(md[2], >=, 3.0);  /* round half: either 3 or 4 depending on mode */
+    TEST_ASSERT((md[0]) == (1.0), "double == failed");
+    TEST_ASSERT((md[1]) == (3.0), "double == failed");
+    TEST_ASSERT((md[2]) >= (3.0), "double >= failed");  /* round half: either 3 or 4 depending on mode */
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select cols (projection) ---- */
-static MunitResult test_eval_select_cols(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_cols(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['name 'salary 'dept] "
         "(list [1 2 3] [50000 60000 70000] [10 20 10]))) "
         "(select {name: name salary: salary from: t}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_ncols(result), ==, 2);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select groupby ---- */
-static MunitResult test_eval_select_groupby(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_groupby(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['dept 'salary] "
         "(list [1 2 1 2] [50000 60000 70000 80000]))) "
         "(select {avg_sal: (avg salary) from: t by: dept}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select xbar (time bucket) ---- */
-static MunitResult test_eval_select_xbar(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_xbar(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['ts 'val] "
         "(list [100 250 300 450 500] [1 2 3 4 5]))) "
         "(select {total: (sum val) from: t by: (xbar ts 200)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* Buckets: 0(100), 200(250,300), 400(450,500) → 3 groups */
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select asc ---- */
-static MunitResult test_eval_select_asc(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_asc(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [3 1 2] [30 10 20]))) "
         "(select {from: t asc: 'a}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     int64_t a_id = ray_sym_intern("a", 1);
     ray_t* a_col = ray_table_get_col(result, a_id);
     int64_t* a_data = (int64_t*)ray_data(a_col);
-    munit_assert_int(a_data[0], ==, 1);
-    munit_assert_int(a_data[1], ==, 2);
-    munit_assert_int(a_data[2], ==, 3);
+    TEST_ASSERT_EQ_I(a_data[0], 1);
+    TEST_ASSERT_EQ_I(a_data[1], 2);
+    TEST_ASSERT_EQ_I(a_data[2], 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select desc ---- */
-static MunitResult test_eval_select_desc(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_desc(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [3 1 2] [30 10 20]))) "
         "(select {from: t desc: 'a}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     int64_t a_id = ray_sym_intern("a", 1);
     ray_t* a_col = ray_table_get_col(result, a_id);
     int64_t* a_data = (int64_t*)ray_data(a_col);
-    munit_assert_int(a_data[0], ==, 3);
-    munit_assert_int(a_data[1], ==, 2);
-    munit_assert_int(a_data[2], ==, 1);
+    TEST_ASSERT_EQ_I(a_data[0], 3);
+    TEST_ASSERT_EQ_I(a_data[1], 2);
+    TEST_ASSERT_EQ_I(a_data[2], 1);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select asc + desc mixed ---- */
-static MunitResult test_eval_select_asc_desc(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_asc_desc(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['grp 'val] (list [1 1 2 2] [30 10 20 40]))) "
         "(select {from: t asc: 'grp desc: 'val}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     int64_t g_id = ray_sym_intern("grp", 3);
     int64_t v_id = ray_sym_intern("val", 3);
     ray_t* g_col = ray_table_get_col(result, g_id);
@@ -1611,100 +1513,95 @@ static MunitResult test_eval_select_asc_desc(const void* params, void* fixture) 
     int64_t* gd = (int64_t*)ray_data(g_col);
     int64_t* vd = (int64_t*)ray_data(v_col);
     /* grp=1: val desc → 30,10; grp=2: val desc → 40,20 */
-    munit_assert_int(gd[0], ==, 1); munit_assert_int(vd[0], ==, 30);
-    munit_assert_int(gd[1], ==, 1); munit_assert_int(vd[1], ==, 10);
-    munit_assert_int(gd[2], ==, 2); munit_assert_int(vd[2], ==, 40);
-    munit_assert_int(gd[3], ==, 2); munit_assert_int(vd[3], ==, 20);
+    TEST_ASSERT_EQ_I(gd[0], 1); TEST_ASSERT_EQ_I(vd[0], 30);
+    TEST_ASSERT_EQ_I(gd[1], 1); TEST_ASSERT_EQ_I(vd[1], 10);
+    TEST_ASSERT_EQ_I(gd[2], 2); TEST_ASSERT_EQ_I(vd[2], 40);
+    TEST_ASSERT_EQ_I(gd[3], 2); TEST_ASSERT_EQ_I(vd[3], 20);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select take positive ---- */
-static MunitResult test_eval_select_take(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_take(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a] (list [10 20 30 40 50]))) "
         "(select {from: t take: 3}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     int64_t a_id = ray_sym_intern("a", 1);
     ray_t* a_col = ray_table_get_col(result, a_id);
     int64_t* a_data = (int64_t*)ray_data(a_col);
-    munit_assert_int(a_data[0], ==, 10);
-    munit_assert_int(a_data[1], ==, 20);
-    munit_assert_int(a_data[2], ==, 30);
+    TEST_ASSERT_EQ_I(a_data[0], 10);
+    TEST_ASSERT_EQ_I(a_data[1], 20);
+    TEST_ASSERT_EQ_I(a_data[2], 30);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select take negative ---- */
-static MunitResult test_eval_select_take_neg(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_take_neg(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a] (list [10 20 30 40 50]))) "
         "(select {from: t take: -2}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t a_id = ray_sym_intern("a", 1);
     ray_t* a_col = ray_table_get_col(result, a_id);
     int64_t* a_data = (int64_t*)ray_data(a_col);
-    munit_assert_int(a_data[0], ==, 40);
-    munit_assert_int(a_data[1], ==, 50);
+    TEST_ASSERT_EQ_I(a_data[0], 40);
+    TEST_ASSERT_EQ_I(a_data[1], 50);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select take range [start count] ---- */
-static MunitResult test_eval_select_take_range(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_take_range(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a] (list [10 20 30 40 50]))) "
         "(select {from: t take: [1 2]}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t a_id = ray_sym_intern("a", 1);
     ray_t* a_col = ray_table_get_col(result, a_id);
     int64_t* a_data = (int64_t*)ray_data(a_col);
-    munit_assert_int(a_data[0], ==, 20);
-    munit_assert_int(a_data[1], ==, 30);
+    TEST_ASSERT_EQ_I(a_data[0], 20);
+    TEST_ASSERT_EQ_I(a_data[1], 30);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select where + desc + take ---- */
-static MunitResult test_eval_select_combined(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_combined(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [3 1 2 5 4] [10 20 30 40 50]))) "
         "(select {from: t where: (> a 2) desc: 'a take: 2}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t a_id = ray_sym_intern("a", 1);
     ray_t* a_col = ray_table_get_col(result, a_id);
     int64_t* a_data = (int64_t*)ray_data(a_col);
-    munit_assert_int(a_data[0], ==, 5);
-    munit_assert_int(a_data[1], ==, 4);
+    TEST_ASSERT_EQ_I(a_data[0], 5);
+    TEST_ASSERT_EQ_I(a_data[1], 4);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select asc multi-column vector ---- */
-static MunitResult test_eval_select_asc_multi(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_asc_multi(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [2 1 1 2] [20 10 30 10]))) "
         "(select {from: t asc: ['a 'b]}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     int64_t a_id = ray_sym_intern("a", 1);
     int64_t b_id = ray_sym_intern("b", 1);
     ray_t* a_col = ray_table_get_col(result, a_id);
@@ -1712,167 +1609,162 @@ static MunitResult test_eval_select_asc_multi(const void* params, void* fixture)
     int64_t* ad = (int64_t*)ray_data(a_col);
     int64_t* bd = (int64_t*)ray_data(b_col);
     /* a asc, b asc: (1,10), (1,30), (2,10), (2,20) */
-    munit_assert_int(ad[0], ==, 1); munit_assert_int(bd[0], ==, 10);
-    munit_assert_int(ad[1], ==, 1); munit_assert_int(bd[1], ==, 30);
-    munit_assert_int(ad[2], ==, 2); munit_assert_int(bd[2], ==, 10);
-    munit_assert_int(ad[3], ==, 2); munit_assert_int(bd[3], ==, 20);
+    TEST_ASSERT_EQ_I(ad[0], 1); TEST_ASSERT_EQ_I(bd[0], 10);
+    TEST_ASSERT_EQ_I(ad[1], 1); TEST_ASSERT_EQ_I(bd[1], 30);
+    TEST_ASSERT_EQ_I(ad[2], 2); TEST_ASSERT_EQ_I(bd[2], 10);
+    TEST_ASSERT_EQ_I(ad[3], 2); TEST_ASSERT_EQ_I(bd[3], 20);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select groupby + desc + take ---- */
-static MunitResult test_eval_select_groupby_sort(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_groupby_sort(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['dept 'salary] "
         "(list [1 2 1 2 1] [50000 60000 70000 80000 30000]))) "
         "(select {from: t by: dept total: (sum salary) desc: 'total take: 1}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 1);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 1);
     /* dept=1: sum=150000, dept=2: sum=140000. desc by total → dept 1 first */
     int64_t dept_id = ray_sym_intern("dept", 4);
     ray_t* dept_col = ray_table_get_col(result, dept_id);
-    munit_assert_ptr_not_null(dept_col);
+    TEST_ASSERT_NOT_NULL(dept_col);
     int64_t* dd = (int64_t*)ray_data(dept_col);
-    munit_assert_int(dd[0], ==, 1);
+    TEST_ASSERT_EQ_I(dd[0], 1);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select groupby + non-aggregation expression (I64 key) ----
  * Regression: the post-DAG scatter path used ray_read_sym (SYM-only)
  * to read plain i64 key elements, which read 1 byte instead of 8
  * and produced wrong per-group lists. */
-static MunitResult test_eval_select_by_nonagg_i64_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_nonagg_i64_key(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['k 'p] "
         "(list [100 200 100 200 100 200] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: k m: (+ p p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     int64_t k_id = ray_sym_intern("k", 1);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* k_col = ray_table_get_col(result, k_id);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(k_col);
-    munit_assert_ptr_not_null(m_col);
-    munit_assert_int(m_col->type, ==, RAY_LIST);
-    munit_assert_int(k_col->type, ==, RAY_I64);
+    TEST_ASSERT_NOT_NULL(k_col);
+    TEST_ASSERT_NOT_NULL(m_col);
+    TEST_ASSERT_EQ_I(m_col->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(k_col->type, RAY_I64);
     int64_t* kd = (int64_t*)ray_data(k_col);
-    munit_assert_int(kd[0], ==, 100);
-    munit_assert_int(kd[1], ==, 200);
+    TEST_ASSERT_EQ_I(kd[0], 100);
+    TEST_ASSERT_EQ_I(kd[1], 200);
 
     ray_t** mi = (ray_t**)ray_data(m_col);
     /* group 100 → rows [0 2 4] → p=[10 30 50] → (+ p p) = [20 60 100] */
-    munit_assert_int(mi[0]->len, ==, 3);
+    TEST_ASSERT_EQ_I(mi[0]->len, 3);
     double* d0 = (double*)ray_data(mi[0]);
-    munit_assert_double(d0[0], ==, 20.0);
-    munit_assert_double(d0[1], ==, 60.0);
-    munit_assert_double(d0[2], ==, 100.0);
+    TEST_ASSERT((d0[0]) == (20.0), "double == failed");
+    TEST_ASSERT((d0[1]) == (60.0), "double == failed");
+    TEST_ASSERT((d0[2]) == (100.0), "double == failed");
     /* group 200 → rows [1 3 5] → p=[20 40 60] → (+ p p) = [40 80 120] */
-    munit_assert_int(mi[1]->len, ==, 3);
+    TEST_ASSERT_EQ_I(mi[1]->len, 3);
     double* d1 = (double*)ray_data(mi[1]);
-    munit_assert_double(d1[0], ==, 40.0);
-    munit_assert_double(d1[1], ==, 80.0);
-    munit_assert_double(d1[2], ==, 120.0);
+    TEST_ASSERT((d1[0]) == (40.0), "double == failed");
+    TEST_ASSERT((d1[1]) == (80.0), "double == failed");
+    TEST_ASSERT((d1[2]) == (120.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: select groupby + non-agg with U8 key ----
  * Regression: KEY_READ macro's default case returned 0, so U8 keys
  * collapsed every row into a single (wrong) group. */
-static MunitResult test_eval_select_by_nonagg_u8_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_nonagg_u8_key(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['k 'p] "
         "(list (as 'U8 [100 200 100 200 100 200]) "
         "      [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: k m: (+ p p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
-    munit_assert_int(m_col->type, ==, RAY_LIST);
+    TEST_ASSERT_NOT_NULL(m_col);
+    TEST_ASSERT_EQ_I(m_col->type, RAY_LIST);
 
     ray_t** mi = (ray_t**)ray_data(m_col);
-    munit_assert_int(mi[0]->len, ==, 3);
-    munit_assert_int(mi[1]->len, ==, 3);
+    TEST_ASSERT_EQ_I(mi[0]->len, 3);
+    TEST_ASSERT_EQ_I(mi[1]->len, 3);
     double* d0 = (double*)ray_data(mi[0]);
-    munit_assert_double(d0[0], ==, 20.0);
-    munit_assert_double(d0[1], ==, 60.0);
-    munit_assert_double(d0[2], ==, 100.0);
+    TEST_ASSERT((d0[0]) == (20.0), "double == failed");
+    TEST_ASSERT((d0[1]) == (60.0), "double == failed");
+    TEST_ASSERT((d0[2]) == (100.0), "double == failed");
     double* d1 = (double*)ray_data(mi[1]);
-    munit_assert_double(d1[0], ==, 40.0);
-    munit_assert_double(d1[1], ==, 80.0);
-    munit_assert_double(d1[2], ==, 120.0);
+    TEST_ASSERT((d1[0]) == (40.0), "double == failed");
+    TEST_ASSERT((d1[1]) == (80.0), "double == failed");
+    TEST_ASSERT((d1[2]) == (120.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: empty groupby non-agg result keeps full schema ----
  * Regression: when WHERE filters all rows out, the scatter block
  * skipped adding the non-agg LIST column, producing a table with
  * only the key column. */
-static MunitResult test_eval_select_by_nonagg_empty(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_nonagg_empty(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['k 'p] (list [100 200] [10.0 20.0]))) "
         "(select {from: t where: (> p 1000.0) by: k m: (+ p p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 0);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 0);
     /* Must still have both key and non-agg columns */
-    munit_assert_int(ray_table_ncols(result), ==, 2);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 2);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
-    munit_assert_int(m_col->type, ==, RAY_LIST);
+    TEST_ASSERT_NOT_NULL(m_col);
+    TEST_ASSERT_EQ_I(m_col->type, RAY_LIST);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: mixed agg + non-agg column naming ----
  * Regression: when a non-agg column was declared before an agg in
  * the dict, the rename step swapped names because the DAG result
  * layout is [keys, aggs..., nonaggs...] regardless of dict order. */
-static MunitResult test_eval_select_by_mixed_naming(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_mixed_naming(void) {
     /* Non-agg listed FIRST in the dict */
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s m: (+ p p) tot: (sum p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
 
     int64_t m_id   = ray_sym_intern("m", 1);
     int64_t tot_id = ray_sym_intern("tot", 3);
     ray_t* m_col   = ray_table_get_col(result, m_id);
     ray_t* tot_col = ray_table_get_col(result, tot_id);
-    munit_assert_ptr_not_null(m_col);
-    munit_assert_ptr_not_null(tot_col);
+    TEST_ASSERT_NOT_NULL(m_col);
+    TEST_ASSERT_NOT_NULL(tot_col);
     /* m must be the LIST (non-agg), tot must be the F64 sum */
-    munit_assert_int(m_col->type,   ==, RAY_LIST);
-    munit_assert_int(tot_col->type, ==, RAY_F64);
+    TEST_ASSERT_EQ_I(m_col->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(tot_col->type, RAY_F64);
     double* td = (double*)ray_data(tot_col);
-    munit_assert_double(td[0], ==, 90.0);
-    munit_assert_double(td[1], ==, 120.0);
+    TEST_ASSERT((td[0]) == (90.0), "double == failed");
+    TEST_ASSERT((td[1]) == (120.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: sort + take on grouped non-agg output ----
@@ -1882,22 +1774,20 @@ static MunitResult test_eval_select_by_mixed_naming(const void* params, void* fi
  * by non-agg output columns fell through with "nyi".  Both fixed by
  * (a) running scatter before apply_sort_take, (b) using ray_take_fn
  * instead of the DAG head/tail op. */
-static MunitResult test_eval_select_by_nonagg_sort_take(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_eval_select_by_nonagg_sort_take(void) {
     /* take: 1 with non-agg LIST column */
     ray_t* r1 = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s m: (+ p p) take: 1}))");
-    munit_assert_ptr_not_null(r1);
-    munit_assert_false(RAY_IS_ERR(r1));
-    munit_assert_int(r1->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(r1), ==, 1);
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
+    TEST_ASSERT_EQ_I(r1->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(r1), 1);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m1 = ray_table_get_col(r1, m_id);
-    munit_assert_ptr_not_null(m1);
-    munit_assert_int(m1->type, ==, RAY_LIST);
+    TEST_ASSERT_NOT_NULL(m1);
+    TEST_ASSERT_EQ_I(m1->type, RAY_LIST);
     ray_release(r1);
 
     /* desc by agg column still reorders groups correctly with a
@@ -1906,18 +1796,18 @@ static MunitResult test_eval_select_by_nonagg_sort_take(const void* params, void
         "(do (set t (table ['s 'p] "
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s tot: (sum p) m: (+ p p) desc: 'tot}))");
-    munit_assert_ptr_not_null(r2);
-    munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(r2->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(r2), ==, 2);
+    TEST_ASSERT_NOT_NULL(r2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
+    TEST_ASSERT_EQ_I(r2->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(r2), 2);
     int64_t s_id = ray_sym_intern("s", 1);
     ray_t* s_col = ray_table_get_col(r2, s_id);
     int64_t* sd = (int64_t*)ray_data(s_col);
     /* sum(A)=90, sum(B)=120 → desc means B first, A second */
     int64_t sym_A = ray_sym_intern("A", 1);
     int64_t sym_B = ray_sym_intern("B", 1);
-    munit_assert_int(sd[0], ==, sym_B);
-    munit_assert_int(sd[1], ==, sym_A);
+    TEST_ASSERT_EQ_I(sd[0], sym_B);
+    TEST_ASSERT_EQ_I(sd[1], sym_A);
     ray_release(r2);
 
     /* desc by key column works and drags the non-agg LIST column
@@ -1926,29 +1816,28 @@ static MunitResult test_eval_select_by_nonagg_sort_take(const void* params, void
         "(do (set t (table ['s 'p] "
         "(list [A B C A B C] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s m: (+ p p) desc: 's}))");
-    munit_assert_ptr_not_null(r3);
-    munit_assert_false(RAY_IS_ERR(r3));
-    munit_assert_int(ray_table_nrows(r3), ==, 3);
+    TEST_ASSERT_NOT_NULL(r3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r3));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r3), 3);
     ray_release(r3);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: grouped take clamps, not wraps ----
  * Regression: switching to ray_take_fn for group-by take briefly
  * brought kdb+-style wrap/pad semantics — `take: 5` with 2 groups
  * produced 5 rows (A,B,A,B,A).  Group-by must clamp to min(n, nrows). */
-static MunitResult test_eval_select_by_take_clamps(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_take_clamps(void) {
     /* agg-only: 2 groups, take: 5 → should clamp to 2 */
     ray_t* r1 = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B] [10.0 20.0 30.0 40.0]))) "
         "(select {from: t by: s tot: (sum p) take: 5}))");
-    munit_assert_ptr_not_null(r1);
-    munit_assert_false(RAY_IS_ERR(r1));
-    munit_assert_int(r1->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(r1), ==, 2);
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
+    TEST_ASSERT_EQ_I(r1->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(r1), 2);
     ray_release(r1);
 
     /* with non-agg LIST column: same clamp behavior */
@@ -1956,9 +1845,9 @@ static MunitResult test_eval_select_by_take_clamps(const void* params, void* fix
         "(do (set t (table ['s 'p] "
         "(list [A B A B] [10.0 20.0 30.0 40.0]))) "
         "(select {from: t by: s m: (+ p p) take: 5}))");
-    munit_assert_ptr_not_null(r2);
-    munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(ray_table_nrows(r2), ==, 2);
+    TEST_ASSERT_NOT_NULL(r2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r2), 2);
     ray_release(r2);
 
     /* take: -3 (tail) with 2 groups → clamp to 2 */
@@ -1966,12 +1855,12 @@ static MunitResult test_eval_select_by_take_clamps(const void* params, void* fix
         "(do (set t (table ['s 'p] "
         "(list [A B A B] [10.0 20.0 30.0 40.0]))) "
         "(select {from: t by: s tot: (sum p) take: -3}))");
-    munit_assert_ptr_not_null(r3);
-    munit_assert_false(RAY_IS_ERR(r3));
-    munit_assert_int(ray_table_nrows(r3), ==, 2);
+    TEST_ASSERT_NOT_NULL(r3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r3));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r3), 2);
     ray_release(r3);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: agg sub-calls inside non-agg expressions broadcast ----
@@ -1980,27 +1869,26 @@ static MunitResult test_eval_select_by_take_clamps(const void* params, void* fix
  * aggregation subexpressions that collapse column refs into scalars.
  * `(+ 1 (sum p))` references p but (sum p) reduces it to a scalar,
  * so the overall result is 1-wide and must broadcast. */
-static MunitResult test_eval_select_by_nonagg_with_agg_subexpr(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_nonagg_with_agg_subexpr(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s m: (+ 1 (sum p))}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
-    munit_assert_int(m_col->type, ==, RAY_LIST);
+    TEST_ASSERT_NOT_NULL(m_col);
+    TEST_ASSERT_EQ_I(m_col->type, RAY_LIST);
     ray_t** mi = (ray_t**)ray_data(m_col);
     /* Full-table sum of p is 210; (+ 1 210) = 211.  Broadcast into
      * every group cell — NOT gathered or errored. */
-    munit_assert_double(mi[0]->f64, ==, 211.0);
-    munit_assert_double(mi[1]->f64, ==, 211.0);
+    TEST_ASSERT((mi[0]->f64) == (211.0), "double == failed");
+    TEST_ASSERT((mi[1]->f64) == (211.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: non-agg classification — column refs vs constants ----
@@ -2008,23 +1896,21 @@ static MunitResult test_eval_select_by_nonagg_with_agg_subexpr(const void* param
  * that reference table columns (row-aligned, gather per group) and
  * pure constants (broadcast as-is).  Broadcasting a row-derived
  * result whose length doesn't match nrows would hide bugs. */
-static MunitResult test_eval_select_by_nonagg_colref_vs_const(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_eval_select_by_nonagg_colref_vs_const(void) {
     /* Case 1: column reference + row-aligned result → gather */
     ray_t* r1 = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s m: (+ p p)}))");
-    munit_assert_false(RAY_IS_ERR(r1));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m1 = ray_table_get_col(r1, m_id);
-    munit_assert_int(m1->type, ==, RAY_LIST);
+    TEST_ASSERT_EQ_I(m1->type, RAY_LIST);
     ray_t** m1i = (ray_t**)ray_data(m1);
-    munit_assert_int(m1i[0]->len, ==, 3);  /* A: 3 rows */
-    munit_assert_int(m1i[1]->len, ==, 3);  /* B: 3 rows */
+    TEST_ASSERT_EQ_I(m1i[0]->len, 3);  /* A: 3 rows */
+    TEST_ASSERT_EQ_I(m1i[1]->len, 3);  /* B: 3 rows */
     double* ga = (double*)ray_data(m1i[0]);
-    munit_assert_double(ga[0], ==, 20.0);
+    TEST_ASSERT((ga[0]) == (20.0), "double == failed");
     ray_release(r1);
 
     /* Case 2: constant (list 99 88) → broadcast */
@@ -2032,13 +1918,13 @@ static MunitResult test_eval_select_by_nonagg_colref_vs_const(const void* params
         "(do (set t (table ['s 'p] "
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s m: (list 99 88)}))");
-    munit_assert_false(RAY_IS_ERR(r2));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
     ray_t* m2 = ray_table_get_col(r2, m_id);
-    munit_assert_int(m2->type, ==, RAY_LIST);
+    TEST_ASSERT_EQ_I(m2->type, RAY_LIST);
     ray_t** m2i = (ray_t**)ray_data(m2);
     /* Each cell holds the full 2-element broadcast */
-    munit_assert_int(m2i[0]->len, ==, 2);
-    munit_assert_int(m2i[1]->len, ==, 2);
+    TEST_ASSERT_EQ_I(m2i[0]->len, 2);
+    TEST_ASSERT_EQ_I(m2i[1]->len, 2);
     ray_release(r2);
 
     /* Case 3: chained column-ref (passthrough LIST col m) → gather */
@@ -2047,26 +1933,26 @@ static MunitResult test_eval_select_by_nonagg_colref_vs_const(const void* params
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(set r (select {from: t by: s m: (+ p p)})) "
         "(select {from: r by: s m2: m}))");
-    munit_assert_false(RAY_IS_ERR(r3));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r3));
     int64_t m2_id = ray_sym_intern("m2", 2);
     ray_t* col3 = ray_table_get_col(r3, m2_id);
-    munit_assert_int(col3->type, ==, RAY_LIST);
+    TEST_ASSERT_EQ_I(col3->type, RAY_LIST);
     ray_t** c3i = (ray_t**)ray_data(col3);
     /* Each cell is a 1-element LIST containing that group's own
      * inner vec — NOT the full 2-element LIST duplicated. */
-    munit_assert_int(c3i[0]->len, ==, 1);
-    munit_assert_int(c3i[1]->len, ==, 1);
+    TEST_ASSERT_EQ_I(c3i[0]->len, 1);
+    TEST_ASSERT_EQ_I(c3i[1]->len, 1);
     ray_t* ia = ((ray_t**)ray_data(c3i[0]))[0];
     ray_t* ib = ((ray_t**)ray_data(c3i[1]))[0];
-    munit_assert_int(ia->len, ==, 3);  /* group A's inner vec */
-    munit_assert_int(ib->len, ==, 3);  /* group B's inner vec */
+    TEST_ASSERT_EQ_I(ia->len, 3);  /* group A's inner vec */
+    TEST_ASSERT_EQ_I(ib->len, 3);  /* group B's inner vec */
     /* And the two inner vecs must differ */
     double* a = (double*)ray_data(ia);
     double* b = (double*)ray_data(ib);
-    munit_assert_double(a[0], ==, 20.0);
-    munit_assert_double(b[0], ==, 40.0);
+    TEST_ASSERT((a[0]) == (20.0), "double == failed");
+    TEST_ASSERT((b[0]) == (40.0), "double == failed");
     ray_release(r3);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: non-agg literal/short vectors broadcast ----
@@ -2075,28 +1961,27 @@ static MunitResult test_eval_select_by_nonagg_colref_vs_const(const void* params
  * whose length doesn't match nrows, reading out of bounds.  Correct
  * semantics: anything whose length doesn't match the input row
  * count broadcasts as-is into every group cell. */
-static MunitResult test_eval_select_by_nonagg_broadcast(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_nonagg_broadcast(void) {
     /* DAG path: sym key, literal vector shorter than nrows */
     ray_t* r1 = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         "(select {from: t by: s m: [1 2]}))");
-    munit_assert_ptr_not_null(r1);
-    munit_assert_false(RAY_IS_ERR(r1));
-    munit_assert_int(r1->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(r1), ==, 2);
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r1));
+    TEST_ASSERT_EQ_I(r1->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(r1), 2);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m1 = ray_table_get_col(r1, m_id);
-    munit_assert_int(m1->type, ==, RAY_LIST);
+    TEST_ASSERT_EQ_I(m1->type, RAY_LIST);
     ray_t** m1i = (ray_t**)ray_data(m1);
     /* Each cell holds the whole 2-element literal */
-    munit_assert_int(m1i[0]->len, ==, 2);
-    munit_assert_int(m1i[1]->len, ==, 2);
+    TEST_ASSERT_EQ_I(m1i[0]->len, 2);
+    TEST_ASSERT_EQ_I(m1i[1]->len, 2);
     int64_t* a = (int64_t*)ray_data(m1i[0]);
     int64_t* b = (int64_t*)ray_data(m1i[1]);
-    munit_assert_int(a[0], ==, 1); munit_assert_int(a[1], ==, 2);
-    munit_assert_int(b[0], ==, 1); munit_assert_int(b[1], ==, 2);
+    TEST_ASSERT_EQ_I(a[0], 1); TEST_ASSERT_EQ_I(a[1], 2);
+    TEST_ASSERT_EQ_I(b[0], 1); TEST_ASSERT_EQ_I(b[1], 2);
     ray_release(r1);
 
     /* eval_group path: STR key forces eval-level, literal list */
@@ -2104,21 +1989,21 @@ static MunitResult test_eval_select_by_nonagg_broadcast(const void* params, void
         "(do (set t (table ['s 'p] "
         "(list (as 'STR [\"A\" \"B\" \"A\" \"B\"]) [10.0 20.0 30.0 40.0]))) "
         "(select {from: t by: s m: [7 8 9]}))");
-    munit_assert_ptr_not_null(r2);
-    munit_assert_false(RAY_IS_ERR(r2));
-    munit_assert_int(ray_table_nrows(r2), ==, 2);
+    TEST_ASSERT_NOT_NULL(r2);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
+    TEST_ASSERT_EQ_I(ray_table_nrows(r2), 2);
     ray_t* m2 = ray_table_get_col(r2, m_id);
-    munit_assert_int(m2->type, ==, RAY_LIST);
+    TEST_ASSERT_EQ_I(m2->type, RAY_LIST);
     ray_t** m2i = (ray_t**)ray_data(m2);
-    munit_assert_int(m2i[0]->len, ==, 3);
-    munit_assert_int(m2i[1]->len, ==, 3);
+    TEST_ASSERT_EQ_I(m2i[0]->len, 3);
+    TEST_ASSERT_EQ_I(m2i[1]->len, 3);
     int64_t* c = (int64_t*)ray_data(m2i[0]);
-    munit_assert_int(c[0], ==, 7);
-    munit_assert_int(c[1], ==, 8);
-    munit_assert_int(c[2], ==, 9);
+    TEST_ASSERT_EQ_I(c[0], 7);
+    TEST_ASSERT_EQ_I(c[1], 8);
+    TEST_ASSERT_EQ_I(c[2], 9);
     ray_release(r2);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: eval_group path (STR key) gathers LIST non-agg ----
@@ -2127,8 +2012,7 @@ static MunitResult test_eval_select_by_nonagg_broadcast(const void* params, void
  * duplicated the whole list into every group.  This only surfaced
  * when the group key column forced use_eval_group (STR/LIST/GUID),
  * so the earlier fix to the DAG scatter missed it. */
-static MunitResult test_eval_select_by_str_nonagg_list_col(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_str_nonagg_list_col(void) {
     ray_t* result = ray_eval_str(
         "(do "
         " (set t (table ['s 'p] "
@@ -2136,20 +2020,20 @@ static MunitResult test_eval_select_by_str_nonagg_list_col(const void* params, v
         "         [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         " (set r (select {from: t by: s m: (+ p p)})) "
         " (select {from: r by: [s] m2: m}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     int64_t m2_id = ray_sym_intern("m2", 2);
     ray_t* m2 = ray_table_get_col(result, m2_id);
-    munit_assert_ptr_not_null(m2);
-    munit_assert_int(m2->type, ==, RAY_LIST);
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQ_I(m2->type, RAY_LIST);
     ray_t** m2i = (ray_t**)ray_data(m2);
     /* Each cell is a 1-element LIST holding that group's own inner
      * vec — the three cells must have different inner values. */
-    munit_assert_int(m2i[0]->len, ==, 1);
-    munit_assert_int(m2i[1]->len, ==, 1);
-    munit_assert_int(m2i[2]->len, ==, 1);
+    TEST_ASSERT_EQ_I(m2i[0]->len, 1);
+    TEST_ASSERT_EQ_I(m2i[1]->len, 1);
+    TEST_ASSERT_EQ_I(m2i[2]->len, 1);
     ray_t* ia = ((ray_t**)ray_data(m2i[0]))[0];
     ray_t* ib = ((ray_t**)ray_data(m2i[1]))[0];
     ray_t* ic = ((ray_t**)ray_data(m2i[2]))[0];
@@ -2157,61 +2041,60 @@ static MunitResult test_eval_select_by_str_nonagg_list_col(const void* params, v
     double* b = (double*)ray_data(ib);
     double* c = (double*)ray_data(ic);
     /* A: (+ p p) on rows 0,3 → [20, 80] */
-    munit_assert_int(ia->len, ==, 2);
-    munit_assert_double(a[0], ==, 20.0);
-    munit_assert_double(a[1], ==, 80.0);
+    TEST_ASSERT_EQ_I(ia->len, 2);
+    TEST_ASSERT((a[0]) == (20.0), "double == failed");
+    TEST_ASSERT((a[1]) == (80.0), "double == failed");
     /* B: rows 1,4 → [40, 100] */
-    munit_assert_int(ib->len, ==, 2);
-    munit_assert_double(b[0], ==, 40.0);
-    munit_assert_double(b[1], ==, 100.0);
+    TEST_ASSERT_EQ_I(ib->len, 2);
+    TEST_ASSERT((b[0]) == (40.0), "double == failed");
+    TEST_ASSERT((b[1]) == (100.0), "double == failed");
     /* C: rows 2,5 → [60, 120] */
-    munit_assert_int(ic->len, ==, 2);
-    munit_assert_double(c[0], ==, 60.0);
-    munit_assert_double(c[1], ==, 120.0);
+    TEST_ASSERT_EQ_I(ic->len, 2);
+    TEST_ASSERT((c[0]) == (60.0), "double == failed");
+    TEST_ASSERT((c[1]) == (120.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: non-agg scatter gathers LIST columns per group ----
  * Regression: the scatter's `ray_is_vec` check excluded RAY_LIST
  * (type 0), so LIST-valued non-agg results were retained and
  * duplicated into every group instead of gathered. */
-static MunitResult test_eval_select_by_nonagg_list_col(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_nonagg_list_col(void) {
     ray_t* result = ray_eval_str(
         "(do "
         " (set t (table ['s 'p] "
         "   (list [A B A B A B] [10.0 20.0 30.0 40.0 50.0 60.0]))) "
         " (set r (select {from: t by: s m: (+ p p)})) "
         " (select {from: r by: s m2: m}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t m2_id = ray_sym_intern("m2", 2);
     ray_t* m2 = ray_table_get_col(result, m2_id);
-    munit_assert_ptr_not_null(m2);
-    munit_assert_int(m2->type, ==, RAY_LIST);
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQ_I(m2->type, RAY_LIST);
     ray_t** m2i = (ray_t**)ray_data(m2);
     /* Each cell should be a 1-element LIST holding that group's
      * original list, NOT the full LIST column duplicated. */
-    munit_assert_int(m2i[0]->type, ==, RAY_LIST);
-    munit_assert_int(m2i[0]->len,  ==, 1);
-    munit_assert_int(m2i[1]->type, ==, RAY_LIST);
-    munit_assert_int(m2i[1]->len,  ==, 1);
+    TEST_ASSERT_EQ_I(m2i[0]->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(m2i[0]->len, 1);
+    TEST_ASSERT_EQ_I(m2i[1]->type, RAY_LIST);
+    TEST_ASSERT_EQ_I(m2i[1]->len, 1);
     /* The inner vectors must differ between groups */
     ray_t* inner_a = ((ray_t**)ray_data(m2i[0]))[0];
     ray_t* inner_b = ((ray_t**)ray_data(m2i[1]))[0];
-    munit_assert_int(inner_a->len, ==, 3);
-    munit_assert_int(inner_b->len, ==, 3);
+    TEST_ASSERT_EQ_I(inner_a->len, 3);
+    TEST_ASSERT_EQ_I(inner_b->len, 3);
     double* a = (double*)ray_data(inner_a);
     double* b = (double*)ray_data(inner_b);
-    munit_assert_double(a[0], ==, 20.0);  /* group A: (+ p p) = [20,60,100] */
-    munit_assert_double(a[2], ==, 100.0);
-    munit_assert_double(b[0], ==, 40.0);  /* group B: (+ p p) = [40,80,120] */
-    munit_assert_double(b[2], ==, 120.0);
+    TEST_ASSERT((a[0]) == (20.0), "double == failed");  /* group A: (+ p p) = [20,60,100] */
+    TEST_ASSERT((a[2]) == (100.0), "double == failed");
+    TEST_ASSERT((b[0]) == (40.0), "double == failed");  /* group B: (+ p p) = [40,80,120] */
+    TEST_ASSERT((b[2]) == (120.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: `by: [b]` single-element vector with BOOL key ----
@@ -2219,26 +2102,25 @@ static MunitResult test_eval_select_by_nonagg_list_col(const void* params, void*
  * scalar `by_expr->type == -RAY_SYM`.  For `by: [b]` the reorder
  * was skipped and the result came out in radix order (false,true)
  * instead of first-occurrence order. */
-static MunitResult test_eval_select_by_vec_bool_order(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_vec_bool_order(void) {
     /* First value is true → expect true row first in result */
     ray_t* result = ray_eval_str(
         "(do (set t (table ['b 'p] "
         "(list [true false true false true] [10.0 20.0 30.0 40.0 50.0]))) "
         "(select {from: t by: [b] tot: (sum p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t b_id = ray_sym_intern("b", 1);
     ray_t* b_col = ray_table_get_col(result, b_id);
-    munit_assert_ptr_not_null(b_col);
-    munit_assert_int(b_col->type, ==, RAY_BOOL);
+    TEST_ASSERT_NOT_NULL(b_col);
+    TEST_ASSERT_EQ_I(b_col->type, RAY_BOOL);
     bool* bd = (bool*)ray_data(b_col);
-    munit_assert_true(bd[0]);   /* true first (first-occurrence) */
-    munit_assert_false(bd[1]);
+    TEST_ASSERT_TRUE(bd[0]);   /* true first (first-occurrence) */
+    TEST_ASSERT_FALSE(bd[1]);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: `by: [s]` single-element vector with STR key ----
@@ -2246,202 +2128,190 @@ static MunitResult test_eval_select_by_vec_bool_order(const void* params, void* 
  * -RAY_SYM by_expr, so `by: [s]` slipped through to the DAG path;
  * the eval_group path then used by_expr->i64 (garbage for vector
  * form) and crashed inside ray_group_fn. */
-static MunitResult test_eval_select_by_vec_str_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_vec_str_key(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['s 'p] "
         "(list (as 'STR [\"A\" \"B\" \"A\" \"B\"]) [10.0 20.0 30.0 40.0]))) "
         "(select {from: t by: [s] m: (+ p p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     /* Result must have both key and non-agg columns */
-    munit_assert_int(ray_table_ncols(result), ==, 2);
+    TEST_ASSERT_EQ_I(ray_table_ncols(result), 2);
     int64_t m_id = ray_sym_intern("m", 1);
     ray_t* m_col = ray_table_get_col(result, m_id);
-    munit_assert_ptr_not_null(m_col);
-    munit_assert_int(m_col->type, ==, RAY_LIST);
+    TEST_ASSERT_NOT_NULL(m_col);
+    TEST_ASSERT_EQ_I(m_col->type, RAY_LIST);
     ray_t** mi = (ray_t**)ray_data(m_col);
     /* group "A" → rows [0,2] → p=[10,30] → (+ p p)=[20,60] */
-    munit_assert_int(mi[0]->len, ==, 2);
+    TEST_ASSERT_EQ_I(mi[0]->len, 2);
     double* d0 = (double*)ray_data(mi[0]);
-    munit_assert_double(d0[0], ==, 20.0);
-    munit_assert_double(d0[1], ==, 60.0);
+    TEST_ASSERT((d0[0]) == (20.0), "double == failed");
+    TEST_ASSERT((d0[1]) == (60.0), "double == failed");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: multi-key by + non-agg returns nyi error ---- */
-static MunitResult test_eval_select_by_multi_nonagg_nyi(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_by_multi_nonagg_nyi(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b 'p] "
         "(list [X X Y] [1 2 1] [10.0 20.0 30.0]))) "
         "(select {from: t by: [a b] m: (+ p p)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_true(RAY_IS_ERR(result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_TRUE(RAY_IS_ERR(result));
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: update ---- */
-static MunitResult test_eval_update(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_update(void) {
     /* Update salary to (* salary 2) where name == 2 (second row) */
     ray_t* result = ray_eval_str(
         "(do (set t (table ['name 'dept 'salary] "
         "(list [1 2 3] [10 20 10] [50000 60000 70000]))) "
         "(update {salary: (* salary 2) from: t where: (== name 2)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     /* Check salary column: [50000, 120000, 70000] */
     int64_t sal_id = ray_sym_intern("salary", 6);
     ray_t* sal_col = ray_table_get_col(result, sal_id);
-    munit_assert_ptr_not_null(sal_col);
+    TEST_ASSERT_NOT_NULL(sal_col);
     int64_t* sal_data = (int64_t*)ray_data(sal_col);
-    munit_assert_int(sal_data[0], ==, 50000);
-    munit_assert_int(sal_data[1], ==, 120000);
-    munit_assert_int(sal_data[2], ==, 70000);
+    TEST_ASSERT_EQ_I(sal_data[0], 50000);
+    TEST_ASSERT_EQ_I(sal_data[1], 120000);
+    TEST_ASSERT_EQ_I(sal_data[2], 70000);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: update without where broadcasts scalar ---- */
-static MunitResult test_eval_update_no_where(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_update_no_where(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['x 'y] (list [1 2 3] [10 20 30]))) "
         "(update {x: 99 from: t}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     int64_t x_id = ray_sym_intern("x", 1);
     ray_t* x_col = ray_table_get_col(result, x_id);
-    munit_assert_ptr_not_null(x_col);
-    munit_assert_int(x_col->type, ==, RAY_I64);
-    munit_assert_int(x_col->len, ==, 3);
+    TEST_ASSERT_NOT_NULL(x_col);
+    TEST_ASSERT_EQ_I(x_col->type, RAY_I64);
+    TEST_ASSERT_EQ_I(x_col->len, 3);
     int64_t* xd = (int64_t*)ray_data(x_col);
-    munit_assert_int(xd[0], ==, 99);
-    munit_assert_int(xd[1], ==, 99);
-    munit_assert_int(xd[2], ==, 99);
+    TEST_ASSERT_EQ_I(xd[0], 99);
+    TEST_ASSERT_EQ_I(xd[1], 99);
+    TEST_ASSERT_EQ_I(xd[2], 99);
     /* y column should be unchanged */
     int64_t y_id = ray_sym_intern("y", 1);
     ray_t* y_col = ray_table_get_col(result, y_id);
     int64_t* yd = (int64_t*)ray_data(y_col);
-    munit_assert_int(yd[0], ==, 10);
-    munit_assert_int(yd[1], ==, 20);
-    munit_assert_int(yd[2], ==, 30);
+    TEST_ASSERT_EQ_I(yd[0], 10);
+    TEST_ASSERT_EQ_I(yd[1], 20);
+    TEST_ASSERT_EQ_I(yd[2], 30);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: masked update on string column ---- */
-static MunitResult test_eval_update_str_masked(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_update_str_masked(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['id 'name] (list [1 2 3] [\"alice\" \"bob\" \"carol\"]))) "
         "(update {name: \"REPLACED\" from: t where: (== id 2)}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     int64_t name_id = ray_sym_intern("name", 4);
     ray_t* name_col = ray_table_get_col(result, name_id);
-    munit_assert_ptr_not_null(name_col);
-    munit_assert_int(name_col->type, ==, RAY_STR);
+    TEST_ASSERT_NOT_NULL(name_col);
+    TEST_ASSERT_EQ_I(name_col->type, RAY_STR);
     size_t slen;
     const char* s0 = ray_str_vec_get(name_col, 0, &slen);
-    munit_assert_int(slen, ==, 5);
-    munit_assert_memory_equal(5, s0, "alice");
+    TEST_ASSERT_EQ_I(slen, 5);
+    TEST_ASSERT_MEM_EQ(5, s0, "alice");
     const char* s1 = ray_str_vec_get(name_col, 1, &slen);
-    munit_assert_int(slen, ==, 8);
-    munit_assert_memory_equal(8, s1, "REPLACED");
+    TEST_ASSERT_EQ_I(slen, 8);
+    TEST_ASSERT_MEM_EQ(8, s1, "REPLACED");
     const char* s2 = ray_str_vec_get(name_col, 2, &slen);
-    munit_assert_int(slen, ==, 5);
-    munit_assert_memory_equal(5, s2, "carol");
+    TEST_ASSERT_EQ_I(slen, 5);
+    TEST_ASSERT_MEM_EQ(5, s2, "carol");
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: table with mixed types rejects non-string in string column ---- */
-static MunitResult test_eval_table_mixed_type_error(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_table_mixed_type_error(void) {
     ray_t* result = ray_eval_str("(table ['s] (list [\"ok\" 42]))");
-    munit_assert_true(RAY_IS_ERR(result));
-    return MUNIT_OK;
+    TEST_ASSERT_TRUE(RAY_IS_ERR(result));
+    PASS();
 }
 
 /* ---- Test: update string column with non-string expr returns error ---- */
-static MunitResult test_eval_update_str_type_mismatch(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_update_str_type_mismatch(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['id 'name] (list [1 2 3] [\"alice\" \"bob\" \"carol\"]))) "
         "(update {name: id from: t where: (== id 2)}))");
-    munit_assert_true(RAY_IS_ERR(result));
-    return MUNIT_OK;
+    TEST_ASSERT_TRUE(RAY_IS_ERR(result));
+    PASS();
 }
 
 /* ---- Test: select constant over empty table ---- */
-static MunitResult test_eval_select_empty_const(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_select_empty_const(void) {
     /* Create table then filter all rows to get empty table */
     ray_t* result = ray_eval_str(
         "(do (set t (select {x: x from: (table ['x] (list [1])) where: (== x 0)})) "
         "(select {y: 1 from: t}))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 0);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 0);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: insert ---- */
-static MunitResult test_eval_insert(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['name 'salary] (list [1 2 3] [50000 60000 70000]))) "
         "(insert t (list 4 80000)))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 4);
     /* Verify last row */
     int64_t name_id = ray_sym_intern("name", 4);
     ray_t* name_col = ray_table_get_col(result, name_id);
-    munit_assert_int(((int64_t*)ray_data(name_col))[3], ==, 4);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(name_col))[3], 4);
     int64_t sal_id = ray_sym_intern("salary", 6);
     ray_t* sal_col = ray_table_get_col(result, sal_id);
-    munit_assert_int(((int64_t*)ray_data(sal_col))[3], ==, 80000);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(sal_col))[3], 80000);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: insert vec/list append (arity 2) ---- */
-static MunitResult test_eval_insert_vec_append(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert_vec_append(void) {
     ASSERT_EQ("(do (set v (til 5)) (insert 'v 99) v)", "[0 1 2 3 4 99]");
     ASSERT_EQ("(do (set v (til 3)) (insert 'v [10 20 30]) v)", "[0 1 2 10 20 30]");
     /* Return value mirrors the rebound v */
     ASSERT_EQ("(do (set v (til 3)) (insert 'v 9))", "[0 1 2 9]");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_eval_insert_list_append(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert_list_append(void) {
     ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l 42) l)", "(list 1 2 3 42)");
     /* Append a list as a single nested slot — never splice on append */
     ASSERT_EQ("(do (set l (list 1 2)) (insert 'l (list 9 8)) (count l))", "3");
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: insert positional (arity 3, scalar idx) ---- */
-static MunitResult test_eval_insert_vec_positional(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert_vec_positional(void) {
     /* Head, middle, tail (== append) */
     ASSERT_EQ("(do (set v (til 5)) (insert 'v 0 99) v)", "[99 0 1 2 3 4]");
     ASSERT_EQ("(do (set v (til 5)) (insert 'v 2 99) v)", "[0 1 99 2 3 4]");
@@ -2455,11 +2325,10 @@ static MunitResult test_eval_insert_vec_positional(const void* params, void* fix
     /* Out of range */
     ASSERT_ER("(do (set v (til 3)) (insert 'v -1 9))", "range");
     ASSERT_ER("(do (set v (til 3)) (insert 'v 4 9))", "range");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_eval_insert_list_positional(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert_list_positional(void) {
     ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l 0 99) l)", "(list 99 1 2 3)");
     ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l 1 99) l)", "(list 1 99 2 3)");
     ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l 3 99) l)", "(list 1 2 3 99)");
@@ -2468,12 +2337,11 @@ static MunitResult test_eval_insert_list_positional(const void* params, void* fi
     /* Out of range */
     ASSERT_ER("(do (set l (list 1 2)) (insert 'l -1 9))", "range");
     ASSERT_ER("(do (set l (list 1 2)) (insert 'l 3 9))", "range");
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: insert positional multi (arity 3, vec idx) ---- */
-static MunitResult test_eval_insert_positional_multi(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert_positional_multi(void) {
     /* Broadcast a single value across N pre-positions */
     ASSERT_EQ("(do (set v (til 5)) (insert 'v [0 2 4] 99) v)",
               "[99 0 1 99 2 3 99 4]");
@@ -2489,12 +2357,11 @@ static MunitResult test_eval_insert_positional_multi(const void* params, void* f
     /* List multi-insert */
     ASSERT_EQ("(do (set l (list 1 2 3)) (insert 'l [0 2] (list 10 30)) (count l))",
               "5");
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: insert preserves typed-null semantics ---- */
-static MunitResult test_eval_insert_typed_null(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert_typed_null(void) {
     /* Arity-2 atom append: null bit must carry through */
     ASSERT_EQ("(do (set v [1 2 3]) (insert 'v 0Nl) v)", "[1 2 3 0Nl]");
     /* Arity-3 scalar insert: null bit must carry through */
@@ -2504,12 +2371,11 @@ static MunitResult test_eval_insert_typed_null(const void* params, void* fixture
     /* Multi-insert broadcast of typed null */
     ASSERT_EQ("(do (set v [1 2 3 4 5]) (insert 'v [0 3] 0Nl) v)",
               "[0Nl 1 2 3 0Nl 4 5]");
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: insert preserves GUID atom payload ---- */
-static MunitResult test_eval_insert_guid(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert_guid(void) {
     /* Arity-2 atom append: inserted atom equals source atom */
     ASSERT_EQ("(do (set g (guid 3)) (set x (first (guid 1))) "
               "    (insert 'g x) (== x (get g 3)))", "true");
@@ -2527,24 +2393,24 @@ static MunitResult test_eval_insert_guid(const void* params, void* fixture) {
     /* Typed-null GUID atom (val->obj == NULL) — must be accepted and
      * stored with the null bit set, not rejected with "type". */
     ray_t* g = ray_vec_new(RAY_GUID, 2);
-    munit_assert_false(RAY_IS_ERR(g));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(g));
     g->len = 2;
     memset(ray_data(g), 0xAA, 2 * 16);
 
     ray_t* null_atom = ray_typed_null(-RAY_GUID);
-    munit_assert_false(RAY_IS_ERR(null_atom));
-    munit_assert_ptr_equal(null_atom->obj, NULL);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(null_atom));
+    TEST_ASSERT_EQ_PTR(null_atom->obj, NULL);
 
     g = ray_vec_insert_at(g, 1, null_atom->obj ? ray_data(null_atom->obj) : (const void*)"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
-    munit_assert_false(RAY_IS_ERR(g));
-    munit_assert_int(g->len, ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(g));
+    TEST_ASSERT_EQ_I(g->len, 3);
     ray_release(null_atom);
     ray_release(g);
 
     /* Now exercise the dispatcher path end-to-end — construct a GUID vec,
      * bind it, call ray_vec_insert_many directly with a typed-null broadcast. */
     ray_t* h = ray_vec_new(RAY_GUID, 3);
-    munit_assert_false(RAY_IS_ERR(h));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(h));
     h->len = 3;
     memset(ray_data(h), 0xBB, 3 * 16);
     ray_t* idxs = ray_vec_new(RAY_I64, 2);
@@ -2553,21 +2419,20 @@ static MunitResult test_eval_insert_guid(const void* params, void* fixture) {
     ((int64_t*)ray_data(idxs))[1] = 2;
     ray_t* nval = ray_typed_null(-RAY_GUID);
     ray_t* out = ray_vec_insert_many(h, idxs, nval);
-    munit_assert_false(RAY_IS_ERR(out));
-    munit_assert_int(out->len, ==, 5);
-    munit_assert_true(ray_vec_is_null(out, 0));
-    munit_assert_true(ray_vec_is_null(out, 3));
-    munit_assert_false(ray_vec_is_null(out, 1));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(out));
+    TEST_ASSERT_EQ_I(out->len, 5);
+    TEST_ASSERT_TRUE(ray_vec_is_null(out, 0));
+    TEST_ASSERT_TRUE(ray_vec_is_null(out, 3));
+    TEST_ASSERT_FALSE(ray_vec_is_null(out, 1));
     ray_release(nval);
     ray_release(idxs);
     ray_release(h);
     ray_release(out);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: insert error paths ---- */
-static MunitResult test_eval_insert_positional_errors(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_insert_positional_errors(void) {
     /* Unbound symbol */
     ASSERT_ER("(insert 'nope 0 9)", "domain");
     /* Vec target with non-I64 idx */
@@ -2579,125 +2444,118 @@ static MunitResult test_eval_insert_positional_errors(const void* params, void* 
     /* Slice target materializes and succeeds */
     ASSERT_EQ("(do (set v (til 5)) (set s (take v 3)) (insert 's 0 99) s)",
               "[99 0 1 2]");
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: upsert (update existing row) ---- */
-static MunitResult test_eval_upsert(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_upsert(void) {
     /* Upsert by 'name key — row with name=2 exists, update it */
     ray_t* result = ray_eval_str(
         "(do (set t (table ['name 'salary] (list [1 2 3] [50000 60000 70000]))) "
         "(upsert t 'name (list 2 99000)))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     /* Verify row 2's salary was updated */
     int64_t sal_id = ray_sym_intern("salary", 6);
     ray_t* sal_col = ray_table_get_col(result, sal_id);
-    munit_assert_int(((int64_t*)ray_data(sal_col))[1], ==, 99000);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(sal_col))[1], 99000);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: upsert with F64 key and I64 promotion ---- */
-static MunitResult test_eval_upsert_f64_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_upsert_f64_key(void) {
     /* Table has F64 key column; upsert with integer literal should promote */
     ray_t* result = ray_eval_str(
         "(do (set t (table ['k 'v] (list [1.0 2.0] [10 20]))) "
         "(upsert t 'k (list 2 99)))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* Should update, not insert — still 2 rows */
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t v_id = ray_sym_intern("v", 1);
     ray_t* v_col = ray_table_get_col(result, v_id);
-    munit_assert_int(((int64_t*)ray_data(v_col))[1], ==, 99);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(v_col))[1], 99);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: upsert with string key ---- */
-static MunitResult test_eval_upsert_str_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_upsert_str_key(void) {
     ray_t* result = ray_eval_str(
         "(do (set t (table ['k 'v] (list [\"a\" \"b\"] [1 2]))) "
         "(upsert t 'k (list \"b\" 99)))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* Should update row with key "b", not insert */
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t v_id = ray_sym_intern("v", 1);
     ray_t* v_col = ray_table_get_col(result, v_id);
-    munit_assert_int(((int64_t*)ray_data(v_col))[1], ==, 99);
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(v_col))[1], 99);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: upsert type mismatch returns error ---- */
-static MunitResult test_eval_upsert_type_mismatch(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_upsert_type_mismatch(void) {
     /* Passing integer key to string key column should return error, not crash */
     ray_t* result = ray_eval_str(
         "(do (set t (table ['k 'v] (list [\"a\" \"b\"] [1 2]))) "
         "(upsert t 'k (list 42 99)))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_true(RAY_IS_ERR(result));
-    return MUNIT_OK;
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_TRUE(RAY_IS_ERR(result));
+    PASS();
 }
 
 /* ---- Test: left join ---- */
-static MunitResult test_eval_left_join(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_left_join(void) {
     ray_t* result = ray_eval_str(
         "(do (set t1 (table ['id 'name] (list [1 2 3] [10 20 30]))) "
         "(set t2 (table ['id 'val] (list [1 3 4] [100 300 400]))) "
         "(left-join t1 t2 ['id]))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* All 3 left rows kept */
-    munit_assert_int(ray_table_nrows(result), ==, 3);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 3);
     /* Should have columns: id, name, val */
     int64_t val_id = ray_sym_intern("val", 3);
     ray_t* val_col = ray_table_get_col(result, val_id);
-    munit_assert_ptr_not_null(val_col);
+    TEST_ASSERT_NOT_NULL(val_col);
     int64_t* val_data = (int64_t*)ray_data(val_col);
-    munit_assert_int(val_data[0], ==, 100);  /* id=1 matched */
-    munit_assert_int(val_data[2], ==, 300);  /* id=3 matched */
+    TEST_ASSERT_EQ_I(val_data[0], 100);  /* id=1 matched */
+    TEST_ASSERT_EQ_I(val_data[2], 300);  /* id=3 matched */
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: inner join ---- */
-static MunitResult test_eval_inner_join(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_inner_join(void) {
     ray_t* result = ray_eval_str(
         "(do (set t1 (table ['id 'name] (list [1 2 3] [10 20 30]))) "
         "(set t2 (table ['id 'val] (list [1 3 4] [100 300 400]))) "
         "(inner-join t1 t2 ['id]))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* Only matching rows: id=1 and id=3 */
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     int64_t val_id = ray_sym_intern("val", 3);
     ray_t* val_col = ray_table_get_col(result, val_id);
-    munit_assert_ptr_not_null(val_col);
+    TEST_ASSERT_NOT_NULL(val_col);
     int64_t* val_data = (int64_t*)ray_data(val_col);
-    munit_assert_int(val_data[0], ==, 100);
-    munit_assert_int(val_data[1], ==, 300);
+    TEST_ASSERT_EQ_I(val_data[0], 100);
+    TEST_ASSERT_EQ_I(val_data[1], 300);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: window join (ASOF) ---- */
-static MunitResult test_eval_window_join(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_window_join(void) {
     /* ASOF join: for each left row, find closest right row with ts <= left.ts
      * within same sym partition */
     ray_t* result = ray_eval_str(
@@ -2706,105 +2564,100 @@ static MunitResult test_eval_window_join(const void* params, void* fixture) {
         "(set quotes (table ['sym 'ts 'bid] "
         "(list [1 1 1] [50 150 250] [5 15 25]))) "
         "(window-join trades quotes ['sym] 'ts))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
     /* 2 left rows, each matched to closest quote */
-    munit_assert_int(ray_table_nrows(result), ==, 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(result), 2);
     /* bid column from right: ts=100→bid=5 (closest ts=50), ts=200→bid=15 (closest ts=150) */
     int64_t bid_id = ray_sym_intern("bid", 3);
     ray_t* bid_col = ray_table_get_col(result, bid_id);
-    munit_assert_ptr_not_null(bid_col);
+    TEST_ASSERT_NOT_NULL(bid_col);
     int64_t* bid_data = (int64_t*)ray_data(bid_col);
-    munit_assert_int(bid_data[0], ==, 5);
-    munit_assert_int(bid_data[1], ==, 15);
+    TEST_ASSERT_EQ_I(bid_data[0], 5);
+    TEST_ASSERT_EQ_I(bid_data[1], 15);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: println ---- */
-static MunitResult test_eval_println(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_println(void) {
     ray_t* result = ray_eval_str("(println \"hello\")");
     /* println returns RAY_NULL_OBJ (no value — side-effect only) */
-    munit_assert_true(RAY_IS_NULL(result));
-    return MUNIT_OK;
+    TEST_ASSERT_TRUE(RAY_IS_NULL(result));
+    PASS();
 }
 
 /* ---- Sort decode-gather regression tests (2000+ rows → radix path) ---- */
 
-static MunitResult test_sort_decode_i64(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_decode_i64(void) {
     /* Random unsorted I64, large range (>2^24) → non-packed MSD radix → decode.
      * Verify: (1) every pair ordered, (2) sum preserved, (3) count preserved. */
     ray_t* tmp = ray_eval_str("(set _sv (rand 2000 100000000))");
     if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
     ray_t* s = ray_eval_str("(asc _sv)");
-    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
+    TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_sv");
-    munit_assert_int(ray_len(s), ==, 2000);
+    TEST_ASSERT_EQ_I(ray_len(s), 2000);
     int64_t* sd = (int64_t*)ray_data(s);
-    for (int64_t i = 0; i < 1999; i++) munit_assert_true(sd[i] <= sd[i + 1]);
+    for (int64_t i = 0; i < 1999; i++) TEST_ASSERT_TRUE(sd[i] <= sd[i + 1]);
     int64_t sum_orig = 0, sum_sorted = 0;
     int64_t* vd = (int64_t*)ray_data(v);
     for (int64_t i = 0; i < 2000; i++) { sum_orig += vd[i]; sum_sorted += sd[i]; }
-    munit_assert_true(sum_orig == sum_sorted);
+    TEST_ASSERT_TRUE(sum_orig == sum_sorted);
     ray_release(s); ray_release(v);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_sort_decode_f64(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_decode_f64(void) {
     /* Random unsorted F64 with negatives — always 8-byte keys → non-packed → decode. */
     ray_t* tmp = ray_eval_str("(set _sv (* 1.0 (- (rand 2000 2000000) 1000000)))");
     if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
     ray_t* s = ray_eval_str("(asc _sv)");
-    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
+    TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_sv");
     double* sd = (double*)ray_data(s);
-    for (int64_t i = 0; i < 1999; i++) munit_assert_true(sd[i] <= sd[i + 1]);
+    for (int64_t i = 0; i < 1999; i++) TEST_ASSERT_TRUE(sd[i] <= sd[i + 1]);
     double sum_orig = 0, sum_sorted = 0;
     double* vd = (double*)ray_data(v);
     for (int64_t i = 0; i < 2000; i++) { sum_orig += vd[i]; sum_sorted += sd[i]; }
-    munit_assert_double(sum_orig, ==, sum_sorted);
+    TEST_ASSERT((sum_orig) == (sum_sorted), "double == failed");
     ray_release(s); ray_release(v);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_sort_decode_desc(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_decode_desc(void) {
     /* Random unsorted I64 desc — large range → non-packed decode. */
     ray_t* tmp = ray_eval_str("(set _sv (rand 2000 100000000))");
     if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
     ray_t* s = ray_eval_str("(desc _sv)");
-    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
+    TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_sv");
     int64_t* sd = (int64_t*)ray_data(s);
-    for (int64_t i = 0; i < 1999; i++) munit_assert_true(sd[i] >= sd[i + 1]);
+    for (int64_t i = 0; i < 1999; i++) TEST_ASSERT_TRUE(sd[i] >= sd[i + 1]);
     int64_t sum_orig = 0, sum_sorted = 0;
     int64_t* vd = (int64_t*)ray_data(v);
     for (int64_t i = 0; i < 2000; i++) { sum_orig += vd[i]; sum_sorted += sd[i]; }
-    munit_assert_true(sum_orig == sum_sorted);
+    TEST_ASSERT_TRUE(sum_orig == sum_sorted);
     ray_release(s); ray_release(v);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_sort_decode_f64_neg(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_decode_f64_neg(void) {
     /* Random unsorted F64 desc with negatives — verify descending + sum. */
     ray_t* tmp = ray_eval_str("(set _sv (* 1.0 (- (rand 2000 2000000) 1000000)))");
     if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
     ray_t* s = ray_eval_str("(desc _sv)");
-    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
+    TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_sv");
     double* sd = (double*)ray_data(s);
-    for (int64_t i = 0; i < 1999; i++) munit_assert_true(sd[i] >= sd[i + 1]);
+    for (int64_t i = 0; i < 1999; i++) TEST_ASSERT_TRUE(sd[i] >= sd[i + 1]);
     double sum_orig = 0, sum_sorted = 0;
     double* vd = (double*)ray_data(v);
     for (int64_t i = 0; i < 2000; i++) { sum_orig += vd[i]; sum_sorted += sd[i]; }
-    munit_assert_double(sum_orig, ==, sum_sorted);
+    TEST_ASSERT((sum_orig) == (sum_sorted), "double == failed");
     ray_release(s); ray_release(v);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Tests: radix sort decode for n > RADIX_SORT_THRESHOLD (4096) ----
@@ -2812,53 +2665,50 @@ static MunitResult test_sort_decode_f64_neg(const void* params, void* fixture) {
  * ensure the radix sort double-buffer correctly hands back the sorted
  * keys for decode — the use-after-free that produced -nan on F64. */
 
-static MunitResult test_sort_decode_radix_f64(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_decode_radix_f64(void) {
     /* Tile 10 F64 values to 4097 (just past RADIX_SORT_THRESHOLD),
      * sort ascending, verify ordering and no NaN. */
     ray_t* s = ray_eval_str("(asc (take [9.9 1.1 5.5 3.3 7.7 2.2 8.8 4.4 6.6 0.0] 4097))");
-    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
-    munit_assert_int(ray_len(s), ==, 4097);
+    TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
+    TEST_ASSERT_EQ_I(ray_len(s), 4097);
     double* d = (double*)ray_data(s);
-    for (int64_t i = 0; i < 4097; i++) munit_assert_false(d[i] != d[i]); /* no NaN */
-    for (int64_t i = 0; i < 4096; i++) munit_assert_true(d[i] <= d[i + 1]);
-    munit_assert_double(d[0], ==, 0.0);
-    munit_assert_double(d[4096], ==, 9.9);
+    for (int64_t i = 0; i < 4097; i++) TEST_ASSERT_FALSE(d[i] != d[i]); /* no NaN */
+    for (int64_t i = 0; i < 4096; i++) TEST_ASSERT_TRUE(d[i] <= d[i + 1]);
+    TEST_ASSERT((d[0]) == (0.0), "double == failed");
+    TEST_ASSERT((d[4096]) == (9.9), "double == failed");
     ray_release(s);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_sort_decode_radix_f64_desc(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_decode_radix_f64_desc(void) {
     ray_t* s = ray_eval_str("(desc (take [9.9 1.1 5.5 -3.3 7.7 -2.2 8.8 -4.4 6.6 0.0] 5000))");
-    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
-    munit_assert_int(ray_len(s), ==, 5000);
+    TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
+    TEST_ASSERT_EQ_I(ray_len(s), 5000);
     double* d = (double*)ray_data(s);
-    for (int64_t i = 0; i < 5000; i++) munit_assert_false(d[i] != d[i]);
-    for (int64_t i = 0; i < 4999; i++) munit_assert_true(d[i] >= d[i + 1]);
-    munit_assert_double(d[0], ==, 9.9);
-    munit_assert_double(d[4999], ==, -4.4);
+    for (int64_t i = 0; i < 5000; i++) TEST_ASSERT_FALSE(d[i] != d[i]);
+    for (int64_t i = 0; i < 4999; i++) TEST_ASSERT_TRUE(d[i] >= d[i + 1]);
+    TEST_ASSERT((d[0]) == (9.9), "double == failed");
+    TEST_ASSERT((d[4999]) == (-4.4), "double == failed");
     ray_release(s);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_sort_decode_radix_i64(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_decode_radix_i64(void) {
     /* I64 with large range forces 8-byte radix keys → non-packed radix decode. */
     ray_t* tmp = ray_eval_str("(set _rv (rand 5000 100000000))");
     if (tmp && !RAY_IS_ERR(tmp)) ray_release(tmp);
     ray_t* s = ray_eval_str("(asc _rv)");
-    munit_assert_ptr_not_null(s); munit_assert_false(RAY_IS_ERR(s));
+    TEST_ASSERT_NOT_NULL(s); TEST_ASSERT_FALSE(RAY_IS_ERR(s));
     ray_t* v = ray_eval_str("_rv");
-    munit_assert_int(ray_len(s), ==, 5000);
+    TEST_ASSERT_EQ_I(ray_len(s), 5000);
     int64_t* sd = (int64_t*)ray_data(s);
-    for (int64_t i = 0; i < 4999; i++) munit_assert_true(sd[i] <= sd[i + 1]);
+    for (int64_t i = 0; i < 4999; i++) TEST_ASSERT_TRUE(sd[i] <= sd[i + 1]);
     int64_t sum_orig = 0, sum_sorted = 0;
     int64_t* vd = (int64_t*)ray_data(v);
     for (int64_t i = 0; i < 5000; i++) { sum_orig += vd[i]; sum_sorted += sd[i]; }
-    munit_assert_true(sum_orig == sum_sorted);
+    TEST_ASSERT_TRUE(sum_orig == sum_sorted);
     ray_release(s); ray_release(v);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Sort regression: long common prefix must not be quadratic ----
@@ -2868,36 +2718,35 @@ static MunitResult test_sort_decode_radix_i64(const void* params, void* fixture)
  * finds ordering in the suffix bytes.  A quadratic base-case fallback
  * at window exhaustion would time out on this input — the repack path
  * keeps it linear in total string bytes. */
-static MunitResult test_sort_long_common_prefix(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_long_common_prefix(void) {
     /* Build a column of 4000 strings with identical 40-byte prefix
      * followed by a 6-byte distinct suffix, inserted in reverse order
      * so the input is maximally unsorted. */
     const int64_t n = 4000;
     ray_t* col = ray_vec_new(RAY_STR, n);
-    munit_assert_ptr_not_null(col);
-    munit_assert_false(RAY_IS_ERR(col));
+    TEST_ASSERT_NOT_NULL(col);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(col));
     char buf[64];
     for (int64_t i = 0; i < n; i++) {
         int64_t v = n - 1 - i;
         snprintf(buf, sizeof buf,
                  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%06ld", (long)v);
         col = ray_str_vec_append(col, buf, strlen(buf));
-        munit_assert_false(RAY_IS_ERR(col));
+        TEST_ASSERT_FALSE(RAY_IS_ERR(col));
     }
     /* Sanity check the input: every row should be 46 bytes. */
-    munit_assert_int(ray_len(col), ==, n);
+    TEST_ASSERT_EQ_I(ray_len(col), n);
     for (int64_t i = 0; i < n; i++) {
         size_t l; const char* p = ray_str_vec_get(col, i, &l);
-        munit_assert_int((int)l, ==, 46);
+        TEST_ASSERT_EQ_I((int)l, 46);
         (void)p;
     }
     /* Bind the column into the Rayfall env and get sort indices. */
     ray_env_set(ray_sym_intern("_lcp", 4), col);
     ray_t* idx = ray_eval_str("(iasc _lcp)");
-    munit_assert_ptr_not_null(idx);
-    munit_assert_false(RAY_IS_ERR(idx));
-    munit_assert_int(ray_len(idx), ==, n);
+    TEST_ASSERT_NOT_NULL(idx);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(idx));
+    TEST_ASSERT_EQ_I(ray_len(idx), n);
     /* Walk the sort indices and verify each points to a string greater
      * than its predecessor. */
     int64_t* p = (int64_t*)ray_data(idx);
@@ -2911,14 +2760,14 @@ static MunitResult test_sort_long_common_prefix(const void* params, void* fixtur
             fprintf(stderr, "FAIL at i=%ld p[i-1]=%ld p[i]=%ld\n"
                             "  prev=%.46s\n  cur =%.46s\n",
                     (long)i, (long)p[i-1], (long)p[i], pa, pb);
-            munit_assert_true(0);
+            TEST_ASSERT_TRUE(0);
         }
         pa = pb;
         la = lb;
     }
     ray_release(idx);
     ray_release(col);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Sort regression: embedded NUL + prefix-of-each-other ---------
@@ -2937,258 +2786,241 @@ static MunitResult test_sort_long_common_prefix(const void* params, void* fixtur
  * window (parts_bytes=8 at the top level), so they all land in the
  * same top-level bucket, flow through uniform radix iterations, and
  * hit the any_tail=false short-circuit at the first repack. */
-static MunitResult test_sort_embedded_nul(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_sort_embedded_nul(void) {
     const int64_t per_group = 50;
     const int64_t n = 2 * per_group;  /* 100 > BASE_CASE */
     ray_t* col = ray_vec_new(RAY_STR, n);
-    munit_assert_ptr_not_null(col);
-    munit_assert_false(RAY_IS_ERR(col));
+    TEST_ASSERT_NOT_NULL(col);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(col));
     /* Interleave so the run-detection shortcut cannot fire — adjacent
      * pairs alternate (5,3) and (3,5), killing both monotone flags. */
     const char long_str[5] = { 'a', 'b', 'c', '\0', '\0' };
     for (int64_t k = 0; k < per_group; k++) {
         col = ray_str_vec_append(col, long_str, 5);
-        munit_assert_false(RAY_IS_ERR(col));
+        TEST_ASSERT_FALSE(RAY_IS_ERR(col));
         col = ray_str_vec_append(col, "abc", 3);
-        munit_assert_false(RAY_IS_ERR(col));
+        TEST_ASSERT_FALSE(RAY_IS_ERR(col));
     }
     ray_env_set(ray_sym_intern("_enul", 5), col);
     ray_t* idx = ray_eval_str("(iasc _enul)");
-    munit_assert_ptr_not_null(idx);
-    munit_assert_false(RAY_IS_ERR(idx));
-    munit_assert_int(ray_len(idx), ==, n);
+    TEST_ASSERT_NOT_NULL(idx);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(idx));
+    TEST_ASSERT_EQ_I(ray_len(idx), n);
     int64_t* p = (int64_t*)ray_data(idx);
     /* First per_group entries must point at the len-3 rows, next
      * per_group at the len-5 rows. */
     for (int64_t i = 0; i < per_group; i++) {
         size_t l;
         (void)ray_str_vec_get(col, p[i], &l);
-        munit_assert_int((int)l, ==, 3);
+        TEST_ASSERT_EQ_I((int)l, 3);
     }
     for (int64_t i = per_group; i < n; i++) {
         size_t l;
         (void)ray_str_vec_get(col, p[i], &l);
-        munit_assert_int((int)l, ==, 5);
+        TEST_ASSERT_EQ_I((int)l, 5);
     }
     ray_release(idx);
     ray_release(col);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: read/write CSV roundtrip ---- */
-static MunitResult test_eval_read_write_csv(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_read_write_csv(void) {
     /* Create a table, write it to CSV, read it back */
     ray_t* result = ray_eval_str(
         "(do (set t (table ['a 'b] (list [1 2 3] [10 20 30]))) "
         "(.csv.write t \"/tmp/test_rayfall.csv\") "
         "(set t2 (.csv.read \"/tmp/test_rayfall.csv\")) "
         "(count t2))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 3);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 3);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: as (type cast) ---- */
-static MunitResult test_eval_as_cast(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_as_cast(void) {
     ray_t* result = ray_eval_str("(as 'I64 \"42\")");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 42);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 42);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Test: type introspection ---- */
-static MunitResult test_eval_type(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_eval_type(void) {
     /* type returns a symbol name like 'i64, 'f64, 'b8 */
     ray_t* result = ray_eval_str("(type 42)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_SYM);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_SYM);
     ray_release(result);
     result = ray_eval_str("(type 3.14)");
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_SYM);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_SYM);
     ray_release(result);
     result = ray_eval_str("(type true)");
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_SYM);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_SYM);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Suite definition ---- */
 /* ---- Test: env prefix lookup ---- */
-static MunitResult test_env_lookup_prefix(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_env_lookup_prefix(void) {
     /* After ray_lang_init(), global env has builtins like "select", "sum", etc. */
     const char* results[64];
 
     /* Exact prefix match for "sum" — should find it */
     int64_t n = ray_env_lookup_prefix("sum", 3, results, 64);
-    munit_assert_int((int)n, >=, 1);
+    TEST_ASSERT(((int)n) >= (1), "(int)n >= 1");
     int found_sum = 0;
     for (int64_t i = 0; i < n; i++) {
         if (strcmp(results[i], "sum") == 0) { found_sum = 1; break; }
     }
-    munit_assert_true(found_sum);
+    TEST_ASSERT_TRUE(found_sum);
 
     /* Prefix "sel" should match "select" */
     n = ray_env_lookup_prefix("sel", 3, results, 64);
-    munit_assert_int((int)n, >=, 1);
+    TEST_ASSERT(((int)n) >= (1), "(int)n >= 1");
     int found_select = 0;
     for (int64_t i = 0; i < n; i++) {
         if (strcmp(results[i], "select") == 0) { found_select = 1; break; }
     }
-    munit_assert_true(found_select);
+    TEST_ASSERT_TRUE(found_select);
 
     /* Keywords: prefix "fn" should match keyword "fn" */
     n = ray_env_lookup_prefix("fn", 2, results, 64);
-    munit_assert_int((int)n, >=, 1);
+    TEST_ASSERT(((int)n) >= (1), "(int)n >= 1");
     int found_fn = 0;
     for (int64_t i = 0; i < n; i++) {
         if (strcmp(results[i], "fn") == 0) { found_fn = 1; break; }
     }
-    munit_assert_true(found_fn);
+    TEST_ASSERT_TRUE(found_fn);
 
     /* Nonsense prefix should return 0 */
     n = ray_env_lookup_prefix("zzzzz", 5, results, 64);
-    munit_assert_int((int)n, ==, 0);
+    TEST_ASSERT_EQ_I((int)n, 0);
 
     /* Results should be sorted */
     n = ray_env_lookup_prefix("a", 1, results, 64);
     for (int64_t i = 1; i < n; i++) {
-        munit_assert_int(strcmp(results[i - 1], results[i]), <=, 0);
+        TEST_ASSERT((strcmp(results[i - 1], results[i])) <= (0), "strcmp(results[i - 1], results[i]) <= 0");
     }
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Verb engine integration tests ---- */
 
-static MunitResult test_verb_sum_til(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_sum_til(void) {
     ray_t* result = ray_eval_str("(sum (til 100))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 4950);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 4950);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_avg_til(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_avg_til(void) {
     ray_t* result = ray_eval_str("(avg (til 10))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_F64);
-    munit_assert_double_equal(result->f64, 4.5, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_F64);
+    TEST_ASSERT_EQ_F(result->f64, 4.5, 1e-4);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_min_til(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_min_til(void) {
     ray_t* result = ray_eval_str("(min (til 10))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 0);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 0);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_max_til(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_max_til(void) {
     ray_t* result = ray_eval_str("(max (til 10))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 9);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 9);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_count_til(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_count_til(void) {
     ray_t* result = ray_eval_str("(count (til 100))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 100);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 100);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_first_til(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_first_til(void) {
     ray_t* result = ray_eval_str("(first (til 10))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 0);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 0);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_last_til(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_last_til(void) {
     ray_t* result = ray_eval_str("(last (til 10))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 9);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 9);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_dev_til(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_dev_til(void) {
     ray_t* result = ray_eval_str("(dev (til 10))");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_F64);
-    munit_assert_double_equal(result->f64, 2.8722813232690143, 4);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_F64);
+    TEST_ASSERT_EQ_F(result->f64, 2.8722813232690143, 1e-4);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_if_sum(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_if_sum(void) {
     ray_t* result = ray_eval_str("(if (> (sum (til 10)) 0) 1 0)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 1);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 1);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_verb_sum_var(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_verb_sum_var(void) {
     ray_t* result = ray_eval_str("(set x (til 10)) (sum x)");
-    munit_assert_ptr_not_null(result);
-    munit_assert_false(RAY_IS_ERR(result));
-    munit_assert_int(result->type, ==, -RAY_I64);
-    munit_assert_int(result->i64, ==, 45);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, -RAY_I64);
+    TEST_ASSERT_EQ_I(result->i64, 45);
     ray_release(result);
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Regression: binary op on boxed list with nested vector used to segfault
  * in release mode because the raw atom fn received a vector argument. */
-static MunitResult test_atomic_map_nested_vec(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_atomic_map_nested_vec(void) {
     /* scalar + list containing a vector → recursive auto-map */
     ASSERT_EQ("(+ 1 (list 1 2 (til 5)))", "(list 2 3 [1 2 3 4 5])");
     /* scalar + list containing only atoms (homogeneous) */
@@ -3197,37 +3029,34 @@ static MunitResult test_atomic_map_nested_vec(const void* params, void* fixture)
     ASSERT_EQ("(+ 10 (list 1 (list 2 3)))", "(list 11 (list 12 13))");
     /* type error still propagated for incompatible element */
     ASSERT_ER("(+ 1 (list 1 2 \"s\"))", "type");
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Verify that errors in compiled lambdas produce a trace with source info */
-static MunitResult test_error_trace_exists(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_error_trace_exists(void) {
     /* Eval a lambda that will error — the trace should be built */
     ray_clear_error_trace();
     ray_t* r = ray_eval_str("((fn [x] (+ x \"s\")) 1)");
-    munit_assert(RAY_IS_ERR(r));
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
     ray_t* trace = ray_get_error_trace();
-    munit_assert_ptr_not_null(trace);
-    munit_assert(ray_len(trace) > 0);
+    TEST_ASSERT_NOT_NULL(trace);
+    TEST_ASSERT_TRUE(ray_len(trace) > 0);
     /* First frame should have a span with non-zero id */
     ray_t* frame = ((ray_t**)ray_data(trace))[0];
-    munit_assert_ptr_not_null(frame);
-    munit_assert_int(ray_len(frame), ==, 4);
+    TEST_ASSERT_NOT_NULL(frame);
+    TEST_ASSERT_EQ_I(ray_len(frame), 4);
     ray_t** fe = (ray_t**)ray_data(frame);
-    munit_assert_ptr_not_null(fe[0]); /* span atom */
-    munit_assert(fe[0]->i64 != 0); /* non-zero span */
+    TEST_ASSERT_NOT_NULL(fe[0]); /* span atom */
+    TEST_ASSERT_TRUE(fe[0]->i64 != 0); /* non-zero span */
     ray_clear_error_trace();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════
  * Datalog: recursive rule (semi-naive fixpoint)
  * ═══════════════════════════════════════════════════════════════ */
 
-static MunitResult test_datalog_fixpoint(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_datalog_fixpoint(void) {
     /* Build an EAV database: 1->2, 2->3, 3->4 */
     ray_t* db = ray_eval_str(
         "(do"
@@ -3237,19 +3066,19 @@ static MunitResult test_datalog_fixpoint(const void* params, void* fixture) {
         "  (set db (assert-fact db 3 'edge 4))"
         "  db)"
     );
-    munit_assert(db != NULL);
-    munit_assert(!RAY_IS_ERR(db));
+    TEST_ASSERT_TRUE(db != NULL);
+    TEST_ASSERT_TRUE(!RAY_IS_ERR(db));
 
     /* Define base rule: (rule (path ?x ?y) (?x :edge ?y)) */
     ray_t* r1 = ray_eval_str("(rule (path ?x ?y) (?x :edge ?y))");
-    munit_assert(r1 != NULL);
-    munit_assert(!RAY_IS_ERR(r1));
+    TEST_ASSERT_TRUE(r1 != NULL);
+    TEST_ASSERT_TRUE(!RAY_IS_ERR(r1));
     ray_release(r1);
 
     /* Define recursive rule: (rule (path ?x ?z) (?x :edge ?y) (path ?y ?z)) */
     ray_t* r2 = ray_eval_str("(rule (path ?x ?z) (?x :edge ?y) (path ?y ?z))");
-    munit_assert(r2 != NULL);
-    munit_assert(!RAY_IS_ERR(r2));
+    TEST_ASSERT_TRUE(r2 != NULL);
+    TEST_ASSERT_TRUE(!RAY_IS_ERR(r2));
     ray_release(r2);
 
     /* Query: find all reachable pairs */
@@ -3261,28 +3090,26 @@ static MunitResult test_datalog_fixpoint(const void* params, void* fixture) {
         "  (set db (assert-fact db 3 'edge 4))"
         "  (query db (find ?x ?y) (where (path ?x ?y))))"
     );
-    munit_assert(result != NULL);
+    TEST_ASSERT_TRUE(result != NULL);
     if (RAY_IS_ERR(result)) {
         ray_t* es = ray_fmt(result, 0);
         fprintf(stderr, "  query error: %.*s\n",
                 (int)(es ? ray_str_len(es) : 0), es ? ray_str_ptr(es) : "?");
         if (es) ray_release(es);
-        return MUNIT_FAIL;
+        FAIL("explicit MUNIT_FAIL");
     }
-    munit_assert_int(result->type, ==, RAY_TABLE);
+    TEST_ASSERT_EQ_I(result->type, RAY_TABLE);
 
     /* Expect 6 rows: 1->2, 2->3, 3->4, 1->3, 2->4, 1->4 */
     int64_t nrows = ray_table_nrows(result);
-    munit_assert_int((int)nrows, ==, 6);
+    TEST_ASSERT_EQ_I((int)nrows, 6);
 
     ray_release(result);
     ray_release(db);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_datalog_query_inline_rules(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_datalog_query_inline_rules(void) {
     ray_t* r_inline = ray_eval_str(
         "(do"
         "  (set db (datoms))"
@@ -3294,10 +3121,10 @@ static MunitResult test_datalog_query_inline_rules(const void* params, void* fix
         "      ((path ?x ?y) (?x :edge ?y))"
         "      ((path ?x ?z) (?x :edge ?y) (path ?y ?z)))))"
     );
-    munit_assert(r_inline != NULL);
-    munit_assert(!RAY_IS_ERR(r_inline));
-    munit_assert_int(r_inline->type, ==, RAY_TABLE);
-    munit_assert_int((int)ray_table_nrows(r_inline), ==, 6);
+    TEST_ASSERT_TRUE(r_inline != NULL);
+    TEST_ASSERT_TRUE(!RAY_IS_ERR(r_inline));
+    TEST_ASSERT_EQ_I(r_inline->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I((int)ray_table_nrows(r_inline), 6);
     ray_release(r_inline);
 
     /* Global foo rule — inline rules omit it; foo yields no rows */
@@ -3309,9 +3136,9 @@ static MunitResult test_datalog_query_inline_rules(const void* params, void* fix
         "  (query db (find ?x) (where (foo ?x))"
         "    (rules ((path ?x ?y) (?x :edge ?y)))))"
     );
-    munit_assert(r_foo != NULL);
-    munit_assert(!RAY_IS_ERR(r_foo));
-    munit_assert_int((int)ray_table_nrows(r_foo), ==, 0);
+    TEST_ASSERT_TRUE(r_foo != NULL);
+    TEST_ASSERT_TRUE(!RAY_IS_ERR(r_foo));
+    TEST_ASSERT_EQ_I((int)ray_table_nrows(r_foo), 0);
     ray_release(r_foo);
 
     ray_t* r_global = ray_eval_str(
@@ -3321,25 +3148,22 @@ static MunitResult test_datalog_query_inline_rules(const void* params, void* fix
         "  (rule (foo ?x) (?x :edge 2))"
         "  (query db (find ?x) (where (foo ?x))))"
     );
-    munit_assert(r_global != NULL);
-    munit_assert(!RAY_IS_ERR(r_global));
-    munit_assert_int((int)ray_table_nrows(r_global), ==, 1);
+    TEST_ASSERT_TRUE(r_global != NULL);
+    TEST_ASSERT_TRUE(!RAY_IS_ERR(r_global));
+    TEST_ASSERT_EQ_I((int)ray_table_nrows(r_global), 1);
     ray_release(r_global);
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════
  * Ported rayforce lang tests (41 functions, ~3800 assertions)
  * ═══════════════════════════════════════════════════════════════ */
-#include "test_lang_rf.inc"
 
 /* Null bitmap propagation regression tests.
  * Verify that nulls survive through insert, left-join, select (head/tail/filter),
  * and group-by operations. */
-static MunitResult test_rf_null_propagate(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_rf_null_propagate(void) {
     /* INSERT preserves nulls in existing columns */
     ray_eval_str("(set __np_t (table [x] (list [1 0Nl 3])))");
     ray_eval_str("(set __np_t2 (insert __np_t (list 4)))");
@@ -3372,31 +3196,28 @@ static MunitResult test_rf_null_propagate(const void* params, void* fixture) {
         "(at (at (select {from: __np_ft where: (> a 1)}) 'b) 1)",
         "30");
 
-    return MUNIT_OK;
+    PASS();
 }
 
 /* ---- Dotted-name (namespace) resolution -------------------------------- */
 
-static MunitResult test_dotted_write_read(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_write_read(void) {
     ray_eval_str("(set math.pi 3.14)");
     ASSERT_EQ("math.pi", "3.14");
     /* The auto-created parent is a plain dict */
     ASSERT_EQ("math", "{pi: 3.14}");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dotted_multi_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_multi_key(void) {
     ray_eval_str("(set math2.pi 3.14)");
     ray_eval_str("(set math2.e  2.71)");
     ASSERT_EQ("math2.pi", "3.14");
     ASSERT_EQ("math2.e",  "2.71");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dotted_nested(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_nested(void) {
     ray_eval_str("(set cfg.db.host 1)");
     ray_eval_str("(set cfg.db.port 2)");
     ASSERT_EQ("cfg.db.host", "1");
@@ -3404,39 +3225,35 @@ static MunitResult test_dotted_nested(const void* params, void* fixture) {
     /* Deep create */
     ray_eval_str("(set a.b.c.d 42)");
     ASSERT_EQ("a.b.c.d", "42");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dotted_update_in_place(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_update_in_place(void) {
     ray_eval_str("(set ns.pi 3.14)");
     ray_eval_str("(set ns.e  2.71)");
     ray_eval_str("(set ns.pi 3.14159)");   /* overwrite existing key */
     ASSERT_EQ("ns.pi", "3.14159");
     ASSERT_EQ("ns.e",  "2.71");           /* sibling preserved */
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dotted_wrong_type_parent(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_wrong_type_parent(void) {
     ray_eval_str("(set xleaf 5)");
     /* Writing through a non-dict parent is a type error, not a silent override */
     ray_t* r = ray_eval_str("(set xleaf.y 1)");
-    munit_assert_true(RAY_IS_ERR(r));
-    return MUNIT_OK;
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
+    PASS();
 }
 
-static MunitResult test_dotted_missing_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_missing_key(void) {
     ray_eval_str("(set only.pi 3.14)");
     /* Reading a missing key under a real dict reports 'undefined' */
     ray_t* r = ray_eval_str("only.missing");
-    munit_assert_true(RAY_IS_ERR(r));
-    return MUNIT_OK;
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
+    PASS();
 }
 
-static MunitResult test_dotted_del_removes_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_del_removes_key(void) {
     ray_eval_str("(set __dns.x 5)");
     ray_eval_str("(set __dns.y 10)");
     ASSERT_EQ("__dns.x", "5");
@@ -3447,23 +3264,22 @@ static MunitResult test_dotted_del_removes_key(const void* params, void* fixture
     /* Sibling survives; removed key reports undefined on read. */
     ASSERT_EQ("__dns.y", "10");
     ray_t* r = ray_eval_str("__dns.x");
-    munit_assert_true(RAY_IS_ERR(r));
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
     /* The dict's cardinality reflects the removal (was 2 keys, now 1). */
     ASSERT_EQ("(count __dns)", "1");
 
     /* del on a missing leaf is a no-op (not an error). */
     ray_t* r2 = ray_eval_str("(del __dns.never_existed)");
-    munit_assert_false(RAY_IS_ERR(r2));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r2));
     ASSERT_EQ("(count __dns)", "1");
 
     /* del on a missing head is a no-op too. */
     ray_t* r3 = ray_eval_str("(del __missing.leaf)");
-    munit_assert_false(RAY_IS_ERR(r3));
-    return MUNIT_OK;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r3));
+    PASS();
 }
 
-static MunitResult test_dotted_del_nested(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_del_nested(void) {
     ray_eval_str("(set __abc.b.c 1)");
     ray_eval_str("(set __abc.b.d 2)");
     ray_eval_str("(del __abc.b.c)");
@@ -3471,19 +3287,17 @@ static MunitResult test_dotted_del_nested(const void* params, void* fixture) {
     ASSERT_EQ("__abc.b.d", "2");
     ASSERT_EQ("(count __abc.b)", "1");
     ray_t* r = ray_eval_str("__abc.b.c");
-    munit_assert_true(RAY_IS_ERR(r));
-    return MUNIT_OK;
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
+    PASS();
 }
 
-static MunitResult test_dotted_del_cascade(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_dotted_del_cascade(void) {
     /* Deleting the only key in a namespace removes the namespace itself. */
     ray_eval_str("(set __cascns.only 5)");
     ASSERT_EQ("__cascns.only", "5");
     ray_eval_str("(del __cascns.only)");
     ray_t* r = ray_eval_str("__cascns");
-    munit_assert_true(RAY_IS_ERR(r));   /* namespace gone, not left as {} */
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));   /* namespace gone, not left as {} */
 
     /* Deep cascade: a.b.c.d is the only key along the whole chain; deleting
      * it should remove `a` entirely (no stale empty `a` / `a.b` / `a.b.c`
@@ -3491,7 +3305,7 @@ static MunitResult test_dotted_del_cascade(const void* params, void* fixture) {
     ray_eval_str("(set __deep.b.c.d 1)");
     ray_eval_str("(del __deep.b.c.d)");
     r = ray_eval_str("__deep");
-    munit_assert_true(RAY_IS_ERR(r));
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
 
     /* Cascade stops at a level that still has siblings. */
     ray_eval_str("(set __mix.b.c.d 1)");
@@ -3500,13 +3314,12 @@ static MunitResult test_dotted_del_cascade(const void* params, void* fixture) {
     ASSERT_EQ("__mix.other", "2");
     ASSERT_EQ("(count __mix)", "1");    /* `b` chain cascaded out */
     r = ray_eval_str("__mix.b");
-    munit_assert_true(RAY_IS_ERR(r));   /* empty `b` should not remain */
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));   /* empty `b` should not remain */
 
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_nullable_f64_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_nullable_f64_key(void) {
     /* Nullable F64 key column: without null-awareness the new hash-based
      * first-idx path collided the null group with the 0.0 group — F64
      * null's bit pattern is -0.0, and ray_hash_f64 normalises -0.0 to
@@ -3530,11 +3343,10 @@ static MunitResult test_select_by_nullable_f64_key(const void* params, void* fix
     ASSERT_EQ("(nil? (at (at __ng 'Price) 0))", "false");
     ASSERT_EQ("(nil? (at (at __ng 'Price) 1))", "true");
     ASSERT_EQ("(nil? (at (at __ng 'Price) 2))", "false");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_computed_key_nullable_nonkey(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_computed_key_nullable_nonkey(void) {
     /* Computed key (by: (expr)) takes a third result-build path (lines
      * around query.c:2120 — ray_group_fn on the computed vector + scatter
      * non-key columns).  Same hazard as the other sites: dc->len wasn't
@@ -3557,11 +3369,10 @@ static MunitResult test_select_by_computed_key_nullable_nonkey(const void* param
     ASSERT_EQ("(nil? (at (at __cg 'Price) 0))", "false");   /* bucket 1 — row 0 = 10.0 */
     ASSERT_EQ("(nil? (at (at __cg 'Price) 1))", "true");    /* bucket 0 — row 1 = null */
     ASSERT_EQ("(+ 0.0 (at (at __cg 'Price) 0))", "10.0");   /* value preserved correctly */
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_str_nullable_nonkey(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_str_nullable_nonkey(void) {
     /* STR-keyed by-grouping routes through the eval_group fallback
      * (ray_group_fn → gather first-of-group), which is a separate result-
      * build site from the scalar-key DAG path.  Same hazard though: the
@@ -3576,11 +3387,10 @@ static MunitResult test_select_by_str_nullable_nonkey(const void* params, void* 
      * resulting Price column must be preserved. */
     ASSERT_EQ("(nil? (at (at __sg 'Price) 0))", "false");
     ASSERT_EQ("(nil? (at (at __sg 'Price) 1))", "true");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_nullable_i64_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_nullable_i64_key(void) {
     /* Nullable I64 key where a real 0 coexists with nulls — classic
      * collision scenario for raw-bit hashing of null sentinels. */
     ray_eval_str("(set __ni (table [Ord Key] (list (til 5) [0 0Nl 0 0Nl 7])))");
@@ -3589,12 +3399,10 @@ static MunitResult test_select_by_nullable_i64_key(const void* params, void* fix
     ASSERT_EQ("(at (at __ng 'Ord) 0)", "0");
     ASSERT_EQ("(at (at __ng 'Ord) 1)", "1");
     ASSERT_EQ("(at (at __ng 'Ord) 2)", "4");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_narrow_int_key(const void* params, void* fixture) {
-    (void)params; (void)fixture;
-
+static test_result_t test_select_by_narrow_int_key(void) {
     /* Non-F64 scalar integer columns (I32, I16, I8, BOOL, narrow SYM) hit
      * the same no-agg first-idx path.  The previous code read the key via
      * ray_read_sym, which interprets attrs as SYM adaptive width and
@@ -3604,8 +3412,8 @@ static MunitResult test_select_by_narrow_int_key(const void* params, void* fixtu
      * forces any regression to truncate and misgroup. */
     ray_eval_str("(set __niX (table [Age] (list (as 'I32 [300 700 300 700 1200]))))");
     ray_t* g = ray_eval_str("(select {from: __niX by: Age})");
-    munit_assert_ptr_not_null(g);
-    munit_assert_false(RAY_IS_ERR(g));
+    TEST_ASSERT_NOT_NULL(g);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(g));
     ray_release(g);
 
     ASSERT_EQ("(count (select {from: __niX by: Age}))", "3");
@@ -3621,11 +3429,10 @@ static MunitResult test_select_by_narrow_int_key(const void* params, void* fixtu
     ASSERT_EQ("(+ 0 (at (at (select {from: __niY by: Year}) 'Year) 0))", "2020");
     ASSERT_EQ("(+ 0 (at (at (select {from: __niY by: Year}) 'Year) 1))", "2024");
 
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_f64_perf(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_f64_perf(void) {
     /* Build a table with N rows where the F64 key column has N unique values
      * (0.0, 1.0, 2.0, ...), so every row ends up in its own group.  The old
      * first-of-group scan was O(N * n_groups) for non-GUID keys — quadratic
@@ -3635,19 +3442,18 @@ static MunitResult test_select_by_f64_perf(const void* params, void* fixture) {
     ray_eval_str("(set __sbn 2000)");
     ray_eval_str("(set __sbf (table [OrderId Price] (list (til __sbn) (as 'F64 (til __sbn)))))");
     ray_t* g = ray_eval_str("(select {from: __sbf by: Price})");
-    munit_assert_ptr_not_null(g);
-    munit_assert_false(RAY_IS_ERR(g));
+    TEST_ASSERT_NOT_NULL(g);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(g));
     ray_release(g);
     /* Every row is its own group. */
     ASSERT_EQ("(count (select {from: __sbf by: Price}))", "2000");
     /* Spot-check first-of-group matches OrderId at that row. */
     ASSERT_EQ("(at (at (select {from: __sbf by: Price}) 'OrderId) 0)",    "0");
     ASSERT_EQ("(at (at (select {from: __sbf by: Price}) 'OrderId) 1999)", "1999");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dotted_temporal_atom(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_temporal_atom(void) {
     /* DATE atom: dotted field access maps to temporal component extract.
      * The value is days since 2000-01-01, so 10000 lands in 2027-05-19
      * via Hinnant's civil_from_days decomposition. */
@@ -3662,11 +3468,10 @@ static MunitResult test_dotted_temporal_atom(const void* params, void* fixture) 
     ASSERT_EQ("__ts.hh",     "1");
     ASSERT_EQ("__ts.minute", "1");
     ASSERT_EQ("__ts.ss",     "1");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dotted_temporal_truncate_atom(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_temporal_truncate_atom(void) {
     /* `.date` / `.time` truncate a temporal value to day / second
      * boundary, returning RAY_TIMESTAMP.  Atom path: 90,000,000,000,000
      * ns = 1 day + 1 hour; truncating to day gives exactly 1 day =
@@ -3675,11 +3480,10 @@ static MunitResult test_dotted_temporal_truncate_atom(const void* params, void* 
     ray_eval_str("(set __tsa (as 'TIMESTAMP 90000000000000))");
     ASSERT_EQ("(as 'I64 __tsa.date)", "86400000000000");
     ASSERT_EQ("(as 'I64 __tsa.time)", "90000000000000");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_nonagg_dotted_temporal(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_nonagg_dotted_temporal(void) {
     /* Non-agg output expression using a dotted-temporal ref — e.g.
      * `s: Timestamp.ss` — must flow through the scatter path the same
      * way a plain column ref would.  Previously expr_bind_table_names
@@ -3691,19 +3495,18 @@ static MunitResult test_select_nonagg_dotted_temporal(const void* params, void* 
         "(list ['A 'B 'A 'B 'A] "
         "      (as 'TIMESTAMP [1000000000 2000000000 3000000000 4000000000 5000000000]))))");
     ray_t* r = ray_eval_str("(select {from: __sy by: Sym s: Ts.ss})");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
     ray_release(r);
     /* 2 groups (A, B).  Each group's `s` list contains the extracted
      * seconds for its rows: both A rows land in seconds 1/3/5, B in
      * 2/4 — all within second 0..5 of 2000-01-01 so ss = whole-second
      * index.  Spot-check lengths match source-row counts (3 and 2). */
     ASSERT_EQ("(count (select {from: __sy by: Sym s: Ts.ss}))", "2");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_computed_key_many_groups(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_computed_key_many_groups(void) {
     /* Regression: the computed-key fallback used a `fi2[256]` stack
      * array and silently capped the first-index sweep at 256 groups;
      * the downstream result-column loops still iterated up to ng2, so
@@ -3716,18 +3519,17 @@ static MunitResult test_select_by_computed_key_many_groups(const void* params, v
         "(list (as 'TIMESTAMP (* (til __mn) 86400000000000)) "
         "      (as 'F64 (til __mn)))))");
     ray_t* g = ray_eval_str("(select {from: __mt by: Ts.date})");
-    munit_assert_ptr_not_null(g);
-    munit_assert_false(RAY_IS_ERR(g));
+    TEST_ASSERT_NOT_NULL(g);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(g));
     ray_release(g);
     ASSERT_EQ("(count (select {from: __mt by: Ts.date}))", "500");
     /* Each group has exactly one source row, so the non-key column's
      * first-of-group value at position gi must equal gi. */
     ASSERT_EQ("(+ 0.0 (at (at (select {from: __mt by: Ts.date}) 'Price) 499))", "499.0");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_dotted_key_surfaces_key_col(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_dotted_key_surfaces_key_col(void) {
     /* Regression: (select {from: t by: <computed key>}) with no aggs
      * used to produce a result missing the grouping-key column — the
      * computed-key fallback defaulted ckey_name to "+", looked that up
@@ -3743,8 +3545,8 @@ static MunitResult test_select_by_dotted_key_surfaces_key_col(const void* params
         "(list [1 2 3 4 5 6] "
         "      (as 'TIMESTAMP [100000000 200000000 1100000000 1200000000 2100000000 2200000000]))))");
     ray_t* r = ray_eval_str("(select {from: __sb by: Timestamp.ss})");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
     ray_release(r);
     /* 3 groups (ss = 0, 1, 2), 3 columns (ss key + 2 source). */
     ASSERT_EQ("(count (select {from: __sb by: Timestamp.ss}))", "3");
@@ -3755,11 +3557,10 @@ static MunitResult test_select_by_dotted_key_surfaces_key_col(const void* params
     ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'OrderId) 0)", "1");
     ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'OrderId) 1)", "3");
     ASSERT_EQ("(at (at (select {from: __sb by: Timestamp.ss}) 'OrderId) 2)", "5");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_dotted_key_name_collision(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_dotted_key_name_collision(void) {
     /* Regression: when the dotted tail segment name matched a source
      * column that wasn't the head of the dotted expression, the old
      * code silently dropped that column from the result and the
@@ -3781,8 +3582,8 @@ static MunitResult test_select_by_dotted_key_name_collision(const void* params, 
         "(list (as 'TIMESTAMP [100000000 1100000000 2100000000]) "
         "      ['a 'b 'c])))");
     ray_t* r = ray_eval_str("(select {from: __sc by: Timestamp.ss})");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
     ray_release(r);
     /* 3 groups — key column promoted to full dotted name, source ss
      * preserved as a separate column with first-of-group values. */
@@ -3795,11 +3596,10 @@ static MunitResult test_select_by_dotted_key_name_collision(const void* params, 
     ASSERT_EQ("(at (at (select {from: __sc by: Timestamp.ss}) 'ss) 0)", "'a");
     ASSERT_EQ("(at (at (select {from: __sc by: Timestamp.ss}) 'ss) 1)", "'b");
     ASSERT_EQ("(at (at (select {from: __sc by: Timestamp.ss}) 'ss) 2)", "'c");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_atomic_map_empty_sym_str_compare(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_atomic_map_empty_sym_str_compare(void) {
     /* Regression: zero_atom_for_elem_type fell back to ray_i64(0) for
      * RAY_SYM / RAY_STR / RAY_GUID element types, so `(== empty_sym
      * 'foo)` probed an integer comparison and surfaced an empty I64
@@ -3813,11 +3613,10 @@ static MunitResult test_atomic_map_empty_sym_str_compare(const void* params, voi
     /* GUID comparison path — same principle. */
     ASSERT_EQ("(type (!= (as 'GUID []) (as 'GUID \"00000000-0000-0000-0000-000000000000\")))",
               "'B8");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_xbar_empty_type(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_xbar_empty_type(void) {
     /* Regression: atomic_map_{unary,binary}_op returned a hardcoded I64
      * empty vector when the input collection had zero elements — which
      * then propagated to the empty-result key-column type.  For
@@ -3826,8 +3625,8 @@ static MunitResult test_select_by_xbar_empty_type(const void* params, void* fixt
      * non-empty one (and the source Ts column's type). */
     ray_eval_str("(set __xe (table [Sym Ts] (list (as 'SYM []) (as 'TIME []))))");
     ray_t* r = ray_eval_str("(select {from: __xe by: (xbar Ts 10000)})");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
     ray_release(r);
     ASSERT_EQ("(count (select {from: __xe by: (xbar Ts 10000)}))", "0");
     ASSERT_EQ("(type (at (select {from: __xe by: (xbar Ts 10000)}) 'Ts))", "'TIME");
@@ -3837,11 +3636,10 @@ static MunitResult test_select_by_xbar_empty_type(const void* params, void* fixt
      * returns TIMESTAMP per ray_temporal_truncate). */
     ray_eval_str("(set __xe2 (table [Timestamp] (list (as 'TIMESTAMP []))))");
     ASSERT_EQ("(type (at (select {from: __xe2 by: Timestamp.date}) 'date))", "'TIMESTAMP");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_dotted_key_empty_schema(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_dotted_key_empty_schema(void) {
     /* Regression: when `select by <dotted>` produced zero groups
      * (empty source, or all rows filtered out), the empty-result
      * schema only copied source columns — the key column was dropped
@@ -3851,8 +3649,8 @@ static MunitResult test_select_by_dotted_key_empty_schema(const void* params, vo
      * the result schema misreports the column set. */
     ray_eval_str("(set __se (table [Timestamp Price] (list (as 'TIMESTAMP []) [])))");
     ray_t* r = ray_eval_str("(select {from: __se by: Timestamp.ss})");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
     ray_release(r);
     ASSERT_EQ("(count (select {from: __se by: Timestamp.ss}))", "0");
     /* Probe each expected column: `at` on a table returns the column
@@ -3863,11 +3661,10 @@ static MunitResult test_select_by_dotted_key_empty_schema(const void* params, vo
     ASSERT_EQ("(type (at (select {from: __se by: Timestamp.ss}) 'ss))", "'I64");
     ASSERT_EQ("(count (at (select {from: __se by: Timestamp.ss}) 'Timestamp))", "0");
     ASSERT_EQ("(count (at (select {from: __se by: Timestamp.ss}) 'Price))", "0");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_select_by_dotted_temporal_key_nocrash(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_select_by_dotted_temporal_key_nocrash(void) {
     /* Regression: (select {from: t by: Timestamp.date}) used to crash
      * in group_rows_range because the dotted sym was emitted as a scan
      * of the non-existent column "Timestamp.date".  After the fix,
@@ -3880,15 +3677,14 @@ static MunitResult test_select_by_dotted_temporal_key_nocrash(const void* params
         "(list (as 'TIMESTAMP [0 3600000000000 86400000000000 90000000000000 172800000000000]) "
         "      [1.0 2.0 3.0 4.0 5.0])))");
     ray_t* r = ray_eval_str("(select {from: __tb by: Timestamp.date})");
-    munit_assert_ptr_not_null(r);
-    munit_assert_false(RAY_IS_ERR(r));
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(r));
     ray_release(r);
     ASSERT_EQ("(count (select {from: __tb by: Timestamp.date}))", "3");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dotted_temporal_vector(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_temporal_vector(void) {
     /* DATE vector extraction returns an I64 vector of the same length. */
     ray_eval_str("(set __dv (as 'DATE [0 366 731]))");
     /* 2000-01-01, 2001-01-01, 2002-01-01 */
@@ -3897,11 +3693,10 @@ static MunitResult test_dotted_temporal_vector(const void* params, void* fixture
     ASSERT_EQ("(at __dv.yyyy 2)", "2002");
     ASSERT_EQ("(at __dv.mm 0)",   "1");
     ASSERT_EQ("(at __dv.dd 0)",   "1");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dag_temporal_extract_nulls(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dag_temporal_extract_nulls(void) {
     /* Regression: DAG-path OP_EXTRACT / OP_DATE_TRUNC (emitted by
      * compile_expr_dag when a dotted-temporal sym is referenced by a
      * query) used to decode the raw null-sentinel bytes and emit bogus
@@ -3927,11 +3722,10 @@ static MunitResult test_dag_temporal_extract_nulls(const void* params, void* fix
     /* OP_DATE_TRUNC path: `.date` truncates to day boundary and emits
      * a TIMESTAMP column.  Null row must stay 0Np. */
     ASSERT_EQ("(at (at (select {from: __dvt s: Ts.date}) 's) 1)", "0Np");
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_temporal_extract_slice_nulls(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_temporal_extract_slice_nulls(void) {
     /* Regression: HAS_NULLS lives on the storage owner, not on slice
      * views — `(input->attrs & RAY_ATTR_HAS_NULLS)` alone misses nulls
      * when `input` is a slice pointing at a nullable parent.  Mirrors
@@ -3941,48 +3735,47 @@ static MunitResult test_temporal_extract_slice_nulls(const void* params, void* f
      * ns → µs internally and returns whole-second indices. */
     int64_t raw[5] = {1000000000, 2000000000, 0, 4000000000, 5000000000};
     ray_t* v = ray_vec_from_raw(RAY_TIMESTAMP, raw, 5);
-    munit_assert_ptr_not_null(v);
+    TEST_ASSERT_NOT_NULL(v);
     ray_vec_set_null(v, 2, true);
-    munit_assert_true((v->attrs & RAY_ATTR_HAS_NULLS) != 0);
-    munit_assert_true(ray_vec_is_null(v, 2));
+    TEST_ASSERT_TRUE((v->attrs & RAY_ATTR_HAS_NULLS) != 0);
+    TEST_ASSERT_TRUE(ray_vec_is_null(v, 2));
 
     /* Slice [1..4): {2s, null, 4s}.  Slice itself does not carry
      * HAS_NULLS; only the parent does. */
     ray_t* s = ray_vec_slice(v, 1, 3);
-    munit_assert_ptr_not_null(s);
-    munit_assert_false(RAY_IS_ERR(s));
-    munit_assert_true((s->attrs & RAY_ATTR_SLICE) != 0);
-    munit_assert_false((s->attrs & RAY_ATTR_HAS_NULLS) != 0);
-    munit_assert_true(ray_vec_is_null(s, 1));
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(s));
+    TEST_ASSERT_TRUE((s->attrs & RAY_ATTR_SLICE) != 0);
+    TEST_ASSERT_FALSE((s->attrs & RAY_ATTR_HAS_NULLS) != 0);
+    TEST_ASSERT_TRUE(ray_vec_is_null(s, 1));
 
     /* Extract seconds.  Without slice-aware null detection this path
      * decoded raw=0 at index 1 and emitted `ss=0` with no null bit. */
     ray_t* ss = ray_temporal_extract(s, RAY_EXTRACT_SECOND);
-    munit_assert_ptr_not_null(ss);
-    munit_assert_false(RAY_IS_ERR(ss));
-    munit_assert_int(ss->len, ==, 3);
-    munit_assert_true(ray_vec_is_null(ss, 1));
-    munit_assert_false(ray_vec_is_null(ss, 0));
-    munit_assert_false(ray_vec_is_null(ss, 2));
+    TEST_ASSERT_NOT_NULL(ss);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ss));
+    TEST_ASSERT_EQ_I(ss->len, 3);
+    TEST_ASSERT_TRUE(ray_vec_is_null(ss, 1));
+    TEST_ASSERT_FALSE(ray_vec_is_null(ss, 0));
+    TEST_ASSERT_FALSE(ray_vec_is_null(ss, 2));
     int64_t* out = (int64_t*)ray_data(ss);
-    munit_assert_int(out[0], ==, 2);
-    munit_assert_int(out[2], ==, 4);
+    TEST_ASSERT_EQ_I(out[0], 2);
+    TEST_ASSERT_EQ_I(out[2], 4);
 
     /* Same shape for truncate (.date / .time path). */
     ray_t* tr = ray_temporal_truncate(s, RAY_EXTRACT_DAY);
-    munit_assert_ptr_not_null(tr);
-    munit_assert_false(RAY_IS_ERR(tr));
-    munit_assert_true(ray_vec_is_null(tr, 1));
+    TEST_ASSERT_NOT_NULL(tr);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(tr));
+    TEST_ASSERT_TRUE(ray_vec_is_null(tr, 1));
 
     ray_release(tr);
     ray_release(ss);
     ray_release(s);
     ray_release(v);
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_dotted_temporal_table_column(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_temporal_table_column(void) {
     /* t.col.field — chains through table → column → temporal extraction.
      * Exercises the three probe steps in ray_env_resolve's dotted walk
      * (scope/global for t, table column for Date, temporal extract for
@@ -3995,12 +3788,11 @@ static MunitResult test_dotted_temporal_table_column(const void* params, void* f
     /* Missing temporal field still reports undefined (matches every
      * other "nothing matched" dotted failure). */
     ray_t* r = ray_eval_str("__tt.Date.nope");
-    munit_assert_true(RAY_IS_ERR(r));
-    return MUNIT_OK;
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
+    PASS();
 }
 
-static MunitResult test_dotted_table_column(const void* params, void* fixture) {
-    (void)params; (void)fixture;
+static test_result_t test_dotted_table_column(void) {
     ray_eval_str("(set __tbl (table [OrderId Price] (list [10 20 30] [1.0 2.0 3.0])))");
     /* t.col returns the column; it behaves as a vector downstream. */
     ASSERT_EQ("(at __tbl.OrderId 0)", "10");
@@ -4009,248 +3801,203 @@ static MunitResult test_dotted_table_column(const void* params, void* fixture) {
     ASSERT_EQ("(sum __tbl.Price)",    "6.0");
     /* Missing column surfaces as 'undefined' (same as a missing dict key). */
     ray_t* r = ray_eval_str("__tbl.NotAColumn");
-    munit_assert_true(RAY_IS_ERR(r));
-    return MUNIT_OK;
+    TEST_ASSERT_TRUE(RAY_IS_ERR(r));
+    PASS();
 }
 
-static MunitTest lang_tests[] = {
-    { "/fn_unary",   test_fn_unary,   lang_setup, lang_teardown, 0, NULL },
-    { "/fn_binary",  test_fn_binary,  lang_setup, lang_teardown, 0, NULL },
-    { "/fn_vary",    test_fn_vary,    lang_setup, lang_teardown, 0, NULL },
-    { "/lex/i64",    test_lex_i64,    lang_setup, lang_teardown, 0, NULL },
-    { "/lex/neg_i64",test_lex_neg_i64,lang_setup, lang_teardown, 0, NULL },
-    { "/lex/f64",    test_lex_f64,    lang_setup, lang_teardown, 0, NULL },
-    { "/lex/string", test_lex_string, lang_setup, lang_teardown, 0, NULL },
-    { "/lex/symbol", test_lex_symbol, lang_setup, lang_teardown, 0, NULL },
-    { "/lex/bool",   test_lex_bool,   lang_setup, lang_teardown, 0, NULL },
-    { "/parse/sexpr",      test_parse_sexpr,      lang_setup, lang_teardown, 0, NULL },
-    { "/parse/nested",     test_parse_nested,     lang_setup, lang_teardown, 0, NULL },
-    { "/parse/vector",     test_parse_vector,     lang_setup, lang_teardown, 0, NULL },
-    { "/parse/empty_list", test_parse_empty_list, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/literal",      test_eval_literal,      lang_setup, lang_teardown, 0, NULL },
-    { "/eval/add",          test_eval_add,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/nested_arith", test_eval_nested_arith, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/sub",          test_eval_sub,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/div",          test_eval_div,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/cmp",          test_eval_cmp,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/set",          test_eval_set,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/if_true",      test_eval_if_true,      lang_setup, lang_teardown, 0, NULL },
-    { "/eval/if_false",     test_eval_if_false,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/let",          test_eval_let,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/lambda",       test_eval_lambda,       lang_setup, lang_teardown, 0, NULL },
-    { "/eval/lambda_multi", test_eval_lambda_multi, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/lambda_let",   test_eval_lambda_let,   lang_setup, lang_teardown, 0, NULL },
-    { "/compile/basic",     test_compile_basic,     lang_setup, lang_teardown, 0, NULL },
-    { "/compile/closure",   test_compile_closure,   lang_setup, lang_teardown, 0, NULL },
-    { "/vm/fib",            test_vm_fib,            lang_setup, lang_teardown, 0, NULL },
-    { "/vm/loop",           test_vm_loop,           lang_setup, lang_teardown, 0, NULL },
-    { "/eval/try",          test_eval_try,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/raise",        test_eval_raise,        lang_setup, lang_teardown, 0, NULL },
-    { "/eval/vector_add",      test_eval_vector_add,      lang_setup, lang_teardown, 0, NULL },
-    { "/eval/vector_add_vec",  test_eval_vector_add_vec,  lang_setup, lang_teardown, 0, NULL },
-    { "/eval/sum",             test_eval_sum,             lang_setup, lang_teardown, 0, NULL },
-    { "/eval/count",           test_eval_count,           lang_setup, lang_teardown, 0, NULL },
-    { "/eval/avg",             test_eval_avg,             lang_setup, lang_teardown, 0, NULL },
-    { "/eval/min_max",         test_eval_min_max,         lang_setup, lang_teardown, 0, NULL },
-    { "/eval/first_last",      test_eval_first_last,      lang_setup, lang_teardown, 0, NULL },
-    { "/eval/map",             test_eval_map,             lang_setup, lang_teardown, 0, NULL },
-    { "/eval/pmap",            test_eval_pmap,            lang_setup, lang_teardown, 0, NULL },
-    { "/eval/fold",            test_eval_fold,            lang_setup, lang_teardown, 0, NULL },
-    { "/eval/scan",            test_eval_scan,            lang_setup, lang_teardown, 0, NULL },
-    { "/eval/filter",          test_eval_filter,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/apply",           test_eval_apply,           lang_setup, lang_teardown, 0, NULL },
-    { "/eval/distinct",        test_eval_distinct,        lang_setup, lang_teardown, 0, NULL },
-    { "/eval/in",              test_eval_in,              lang_setup, lang_teardown, 0, NULL },
-    { "/eval/except",          test_eval_except,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/union",           test_eval_union,           lang_setup, lang_teardown, 0, NULL },
-    { "/eval/sect",            test_eval_sect,            lang_setup, lang_teardown, 0, NULL },
-    { "/eval/take",            test_eval_take,            lang_setup, lang_teardown, 0, NULL },
-    { "/eval/take_neg",        test_eval_take_neg,        lang_setup, lang_teardown, 0, NULL },
-    { "/eval/at",              test_eval_at,              lang_setup, lang_teardown, 0, NULL },
-    { "/eval/find",            test_eval_find,            lang_setup, lang_teardown, 0, NULL },
-    { "/eval/reverse",         test_eval_reverse,         lang_setup, lang_teardown, 0, NULL },
-    { "/eval/table",           test_eval_table,           lang_setup, lang_teardown, 0, NULL },
-    { "/eval/at_table",        test_eval_at_table,        lang_setup, lang_teardown, 0, NULL },
-    { "/eval/key_table",       test_eval_key_table,       lang_setup, lang_teardown, 0, NULL },
-    { "/eval/count_table",     test_eval_count_table,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_all",      test_eval_select_all,      lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where",    test_eval_select_where,    lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where_in_sym",   test_eval_select_where_in_sym,   lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where_in_i64",   test_eval_select_where_in_i64,   lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where_in_mixed_numeric", test_eval_select_where_in_mixed_numeric, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where_in_nulls", test_eval_select_where_in_nulls, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where_in_empty_set_nulls", test_eval_select_where_in_empty_set_nulls, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where_in_sym_vs_atom_mismatch", test_eval_select_where_in_sym_vs_atom_mismatch, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where_eq_null_literal", test_eval_select_where_eq_null_literal, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/pivot_multi_index", test_eval_pivot_multi_index, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_named_lambda", test_eval_select_named_lambda, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_global_scalar", test_eval_select_global_scalar, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_lambda_nonagg",        test_eval_select_lambda_nonagg,        lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_lambda_where",         test_eval_select_lambda_where,         lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_lambda_agg",           test_eval_select_lambda_agg,           lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_let_binding",          test_eval_select_let_binding,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_lambda_nested_shadow", test_eval_select_lambda_nested_shadow, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_lambda_arg_reuse",     test_eval_select_lambda_arg_reuse,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_lambda_arity_err",     test_eval_select_lambda_arity_err,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_where_in",    test_eval_select_by_where_in,    lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_if",             test_eval_select_if,             lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_where_sym_atom", test_eval_select_where_sym_atom, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_cast",           test_eval_select_cast,           lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_round",          test_eval_select_round,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_cols",     test_eval_select_cols,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_groupby",  test_eval_select_groupby,  lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_xbar",     test_eval_select_xbar,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_asc",      test_eval_select_asc,      lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_desc",     test_eval_select_desc,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_asc_desc", test_eval_select_asc_desc, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_take",     test_eval_select_take,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_take_neg", test_eval_select_take_neg, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_take_range", test_eval_select_take_range, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_combined", test_eval_select_combined, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_asc_multi", test_eval_select_asc_multi, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_groupby_sort", test_eval_select_groupby_sort, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_nonagg_i64_key", test_eval_select_by_nonagg_i64_key, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_nonagg_u8_key",  test_eval_select_by_nonagg_u8_key,  lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_nonagg_empty",   test_eval_select_by_nonagg_empty,   lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_mixed_naming",   test_eval_select_by_mixed_naming,   lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_nonagg_list_col", test_eval_select_by_nonagg_list_col, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_str_nonagg_list_col", test_eval_select_by_str_nonagg_list_col, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_nonagg_broadcast",    test_eval_select_by_nonagg_broadcast,    lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_nonagg_colref_vs_const", test_eval_select_by_nonagg_colref_vs_const, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_nonagg_with_agg_subexpr", test_eval_select_by_nonagg_with_agg_subexpr, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_nonagg_sort_take",        test_eval_select_by_nonagg_sort_take,        lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_take_clamps",             test_eval_select_by_take_clamps,             lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_vec_bool_order", test_eval_select_by_vec_bool_order, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_vec_str_key",    test_eval_select_by_vec_str_key,    lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_by_multi_nonagg_nyi", test_eval_select_by_multi_nonagg_nyi, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/update",          test_eval_update,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/update_no_where", test_eval_update_no_where, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/update_str_masked", test_eval_update_str_masked, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/table_mixed_type_error", test_eval_table_mixed_type_error, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/update_str_type_mismatch", test_eval_update_str_type_mismatch, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/select_empty_const", test_eval_select_empty_const, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert",          test_eval_insert,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert_vec_append",       test_eval_insert_vec_append,       lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert_list_append",      test_eval_insert_list_append,      lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert_vec_positional",   test_eval_insert_vec_positional,   lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert_list_positional",  test_eval_insert_list_positional,  lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert_positional_multi", test_eval_insert_positional_multi, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert_typed_null",       test_eval_insert_typed_null,       lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert_guid",             test_eval_insert_guid,             lang_setup, lang_teardown, 0, NULL },
-    { "/eval/insert_positional_errors", test_eval_insert_positional_errors, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/upsert",          test_eval_upsert,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/upsert_f64_key",  test_eval_upsert_f64_key,  lang_setup, lang_teardown, 0, NULL },
-    { "/eval/upsert_str_key",  test_eval_upsert_str_key,  lang_setup, lang_teardown, 0, NULL },
-    { "/eval/upsert_type_mismatch", test_eval_upsert_type_mismatch, lang_setup, lang_teardown, 0, NULL },
-    { "/eval/left_join",       test_eval_left_join,       lang_setup, lang_teardown, 0, NULL },
-    { "/eval/inner_join",      test_eval_inner_join,      lang_setup, lang_teardown, 0, NULL },
-    { "/eval/window_join",     test_eval_window_join,     lang_setup, lang_teardown, 0, NULL },
-    { "/eval/println",         test_eval_println,         lang_setup, lang_teardown, 0, NULL },
-    { "/sort/decode_i64",      test_sort_decode_i64,      lang_setup, lang_teardown, 0, NULL },
-    { "/sort/decode_f64",      test_sort_decode_f64,      lang_setup, lang_teardown, 0, NULL },
-    { "/sort/decode_desc",     test_sort_decode_desc,     lang_setup, lang_teardown, 0, NULL },
-    { "/sort/decode_f64_neg",  test_sort_decode_f64_neg,  lang_setup, lang_teardown, 0, NULL },
-    { "/sort/decode_radix_f64",      test_sort_decode_radix_f64,      lang_setup, lang_teardown, 0, NULL },
-    { "/sort/decode_radix_f64_desc", test_sort_decode_radix_f64_desc, lang_setup, lang_teardown, 0, NULL },
-    { "/sort/decode_radix_i64",      test_sort_decode_radix_i64,      lang_setup, lang_teardown, 0, NULL },
-    { "/sort/long_common_prefix",    test_sort_long_common_prefix,    lang_setup, lang_teardown, 0, NULL },
-    { "/sort/embedded_nul",          test_sort_embedded_nul,          lang_setup, lang_teardown, 0, NULL },
-    { "/eval/read_write_csv",  test_eval_read_write_csv,  lang_setup, lang_teardown, 0, NULL },
-    { "/eval/as_cast",         test_eval_as_cast,         lang_setup, lang_teardown, 0, NULL },
-    { "/eval/type",            test_eval_type,            lang_setup, lang_teardown, 0, NULL },
-    { "/env/lookup_prefix",    test_env_lookup_prefix,    lang_setup, lang_teardown, 0, NULL },
-    { "/verb/sum_til",         test_verb_sum_til,         lang_setup, lang_teardown, 0, NULL },
-    { "/verb/avg_til",         test_verb_avg_til,         lang_setup, lang_teardown, 0, NULL },
-    { "/verb/min_til",         test_verb_min_til,         lang_setup, lang_teardown, 0, NULL },
-    { "/verb/max_til",         test_verb_max_til,         lang_setup, lang_teardown, 0, NULL },
-    { "/verb/count_til",       test_verb_count_til,       lang_setup, lang_teardown, 0, NULL },
-    { "/verb/first_til",       test_verb_first_til,       lang_setup, lang_teardown, 0, NULL },
-    { "/verb/last_til",        test_verb_last_til,        lang_setup, lang_teardown, 0, NULL },
-    { "/verb/dev_til",         test_verb_dev_til,         lang_setup, lang_teardown, 0, NULL },
-    { "/verb/if_sum",          test_verb_if_sum,          lang_setup, lang_teardown, 0, NULL },
-    { "/verb/sum_var",         test_verb_sum_var,         lang_setup, lang_teardown, 0, NULL },
-    { "/atomic_map_nested_vec", test_atomic_map_nested_vec, lang_setup, lang_teardown, 0, NULL },
-    { "/error_trace_exists",    test_error_trace_exists,    lang_setup, lang_teardown, 0, NULL },
-    /* Ported rayforce lang tests */
-    { "/rf/map",                   test_rf_map,           lang_setup, lang_teardown, 0, NULL },
-    { "/rf/basic",                 test_rf_basic,         lang_setup, lang_teardown, 0, NULL },
-    { "/rf/math",                  test_rf_math,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/take",                  test_rf_take,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/split",                 test_rf_split,         lang_setup, lang_teardown, 0, NULL },
-    { "/rf/query",                 test_rf_query,         lang_setup, lang_teardown, 0, NULL },
-    { "/rf/update",                test_rf_update,        lang_setup, lang_teardown, 0, NULL },
-    { "/rf/serde",                 test_rf_serde,         lang_setup, lang_teardown, 0, NULL },
-    { "/rf/temporal_bare",         test_rf_temporal_bare, lang_setup, lang_teardown, 0, NULL },
-    { "/rf/reserved_namespace",    test_rf_reserved_namespace, lang_setup, lang_teardown, 0, NULL },
-    { "/rf/literals",              test_rf_literals,      lang_setup, lang_teardown, 0, NULL },
-    { "/rf/cmp",                   test_rf_cmp,           lang_setup, lang_teardown, 0, NULL },
-    { "/rf/distinct",              test_rf_distinct,      lang_setup, lang_teardown, 0, NULL },
-    { "/rf/concat",                test_rf_concat,        lang_setup, lang_teardown, 0, NULL },
-    { "/rf/raze",                  test_rf_raze,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/filter",                test_rf_filter,        lang_setup, lang_teardown, 0, NULL },
-    { "/rf/in",                    test_rf_in,            lang_setup, lang_teardown, 0, NULL },
-    { "/rf/except",                test_rf_except,        lang_setup, lang_teardown, 0, NULL },
-    { "/rf/or",                    test_rf_or,            lang_setup, lang_teardown, 0, NULL },
-    { "/rf/and",                   test_rf_and,           lang_setup, lang_teardown, 0, NULL },
-    { "/rf/bin",                   test_rf_bin,           lang_setup, lang_teardown, 0, NULL },
-    { "/rf/timestamp",             test_rf_timestamp,     lang_setup, lang_teardown, 0, NULL },
-    { "/rf/aggregations",          test_rf_aggregations,  lang_setup, lang_teardown, 0, NULL },
-    { "/rf/joins",                 test_rf_joins,         lang_setup, lang_teardown, 0, NULL },
-    { "/rf/temporal",              test_rf_temporal,       lang_setup, lang_teardown, 0, NULL },
-    { "/rf/iteration",             test_rf_iteration,     lang_setup, lang_teardown, 0, NULL },
-    { "/rf/conditionals",          test_rf_conditionals,  lang_setup, lang_teardown, 0, NULL },
-    { "/rf/dict",                  test_rf_dict,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/list",                  test_rf_list,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/alter",                 test_rf_alter,         lang_setup, lang_teardown, 0, NULL },
-    { "/rf/null",                  test_rf_null,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/null_propagate",        test_rf_null_propagate, lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/write_read",        test_dotted_write_read,        lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/multi_key",         test_dotted_multi_key,         lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/nested",            test_dotted_nested,            lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/update_in_place",   test_dotted_update_in_place,   lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/wrong_type_parent", test_dotted_wrong_type_parent, lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/missing_key",       test_dotted_missing_key,       lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/del_removes_key",   test_dotted_del_removes_key,   lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/del_nested",        test_dotted_del_nested,        lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/del_cascade",       test_dotted_del_cascade,       lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/table_column",      test_dotted_table_column,      lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/temporal_atom",     test_dotted_temporal_atom,     lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/temporal_vector",   test_dotted_temporal_vector,   lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/dag_temporal_nulls", test_dag_temporal_extract_nulls, lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/temporal_slice_nulls", test_temporal_extract_slice_nulls, lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/temporal_truncate_atom", test_dotted_temporal_truncate_atom, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_dotted_temporal_key_nocrash", test_select_by_dotted_temporal_key_nocrash, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_dotted_key_surfaces_key_col", test_select_by_dotted_key_surfaces_key_col, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_dotted_key_name_collision", test_select_by_dotted_key_name_collision, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_dotted_key_empty_schema", test_select_by_dotted_key_empty_schema, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_xbar_empty_type", test_select_by_xbar_empty_type, lang_setup, lang_teardown, 0, NULL },
-    { "/atomic_map_empty_sym_str_compare", test_atomic_map_empty_sym_str_compare, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_computed_key_many_groups",    test_select_by_computed_key_many_groups,    lang_setup, lang_teardown, 0, NULL },
-    { "/select_nonagg_dotted_temporal",         test_select_nonagg_dotted_temporal,         lang_setup, lang_teardown, 0, NULL },
-    { "/dotted/temporal_table_column", test_dotted_temporal_table_column, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_f64_perf",       test_select_by_f64_perf,       lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_narrow_int_key", test_select_by_narrow_int_key, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_nullable_f64_key", test_select_by_nullable_f64_key, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_nullable_i64_key", test_select_by_nullable_i64_key, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_str_nullable_nonkey", test_select_by_str_nullable_nonkey, lang_setup, lang_teardown, 0, NULL },
-    { "/select_by_computed_key_nullable_nonkey", test_select_by_computed_key_nullable_nonkey, lang_setup, lang_teardown, 0, NULL },
-    { "/rf/set_ops",               test_rf_set_ops,       lang_setup, lang_teardown, 0, NULL },
-    { "/rf/cast",                  test_rf_cast,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/lambda",                test_rf_lambda,        lang_setup, lang_teardown, 0, NULL },
-    { "/rf/group",                 test_rf_group,         lang_setup, lang_teardown, 0, NULL },
-    { "/rf/find",                  test_rf_find,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/rand",                  test_rf_rand,          lang_setup, lang_teardown, 0, NULL },
-    { "/rf/unary_ops",             test_rf_unary_ops,     lang_setup, lang_teardown, 0, NULL },
-    { "/rf/string_ops",            test_rf_string_ops,    lang_setup, lang_teardown, 0, NULL },
-    { "/rf/do_let",                test_rf_do_let,        lang_setup, lang_teardown, 0, NULL },
-    { "/rf/error",                 test_rf_error,         lang_setup, lang_teardown, 0, NULL },
-    { "/rf/safety",                test_rf_safety,        lang_setup, lang_teardown, 0, NULL },
-    { "/rf/read_csv",              test_rf_read_csv,      lang_setup, lang_teardown, 0, NULL },
-    { "/rf/write_csv",             test_rf_write_csv,     lang_setup, lang_teardown, 0, NULL },
-    { "/datalog/fixpoint",          test_datalog_fixpoint, lang_setup, lang_teardown, 0, NULL },
-    { "/datalog/query_inline_rules", test_datalog_query_inline_rules, lang_setup, lang_teardown, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL },
+const test_entry_t lang_entries[] = {
+    { "lang/fn_unary", test_fn_unary, lang_setup, lang_teardown },
+    { "lang/fn_binary", test_fn_binary, lang_setup, lang_teardown },
+    { "lang/fn_vary", test_fn_vary, lang_setup, lang_teardown },
+    { "lang/lex/i64", test_lex_i64, lang_setup, lang_teardown },
+    { "lang/lex/neg_i64", test_lex_neg_i64, lang_setup, lang_teardown },
+    { "lang/lex/f64", test_lex_f64, lang_setup, lang_teardown },
+    { "lang/lex/string", test_lex_string, lang_setup, lang_teardown },
+    { "lang/lex/symbol", test_lex_symbol, lang_setup, lang_teardown },
+    { "lang/lex/bool", test_lex_bool, lang_setup, lang_teardown },
+    { "lang/parse/sexpr", test_parse_sexpr, lang_setup, lang_teardown },
+    { "lang/parse/nested", test_parse_nested, lang_setup, lang_teardown },
+    { "lang/parse/vector", test_parse_vector, lang_setup, lang_teardown },
+    { "lang/parse/empty_list", test_parse_empty_list, lang_setup, lang_teardown },
+    { "lang/eval/literal", test_eval_literal, lang_setup, lang_teardown },
+    { "lang/eval/add", test_eval_add, lang_setup, lang_teardown },
+    { "lang/eval/nested_arith", test_eval_nested_arith, lang_setup, lang_teardown },
+    { "lang/eval/sub", test_eval_sub, lang_setup, lang_teardown },
+    { "lang/eval/div", test_eval_div, lang_setup, lang_teardown },
+    { "lang/eval/cmp", test_eval_cmp, lang_setup, lang_teardown },
+    { "lang/eval/set", test_eval_set, lang_setup, lang_teardown },
+    { "lang/eval/if_true", test_eval_if_true, lang_setup, lang_teardown },
+    { "lang/eval/if_false", test_eval_if_false, lang_setup, lang_teardown },
+    { "lang/eval/let", test_eval_let, lang_setup, lang_teardown },
+    { "lang/eval/lambda", test_eval_lambda, lang_setup, lang_teardown },
+    { "lang/eval/lambda_multi", test_eval_lambda_multi, lang_setup, lang_teardown },
+    { "lang/eval/lambda_let", test_eval_lambda_let, lang_setup, lang_teardown },
+    { "lang/compile/basic", test_compile_basic, lang_setup, lang_teardown },
+    { "lang/compile/closure", test_compile_closure, lang_setup, lang_teardown },
+    { "lang/vm/fib", test_vm_fib, lang_setup, lang_teardown },
+    { "lang/vm/loop", test_vm_loop, lang_setup, lang_teardown },
+    { "lang/eval/try", test_eval_try, lang_setup, lang_teardown },
+    { "lang/eval/raise", test_eval_raise, lang_setup, lang_teardown },
+    { "lang/eval/vector_add", test_eval_vector_add, lang_setup, lang_teardown },
+    { "lang/eval/vector_add_vec", test_eval_vector_add_vec, lang_setup, lang_teardown },
+    { "lang/eval/sum", test_eval_sum, lang_setup, lang_teardown },
+    { "lang/eval/count", test_eval_count, lang_setup, lang_teardown },
+    { "lang/eval/avg", test_eval_avg, lang_setup, lang_teardown },
+    { "lang/eval/min_max", test_eval_min_max, lang_setup, lang_teardown },
+    { "lang/eval/first_last", test_eval_first_last, lang_setup, lang_teardown },
+    { "lang/eval/map", test_eval_map, lang_setup, lang_teardown },
+    { "lang/eval/pmap", test_eval_pmap, lang_setup, lang_teardown },
+    { "lang/eval/fold", test_eval_fold, lang_setup, lang_teardown },
+    { "lang/eval/scan", test_eval_scan, lang_setup, lang_teardown },
+    { "lang/eval/filter", test_eval_filter, lang_setup, lang_teardown },
+    { "lang/eval/apply", test_eval_apply, lang_setup, lang_teardown },
+    { "lang/eval/distinct", test_eval_distinct, lang_setup, lang_teardown },
+    { "lang/eval/in", test_eval_in, lang_setup, lang_teardown },
+    { "lang/eval/except", test_eval_except, lang_setup, lang_teardown },
+    { "lang/eval/union", test_eval_union, lang_setup, lang_teardown },
+    { "lang/eval/sect", test_eval_sect, lang_setup, lang_teardown },
+    { "lang/eval/take", test_eval_take, lang_setup, lang_teardown },
+    { "lang/eval/take_neg", test_eval_take_neg, lang_setup, lang_teardown },
+    { "lang/eval/at", test_eval_at, lang_setup, lang_teardown },
+    { "lang/eval/find", test_eval_find, lang_setup, lang_teardown },
+    { "lang/eval/reverse", test_eval_reverse, lang_setup, lang_teardown },
+    { "lang/eval/table", test_eval_table, lang_setup, lang_teardown },
+    { "lang/eval/at_table", test_eval_at_table, lang_setup, lang_teardown },
+    { "lang/eval/key_table", test_eval_key_table, lang_setup, lang_teardown },
+    { "lang/eval/count_table", test_eval_count_table, lang_setup, lang_teardown },
+    { "lang/eval/select_all", test_eval_select_all, lang_setup, lang_teardown },
+    { "lang/eval/select_where", test_eval_select_where, lang_setup, lang_teardown },
+    { "lang/eval/select_where_in_sym", test_eval_select_where_in_sym, lang_setup, lang_teardown },
+    { "lang/eval/select_where_in_i64", test_eval_select_where_in_i64, lang_setup, lang_teardown },
+    { "lang/eval/select_where_in_mixed_numeric", test_eval_select_where_in_mixed_numeric, lang_setup, lang_teardown },
+    { "lang/eval/select_where_in_nulls", test_eval_select_where_in_nulls, lang_setup, lang_teardown },
+    { "lang/eval/select_where_in_empty_set_nulls", test_eval_select_where_in_empty_set_nulls, lang_setup, lang_teardown },
+    { "lang/eval/select_where_in_sym_vs_atom_mismatch", test_eval_select_where_in_sym_vs_atom_mismatch, lang_setup, lang_teardown },
+    { "lang/eval/select_where_eq_null_literal", test_eval_select_where_eq_null_literal, lang_setup, lang_teardown },
+    { "lang/eval/pivot_multi_index", test_eval_pivot_multi_index, lang_setup, lang_teardown },
+    { "lang/eval/select_named_lambda", test_eval_select_named_lambda, lang_setup, lang_teardown },
+    { "lang/eval/select_global_scalar", test_eval_select_global_scalar, lang_setup, lang_teardown },
+    { "lang/eval/select_lambda_nonagg", test_eval_select_lambda_nonagg, lang_setup, lang_teardown },
+    { "lang/eval/select_lambda_where", test_eval_select_lambda_where, lang_setup, lang_teardown },
+    { "lang/eval/select_lambda_agg", test_eval_select_lambda_agg, lang_setup, lang_teardown },
+    { "lang/eval/select_let_binding", test_eval_select_let_binding, lang_setup, lang_teardown },
+    { "lang/eval/select_lambda_nested_shadow", test_eval_select_lambda_nested_shadow, lang_setup, lang_teardown },
+    { "lang/eval/select_lambda_arg_reuse", test_eval_select_lambda_arg_reuse, lang_setup, lang_teardown },
+    { "lang/eval/select_lambda_arity_err", test_eval_select_lambda_arity_err, lang_setup, lang_teardown },
+    { "lang/eval/select_by_where_filters", test_eval_select_by_where_filters, lang_setup, lang_teardown },
+    { "lang/eval/select_by_where_in", test_eval_select_by_where_in, lang_setup, lang_teardown },
+    { "lang/eval/select_if", test_eval_select_if, lang_setup, lang_teardown },
+    { "lang/eval/select_where_sym_atom", test_eval_select_where_sym_atom, lang_setup, lang_teardown },
+    { "lang/eval/select_cast", test_eval_select_cast, lang_setup, lang_teardown },
+    { "lang/eval/select_round", test_eval_select_round, lang_setup, lang_teardown },
+    { "lang/eval/select_cols", test_eval_select_cols, lang_setup, lang_teardown },
+    { "lang/eval/select_groupby", test_eval_select_groupby, lang_setup, lang_teardown },
+    { "lang/eval/select_xbar", test_eval_select_xbar, lang_setup, lang_teardown },
+    { "lang/eval/select_asc", test_eval_select_asc, lang_setup, lang_teardown },
+    { "lang/eval/select_desc", test_eval_select_desc, lang_setup, lang_teardown },
+    { "lang/eval/select_asc_desc", test_eval_select_asc_desc, lang_setup, lang_teardown },
+    { "lang/eval/select_take", test_eval_select_take, lang_setup, lang_teardown },
+    { "lang/eval/select_take_neg", test_eval_select_take_neg, lang_setup, lang_teardown },
+    { "lang/eval/select_take_range", test_eval_select_take_range, lang_setup, lang_teardown },
+    { "lang/eval/select_combined", test_eval_select_combined, lang_setup, lang_teardown },
+    { "lang/eval/select_asc_multi", test_eval_select_asc_multi, lang_setup, lang_teardown },
+    { "lang/eval/select_groupby_sort", test_eval_select_groupby_sort, lang_setup, lang_teardown },
+    { "lang/eval/select_by_nonagg_i64_key", test_eval_select_by_nonagg_i64_key, lang_setup, lang_teardown },
+    { "lang/eval/select_by_nonagg_u8_key", test_eval_select_by_nonagg_u8_key, lang_setup, lang_teardown },
+    { "lang/eval/select_by_nonagg_empty", test_eval_select_by_nonagg_empty, lang_setup, lang_teardown },
+    { "lang/eval/select_by_mixed_naming", test_eval_select_by_mixed_naming, lang_setup, lang_teardown },
+    { "lang/eval/select_by_nonagg_list_col", test_eval_select_by_nonagg_list_col, lang_setup, lang_teardown },
+    { "lang/eval/select_by_str_nonagg_list_col", test_eval_select_by_str_nonagg_list_col, lang_setup, lang_teardown },
+    { "lang/eval/select_by_nonagg_broadcast", test_eval_select_by_nonagg_broadcast, lang_setup, lang_teardown },
+    { "lang/eval/select_by_nonagg_colref_vs_const", test_eval_select_by_nonagg_colref_vs_const, lang_setup, lang_teardown },
+    { "lang/eval/select_by_nonagg_with_agg_subexpr", test_eval_select_by_nonagg_with_agg_subexpr, lang_setup, lang_teardown },
+    { "lang/eval/select_by_nonagg_sort_take", test_eval_select_by_nonagg_sort_take, lang_setup, lang_teardown },
+    { "lang/eval/select_by_take_clamps", test_eval_select_by_take_clamps, lang_setup, lang_teardown },
+    { "lang/eval/select_by_vec_bool_order", test_eval_select_by_vec_bool_order, lang_setup, lang_teardown },
+    { "lang/eval/select_by_vec_str_key", test_eval_select_by_vec_str_key, lang_setup, lang_teardown },
+    { "lang/eval/select_by_multi_nonagg_nyi", test_eval_select_by_multi_nonagg_nyi, lang_setup, lang_teardown },
+    { "lang/eval/update", test_eval_update, lang_setup, lang_teardown },
+    { "lang/eval/update_no_where", test_eval_update_no_where, lang_setup, lang_teardown },
+    { "lang/eval/update_str_masked", test_eval_update_str_masked, lang_setup, lang_teardown },
+    { "lang/eval/table_mixed_type_error", test_eval_table_mixed_type_error, lang_setup, lang_teardown },
+    { "lang/eval/update_str_type_mismatch", test_eval_update_str_type_mismatch, lang_setup, lang_teardown },
+    { "lang/eval/select_empty_const", test_eval_select_empty_const, lang_setup, lang_teardown },
+    { "lang/eval/insert", test_eval_insert, lang_setup, lang_teardown },
+    { "lang/eval/insert_vec_append", test_eval_insert_vec_append, lang_setup, lang_teardown },
+    { "lang/eval/insert_list_append", test_eval_insert_list_append, lang_setup, lang_teardown },
+    { "lang/eval/insert_vec_positional", test_eval_insert_vec_positional, lang_setup, lang_teardown },
+    { "lang/eval/insert_list_positional", test_eval_insert_list_positional, lang_setup, lang_teardown },
+    { "lang/eval/insert_positional_multi", test_eval_insert_positional_multi, lang_setup, lang_teardown },
+    { "lang/eval/insert_typed_null", test_eval_insert_typed_null, lang_setup, lang_teardown },
+    { "lang/eval/insert_guid", test_eval_insert_guid, lang_setup, lang_teardown },
+    { "lang/eval/insert_positional_errors", test_eval_insert_positional_errors, lang_setup, lang_teardown },
+    { "lang/eval/upsert", test_eval_upsert, lang_setup, lang_teardown },
+    { "lang/eval/upsert_f64_key", test_eval_upsert_f64_key, lang_setup, lang_teardown },
+    { "lang/eval/upsert_str_key", test_eval_upsert_str_key, lang_setup, lang_teardown },
+    { "lang/eval/upsert_type_mismatch", test_eval_upsert_type_mismatch, lang_setup, lang_teardown },
+    { "lang/eval/left_join", test_eval_left_join, lang_setup, lang_teardown },
+    { "lang/eval/inner_join", test_eval_inner_join, lang_setup, lang_teardown },
+    { "lang/eval/window_join", test_eval_window_join, lang_setup, lang_teardown },
+    { "lang/eval/println", test_eval_println, lang_setup, lang_teardown },
+    { "lang/sort/decode_i64", test_sort_decode_i64, lang_setup, lang_teardown },
+    { "lang/sort/decode_f64", test_sort_decode_f64, lang_setup, lang_teardown },
+    { "lang/sort/decode_desc", test_sort_decode_desc, lang_setup, lang_teardown },
+    { "lang/sort/decode_f64_neg", test_sort_decode_f64_neg, lang_setup, lang_teardown },
+    { "lang/sort/decode_radix_f64", test_sort_decode_radix_f64, lang_setup, lang_teardown },
+    { "lang/sort/decode_radix_f64_desc", test_sort_decode_radix_f64_desc, lang_setup, lang_teardown },
+    { "lang/sort/decode_radix_i64", test_sort_decode_radix_i64, lang_setup, lang_teardown },
+    { "lang/sort/long_common_prefix", test_sort_long_common_prefix, lang_setup, lang_teardown },
+    { "lang/sort/embedded_nul", test_sort_embedded_nul, lang_setup, lang_teardown },
+    { "lang/eval/read_write_csv", test_eval_read_write_csv, lang_setup, lang_teardown },
+    { "lang/eval/as_cast", test_eval_as_cast, lang_setup, lang_teardown },
+    { "lang/eval/type", test_eval_type, lang_setup, lang_teardown },
+    { "lang/env/lookup_prefix", test_env_lookup_prefix, lang_setup, lang_teardown },
+    { "lang/verb/sum_til", test_verb_sum_til, lang_setup, lang_teardown },
+    { "lang/verb/avg_til", test_verb_avg_til, lang_setup, lang_teardown },
+    { "lang/verb/min_til", test_verb_min_til, lang_setup, lang_teardown },
+    { "lang/verb/max_til", test_verb_max_til, lang_setup, lang_teardown },
+    { "lang/verb/count_til", test_verb_count_til, lang_setup, lang_teardown },
+    { "lang/verb/first_til", test_verb_first_til, lang_setup, lang_teardown },
+    { "lang/verb/last_til", test_verb_last_til, lang_setup, lang_teardown },
+    { "lang/verb/dev_til", test_verb_dev_til, lang_setup, lang_teardown },
+    { "lang/verb/if_sum", test_verb_if_sum, lang_setup, lang_teardown },
+    { "lang/verb/sum_var", test_verb_sum_var, lang_setup, lang_teardown },
+    { "lang/atomic_map_nested_vec", test_atomic_map_nested_vec, lang_setup, lang_teardown },
+    { "lang/error_trace_exists", test_error_trace_exists, lang_setup, lang_teardown },
+    { "lang/rf/null_propagate", test_rf_null_propagate, lang_setup, lang_teardown },
+    { "lang/dotted/write_read", test_dotted_write_read, lang_setup, lang_teardown },
+    { "lang/dotted/multi_key", test_dotted_multi_key, lang_setup, lang_teardown },
+    { "lang/dotted/nested", test_dotted_nested, lang_setup, lang_teardown },
+    { "lang/dotted/update_in_place", test_dotted_update_in_place, lang_setup, lang_teardown },
+    { "lang/dotted/wrong_type_parent", test_dotted_wrong_type_parent, lang_setup, lang_teardown },
+    { "lang/dotted/missing_key", test_dotted_missing_key, lang_setup, lang_teardown },
+    { "lang/dotted/del_removes_key", test_dotted_del_removes_key, lang_setup, lang_teardown },
+    { "lang/dotted/del_nested", test_dotted_del_nested, lang_setup, lang_teardown },
+    { "lang/dotted/del_cascade", test_dotted_del_cascade, lang_setup, lang_teardown },
+    { "lang/dotted/table_column", test_dotted_table_column, lang_setup, lang_teardown },
+    { "lang/dotted/temporal_atom", test_dotted_temporal_atom, lang_setup, lang_teardown },
+    { "lang/dotted/temporal_vector", test_dotted_temporal_vector, lang_setup, lang_teardown },
+    { "lang/dotted/dag_temporal_nulls", test_dag_temporal_extract_nulls, lang_setup, lang_teardown },
+    { "lang/dotted/temporal_slice_nulls", test_temporal_extract_slice_nulls, lang_setup, lang_teardown },
+    { "lang/dotted/temporal_truncate_atom", test_dotted_temporal_truncate_atom, lang_setup, lang_teardown },
+    { "lang/select_by_dotted_temporal_key_nocrash", test_select_by_dotted_temporal_key_nocrash, lang_setup, lang_teardown },
+    { "lang/select_by_dotted_key_surfaces_key_col", test_select_by_dotted_key_surfaces_key_col, lang_setup, lang_teardown },
+    { "lang/select_by_dotted_key_name_collision", test_select_by_dotted_key_name_collision, lang_setup, lang_teardown },
+    { "lang/select_by_dotted_key_empty_schema", test_select_by_dotted_key_empty_schema, lang_setup, lang_teardown },
+    { "lang/select_by_xbar_empty_type", test_select_by_xbar_empty_type, lang_setup, lang_teardown },
+    { "lang/atomic_map_empty_sym_str_compare", test_atomic_map_empty_sym_str_compare, lang_setup, lang_teardown },
+    { "lang/select_by_computed_key_many_groups", test_select_by_computed_key_many_groups, lang_setup, lang_teardown },
+    { "lang/select_nonagg_dotted_temporal", test_select_nonagg_dotted_temporal, lang_setup, lang_teardown },
+    { "lang/dotted/temporal_table_column", test_dotted_temporal_table_column, lang_setup, lang_teardown },
+    { "lang/select_by_f64_perf", test_select_by_f64_perf, lang_setup, lang_teardown },
+    { "lang/select_by_narrow_int_key", test_select_by_narrow_int_key, lang_setup, lang_teardown },
+    { "lang/select_by_nullable_f64_key", test_select_by_nullable_f64_key, lang_setup, lang_teardown },
+    { "lang/select_by_nullable_i64_key", test_select_by_nullable_i64_key, lang_setup, lang_teardown },
+    { "lang/select_by_str_nullable_nonkey", test_select_by_str_nullable_nonkey, lang_setup, lang_teardown },
+    { "lang/select_by_computed_key_nullable_nonkey", test_select_by_computed_key_nullable_nonkey, lang_setup, lang_teardown },
+    { "lang/datalog/fixpoint", test_datalog_fixpoint, lang_setup, lang_teardown },
+    { "lang/datalog/query_inline_rules", test_datalog_query_inline_rules, lang_setup, lang_teardown },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_lang_suite = { "/lang", lang_tests, NULL, 1, 0 };
+

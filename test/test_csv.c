@@ -21,7 +21,8 @@
  *   SOFTWARE.
  */
 
-#include "munit.h"
+#include "test.h"
+#include <rayforce.h>
 #include <rayforce.h>
 #include "mem/heap.h"
 #include "io/csv.h"
@@ -37,8 +38,7 @@ static const char* tmp_csv(void) {
 }
 #define TMP_CSV tmp_csv()
 
-static MunitResult test_csv_roundtrip_i64(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_roundtrip_i64(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -50,32 +50,31 @@ static MunitResult test_csv_roundtrip_i64(const void* params, void* data) {
     ray_release(vec);
 
     ray_err_t err = ray_write_csv(tbl, TMP_CSV);
-    munit_assert_int(err, ==, RAY_OK);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
-    munit_assert_int(loaded->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(loaded), ==, 3);
-    munit_assert_int(ray_table_ncols(loaded), ==, 1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(loaded->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(loaded), 3);
+    TEST_ASSERT_EQ_I(ray_table_ncols(loaded), 1);
 
     /* Verify actual data values survived the roundtrip */
     ray_t* col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_ptr_not_null(col);
+    TEST_ASSERT_NOT_NULL(col);
     int64_t* loaded_data = (int64_t*)ray_data(col);
-    munit_assert_int(loaded_data[0], ==, 10);
-    munit_assert_int(loaded_data[1], ==, 20);
-    munit_assert_int(loaded_data[2], ==, 30);
+    TEST_ASSERT_EQ_I(loaded_data[0], 10);
+    TEST_ASSERT_EQ_I(loaded_data[1], 20);
+    TEST_ASSERT_EQ_I(loaded_data[2], 30);
 
     ray_release(loaded);
     ray_release(tbl);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_roundtrip_f64(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_roundtrip_f64(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -87,32 +86,31 @@ static MunitResult test_csv_roundtrip_f64(const void* params, void* data) {
     ray_release(vec);
 
     ray_err_t err = ray_write_csv(tbl, TMP_CSV);
-    munit_assert_int(err, ==, RAY_OK);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
-    munit_assert_int(loaded->type, ==, RAY_TABLE);
-    munit_assert_int(ray_table_nrows(loaded), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(loaded->type, RAY_TABLE);
+    TEST_ASSERT_EQ_I(ray_table_nrows(loaded), 3);
 
     /* Verify F64 values survived the roundtrip */
     ray_t* col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_ptr_not_null(col);
-    munit_assert_int(col->type, ==, RAY_F64);
+    TEST_ASSERT_NOT_NULL(col);
+    TEST_ASSERT_EQ_I(col->type, RAY_F64);
     double* loaded_data = (double*)ray_data(col);
-    munit_assert_double_equal(loaded_data[0], 1.5, 6);
-    munit_assert_double_equal(loaded_data[1], 2.5, 6);
-    munit_assert_double_equal(loaded_data[2], 3.5, 6);
+    TEST_ASSERT_EQ_F(loaded_data[0], 1.5, 1e-6);
+    TEST_ASSERT_EQ_F(loaded_data[1], 2.5, 1e-6);
+    TEST_ASSERT_EQ_F(loaded_data[2], 3.5, 1e-6);
 
     ray_release(loaded);
     ray_release(tbl);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_multi_column(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_multi_column(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -129,54 +127,52 @@ static MunitResult test_csv_multi_column(const void* params, void* data) {
     ray_release(val_v);
 
     ray_err_t err = ray_write_csv(tbl, TMP_CSV);
-    munit_assert_int(err, ==, RAY_OK);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
-    munit_assert_int(ray_table_ncols(loaded), ==, 2);
-    munit_assert_int(ray_table_nrows(loaded), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(ray_table_ncols(loaded), 2);
+    TEST_ASSERT_EQ_I(ray_table_nrows(loaded), 3);
 
     /* Verify both columns' data values */
     ray_t* id_col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_ptr_not_null(id_col);
+    TEST_ASSERT_NOT_NULL(id_col);
     int64_t* id_data = (int64_t*)ray_data(id_col);
-    munit_assert_int(id_data[0], ==, 1);
-    munit_assert_int(id_data[1], ==, 2);
-    munit_assert_int(id_data[2], ==, 3);
+    TEST_ASSERT_EQ_I(id_data[0], 1);
+    TEST_ASSERT_EQ_I(id_data[1], 2);
+    TEST_ASSERT_EQ_I(id_data[2], 3);
     ray_t* val_col = ray_table_get_col_idx(loaded, 1);
-    munit_assert_ptr_not_null(val_col);
+    TEST_ASSERT_NOT_NULL(val_col);
     double* val_data = (double*)ray_data(val_col);
-    munit_assert_double_equal(val_data[0], 10.5, 6);
-    munit_assert_double_equal(val_data[1], 20.5, 6);
-    munit_assert_double_equal(val_data[2], 30.5, 6);
+    TEST_ASSERT_EQ_F(val_data[0], 10.5, 1e-6);
+    TEST_ASSERT_EQ_F(val_data[1], 20.5, 1e-6);
+    TEST_ASSERT_EQ_F(val_data[2], 30.5, 1e-6);
 
     ray_release(loaded);
     ray_release(tbl);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_empty_table(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_empty_table(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
     ray_t* tbl = ray_table_new(0);
     ray_err_t err = ray_write_csv(tbl, TMP_CSV);
     /* Empty table (0 cols) should return RAY_ERR_TYPE */
-    munit_assert_int(err, ==, RAY_ERR_TYPE);
+    TEST_ASSERT_EQ_I(err, RAY_ERR_TYPE);
 
     ray_release(tbl);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_null_i64(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_null_i64(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -185,27 +181,26 @@ static MunitResult test_csv_null_i64(const void* params, void* data) {
     fclose(f);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
-    munit_assert_int(ray_table_nrows(loaded), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(ray_table_nrows(loaded), 3);
 
     ray_t* col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_ptr_not_null(col);
+    TEST_ASSERT_NOT_NULL(col);
 
-    munit_assert_false(ray_vec_is_null(col, 0));
-    munit_assert_int(((int64_t*)ray_data(col))[0], ==, 10);
-    munit_assert_true(ray_vec_is_null(col, 1));
-    munit_assert_false(ray_vec_is_null(col, 2));
-    munit_assert_int(((int64_t*)ray_data(col))[2], ==, 30);
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 0));
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(col))[0], 10);
+    TEST_ASSERT_TRUE(ray_vec_is_null(col, 1));
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 2));
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(col))[2], 30);
 
     ray_release(loaded);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_null_i64_unparseable(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_null_i64_unparseable(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -214,24 +209,23 @@ static MunitResult test_csv_null_i64_unparseable(const void* params, void* data)
     fclose(f);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
 
     ray_t* col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_false(ray_vec_is_null(col, 0));
-    munit_assert_int(((int64_t*)ray_data(col))[0], ==, 10);
-    munit_assert_true(ray_vec_is_null(col, 1));
-    munit_assert_false(ray_vec_is_null(col, 2));
-    munit_assert_int(((int64_t*)ray_data(col))[2], ==, 30);
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 0));
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(col))[0], 10);
+    TEST_ASSERT_TRUE(ray_vec_is_null(col, 1));
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 2));
+    TEST_ASSERT_EQ_I(((int64_t*)ray_data(col))[2], 30);
 
     ray_release(loaded);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_null_f64(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_null_f64(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -240,24 +234,23 @@ static MunitResult test_csv_null_f64(const void* params, void* data) {
     fclose(f);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
 
     ray_t* col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_false(ray_vec_is_null(col, 0));
-    munit_assert_double_equal(((double*)ray_data(col))[0], 1.5, 6);
-    munit_assert_true(ray_vec_is_null(col, 1));
-    munit_assert_false(ray_vec_is_null(col, 2));
-    munit_assert_double_equal(((double*)ray_data(col))[2], 3.5, 6);
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 0));
+    TEST_ASSERT_EQ_F(((double*)ray_data(col))[0], 1.5, 1e-6);
+    TEST_ASSERT_TRUE(ray_vec_is_null(col, 1));
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 2));
+    TEST_ASSERT_EQ_F(((double*)ray_data(col))[2], 3.5, 1e-6);
 
     ray_release(loaded);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_null_bool(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_null_bool(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -266,24 +259,23 @@ static MunitResult test_csv_null_bool(const void* params, void* data) {
     fclose(f);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
 
     ray_t* col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_false(ray_vec_is_null(col, 0));
-    munit_assert_int((int)((uint8_t*)ray_data(col))[0], ==, 1);
-    munit_assert_true(ray_vec_is_null(col, 1));  /* empty */
-    munit_assert_false(ray_vec_is_null(col, 2));
-    munit_assert_int((int)((uint8_t*)ray_data(col))[2], ==, 0);
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 0));
+    TEST_ASSERT_EQ_I((int)((uint8_t*)ray_data(col))[0], 1);
+    TEST_ASSERT_TRUE(ray_vec_is_null(col, 1));  /* empty */
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 2));
+    TEST_ASSERT_EQ_I((int)((uint8_t*)ray_data(col))[2], 0);
 
     ray_release(loaded);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_null_sym(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_null_sym(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -292,22 +284,21 @@ static MunitResult test_csv_null_sym(const void* params, void* data) {
     fclose(f);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
 
     ray_t* col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_false(ray_vec_is_null(col, 0));
-    munit_assert_true(ray_vec_is_null(col, 1));  /* empty → NULL */
-    munit_assert_false(ray_vec_is_null(col, 2));
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 0));
+    TEST_ASSERT_TRUE(ray_vec_is_null(col, 1));  /* empty → NULL */
+    TEST_ASSERT_FALSE(ray_vec_is_null(col, 2));
 
     ray_release(loaded);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_no_nulls_no_nullmap(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_no_nulls_no_nullmap(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -316,21 +307,20 @@ static MunitResult test_csv_no_nulls_no_nullmap(const void* params, void* data) 
     fclose(f);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
 
     ray_t* col = ray_table_get_col_idx(loaded, 0);
     /* No nulls → HAS_NULLS flag should be stripped */
-    munit_assert_false(col->attrs & RAY_ATTR_HAS_NULLS);
+    TEST_ASSERT_FALSE(col->attrs & RAY_ATTR_HAS_NULLS);
 
     ray_release(loaded);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitResult test_csv_null_mixed_columns(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_null_mixed_columns(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -339,41 +329,40 @@ static MunitResult test_csv_null_mixed_columns(const void* params, void* data) {
     fclose(f);
 
     ray_t* loaded = ray_read_csv(TMP_CSV);
-    munit_assert_false(RAY_IS_ERR(loaded));
-    munit_assert_int(ray_table_nrows(loaded), ==, 3);
-    munit_assert_int(ray_table_ncols(loaded), ==, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(ray_table_nrows(loaded), 3);
+    TEST_ASSERT_EQ_I(ray_table_ncols(loaded), 3);
 
     ray_t* id_col = ray_table_get_col_idx(loaded, 0);
     ray_t* val_col = ray_table_get_col_idx(loaded, 1);
     ray_t* name_col = ray_table_get_col_idx(loaded, 2);
 
     /* id column: 1, NULL, 3 */
-    munit_assert_false(ray_vec_is_null(id_col, 0));
-    munit_assert_true(ray_vec_is_null(id_col, 1));
-    munit_assert_false(ray_vec_is_null(id_col, 2));
+    TEST_ASSERT_FALSE(ray_vec_is_null(id_col, 0));
+    TEST_ASSERT_TRUE(ray_vec_is_null(id_col, 1));
+    TEST_ASSERT_FALSE(ray_vec_is_null(id_col, 2));
 
     /* val column: 1.5, 2.5, NULL */
-    munit_assert_false(ray_vec_is_null(val_col, 0));
-    munit_assert_false(ray_vec_is_null(val_col, 1));
-    munit_assert_true(ray_vec_is_null(val_col, 2));
+    TEST_ASSERT_FALSE(ray_vec_is_null(val_col, 0));
+    TEST_ASSERT_FALSE(ray_vec_is_null(val_col, 1));
+    TEST_ASSERT_TRUE(ray_vec_is_null(val_col, 2));
 
     /* name column: alice, NULL, bob */
-    munit_assert_false(ray_vec_is_null(name_col, 0));
-    munit_assert_true(ray_vec_is_null(name_col, 1));
-    munit_assert_false(ray_vec_is_null(name_col, 2));
+    TEST_ASSERT_FALSE(ray_vec_is_null(name_col, 0));
+    TEST_ASSERT_TRUE(ray_vec_is_null(name_col, 1));
+    TEST_ASSERT_FALSE(ray_vec_is_null(name_col, 2));
 
     ray_release(loaded);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Explicit RAY_STR schema must yield a RAY_STR vector, not a sym column.
  * Regression: csv loader used to funnel all string-parsed columns through
  * the sym intern table, silently corrupting RAY_STR-typed outputs. */
-static MunitResult test_csv_explicit_str_schema(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_explicit_str_schema(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -388,38 +377,37 @@ static MunitResult test_csv_explicit_str_schema(const void* params, void* data) 
 
     int8_t schema[2] = { RAY_I64, RAY_STR };
     ray_t* loaded = ray_read_csv_opts(TMP_CSV, 0, true, schema, 2);
-    munit_assert_false(RAY_IS_ERR(loaded));
-    munit_assert_int(ray_table_nrows(loaded), ==, 4);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(ray_table_nrows(loaded), 4);
 
     ray_t* note = ray_table_get_col_idx(loaded, 1);
-    munit_assert_int(note->type, ==, RAY_STR);
+    TEST_ASSERT_EQ_I(note->type, RAY_STR);
 
     size_t l;
     const char* s;
     s = ray_str_vec_get(note, 0, &l);
-    munit_assert_int((int)l, ==, 2);
-    munit_assert_memory_equal(2, s, "hi");
+    TEST_ASSERT_EQ_I((int)l, 2);
+    TEST_ASSERT_MEM_EQ(2, s, "hi");
     s = ray_str_vec_get(note, 1, &l);
-    munit_assert_int((int)l, ==, 35);
-    munit_assert_memory_equal(35, s, "this-is-a-long-string-over-12-bytes");
-    munit_assert_true(ray_vec_is_null(note, 2));
+    TEST_ASSERT_EQ_I((int)l, 35);
+    TEST_ASSERT_MEM_EQ(35, s, "this-is-a-long-string-over-12-bytes");
+    TEST_ASSERT_TRUE(ray_vec_is_null(note, 2));
     s = ray_str_vec_get(note, 3, &l);
-    munit_assert_int((int)l, ==, 4);
-    munit_assert_memory_equal(4, s, "tiny");
+    TEST_ASSERT_EQ_I((int)l, 4);
+    TEST_ASSERT_MEM_EQ(4, s, "tiny");
 
     ray_release(loaded);
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
 /* Round-trip for strings containing commas, quotes, and newlines.
  * Regression test: escaped fields (with "") were stored as pointers into
  * a stack-local esc_buf that died before csv_fill_str_cols could read them,
  * causing use-after-return. */
-static MunitResult test_csv_escaped_str_roundtrip(const void* params, void* data) {
-    (void)params; (void)data;
+static test_result_t test_csv_escaped_str_roundtrip(void) {
     ray_heap_init();
     (void)ray_sym_init();
 
@@ -435,46 +423,46 @@ static MunitResult test_csv_escaped_str_roundtrip(const void* params, void* data
     /* Read back as RAY_STR */
     int8_t schema[1] = { RAY_STR };
     ray_t* loaded = ray_read_csv_opts(TMP_CSV, 0, true, schema, 1);
-    munit_assert_false(RAY_IS_ERR(loaded));
-    munit_assert_int(ray_table_nrows(loaded), ==, 4);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(ray_table_nrows(loaded), 4);
 
     ray_t* col = ray_table_get_col_idx(loaded, 0);
-    munit_assert_int(col->type, ==, RAY_STR);
+    TEST_ASSERT_EQ_I(col->type, RAY_STR);
 
     size_t l;
     const char* s;
 
     s = ray_str_vec_get(col, 0, &l);
-    munit_assert_int((int)l, ==, 6);
-    munit_assert_memory_equal(6, s, "he,llo");
+    TEST_ASSERT_EQ_I((int)l, 6);
+    TEST_ASSERT_MEM_EQ(6, s, "he,llo");
 
     s = ray_str_vec_get(col, 1, &l);
-    munit_assert_int((int)l, ==, 6);
-    munit_assert_memory_equal(6, s, "wo\"rld");
+    TEST_ASSERT_EQ_I((int)l, 6);
+    TEST_ASSERT_MEM_EQ(6, s, "wo\"rld");
 
     s = ray_str_vec_get(col, 2, &l);
-    munit_assert_int((int)l, ==, 5);
-    munit_assert_memory_equal(5, s, "plain");
+    TEST_ASSERT_EQ_I((int)l, 5);
+    TEST_ASSERT_MEM_EQ(5, s, "plain");
 
     s = ray_str_vec_get(col, 3, &l);
-    munit_assert_int((int)l, ==, 11);
-    munit_assert_memory_equal(11, s, "line1\nline2");
+    TEST_ASSERT_EQ_I((int)l, 11);
+    TEST_ASSERT_MEM_EQ(11, s, "line1\nline2");
 
     /* Write it back out and verify byte-identical CSV */
     const char* tmp2 = "/tmp/rayforce_test_esc2.csv";
     ray_err_t err = ray_write_csv(loaded, tmp2);
-    munit_assert_int(err, ==, RAY_OK);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
 
     /* Re-read and compare */
     ray_t* loaded2 = ray_read_csv_opts(tmp2, 0, true, schema, 1);
-    munit_assert_false(RAY_IS_ERR(loaded2));
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded2));
     ray_t* col2 = ray_table_get_col_idx(loaded2, 0);
     for (int64_t r = 0; r < 4; r++) {
         size_t l1, l2;
         const char* s1 = ray_str_vec_get(col, r, &l1);
         const char* s2 = ray_str_vec_get(col2, r, &l2);
-        munit_assert_int((int)l1, ==, (int)l2);
-        munit_assert_memory_equal(l1, s1, s2);
+        TEST_ASSERT_EQ_I((int)l1, (int)l2);
+        TEST_ASSERT_MEM_EQ(l1, s1, s2);
     }
 
     ray_release(loaded2);
@@ -483,26 +471,24 @@ static MunitResult test_csv_escaped_str_roundtrip(const void* params, void* data
     unlink(TMP_CSV);
     ray_sym_destroy();
     ray_heap_destroy();
-    return MUNIT_OK;
+    PASS();
 }
 
-static MunitTest csv_tests[] = {
-    { "/roundtrip_i64",  test_csv_roundtrip_i64,  NULL, NULL, 0, NULL },
-    { "/roundtrip_f64",  test_csv_roundtrip_f64,  NULL, NULL, 0, NULL },
-    { "/multi_column",   test_csv_multi_column,   NULL, NULL, 0, NULL },
-    { "/empty_table",    test_csv_empty_table,     NULL, NULL, 0, NULL },
-    { "/null_i64",             test_csv_null_i64,             NULL, NULL, 0, NULL },
-    { "/null_i64_unparseable", test_csv_null_i64_unparseable, NULL, NULL, 0, NULL },
-    { "/null_f64",             test_csv_null_f64,             NULL, NULL, 0, NULL },
-    { "/null_bool",             test_csv_null_bool,             NULL, NULL, 0, NULL },
-    { "/null_sym",              test_csv_null_sym,              NULL, NULL, 0, NULL },
-    { "/no_nulls_no_nullmap",   test_csv_no_nulls_no_nullmap,  NULL, NULL, 0, NULL },
-    { "/null_mixed_columns",    test_csv_null_mixed_columns,    NULL, NULL, 0, NULL },
-    { "/explicit_str_schema",   test_csv_explicit_str_schema,   NULL, NULL, 0, NULL },
-    { "/escaped_str_roundtrip", test_csv_escaped_str_roundtrip, NULL, NULL, 0, NULL },
-    { NULL, NULL, NULL, NULL, 0, NULL }
+const test_entry_t csv_entries[] = {
+    { "csv/roundtrip_i64", test_csv_roundtrip_i64, NULL, NULL },
+    { "csv/roundtrip_f64", test_csv_roundtrip_f64, NULL, NULL },
+    { "csv/multi_column", test_csv_multi_column, NULL, NULL },
+    { "csv/empty_table", test_csv_empty_table, NULL, NULL },
+    { "csv/null_i64", test_csv_null_i64, NULL, NULL },
+    { "csv/null_i64_unparseable", test_csv_null_i64_unparseable, NULL, NULL },
+    { "csv/null_f64", test_csv_null_f64, NULL, NULL },
+    { "csv/null_bool", test_csv_null_bool, NULL, NULL },
+    { "csv/null_sym", test_csv_null_sym, NULL, NULL },
+    { "csv/no_nulls_no_nullmap", test_csv_no_nulls_no_nullmap, NULL, NULL },
+    { "csv/null_mixed_columns", test_csv_null_mixed_columns, NULL, NULL },
+    { "csv/explicit_str_schema", test_csv_explicit_str_schema, NULL, NULL },
+    { "csv/escaped_str_roundtrip", test_csv_escaped_str_roundtrip, NULL, NULL },
+    { NULL, NULL, NULL, NULL },
 };
 
-MunitSuite test_csv_suite = {
-    "/csv", csv_tests, NULL, 1, 0
-};
+

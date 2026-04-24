@@ -1,0 +1,9 @@
+;; Invariants for `fold`.
+
+(fold + 0 [1 2 3 4 5]) -- 15
+(fold + 0 []) -- 0
+(fold * 1 [1 2 3 4]) -- 24
+
+;; fold is sum for +/0
+(set V (rand 50 1000))
+(sum V) -- (fold + 0 V)

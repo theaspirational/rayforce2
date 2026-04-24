@@ -1,0 +1,8 @@
+;; Invariants for `like` — glob-style pattern match.
+
+(like "hello" "hello") -- true
+(like "hello" "world") -- false
+(like "hello" "h*") -- true
+(like "hello" "*o") -- true
+(like "hello" "*") -- true
+(like "hello" "h?llo") -- true

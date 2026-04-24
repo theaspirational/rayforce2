@@ -1,0 +1,10 @@
+;; Invariants for `rank` — rank of each element in the sorted order.
+
+(rank [30 10 20]) -- [2 0 1]
+
+;; range is 0..n-1
+(set V (rand 100 10000))
+(asc (rank V)) -- (til (count V))
+
+;; rank is inverse of iasc: (at (iasc V) (rank V)) == (til n)  -- is this right?
+;; Actually: (at V (iasc V)) is sorted; rank tells us where each V[i] lands.

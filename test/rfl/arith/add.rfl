@@ -1,0 +1,20 @@
+;; Invariants for `+` on i64 vectors.
+
+;; commutativity:  (+ a b) == (+ b a)
+(set A (- (rand 256 200000) 100000))
+(set B (- (rand 256 200000) 100000))
+(count A) -- (sum (== (+ A B) (+ B A)))
+
+;; associativity:  (+ (+ a b) c) == (+ a (+ b c)) — narrow range to avoid overflow
+(set A (- (rand 256 60000) 30000))
+(set B (- (rand 256 60000) 30000))
+(set C (- (rand 256 60000) 30000))
+(count A) -- (sum (== (+ (+ A B) C) (+ A (+ B C))))
+
+;; identity (right):  (+ a 0) == a
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (== (+ A 0) A))
+
+;; identity (left):  (+ 0 a) == a
+(set A (- (rand 256 200000) 100000))
+(count A) -- (sum (== (+ 0 A) A))

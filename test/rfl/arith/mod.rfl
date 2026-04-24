@@ -1,0 +1,14 @@
+;; Invariants for `%` (modulo).
+
+;; range:  0 <= (% a m) < m  for positive m
+(set A (- (rand 256 10000) 5000))
+(set M (+ (rand 256 50) 1))
+(count A) -- (sum (>= (% A M) 0))
+(count A) -- (sum (< (% A M) M))
+
+;; Euclidean identity:  a == (+ (* m (/ a m)) (% a m))
+(count A) -- (sum (== A (+ (* M (/ A M)) (% A M))))
+
+;; concrete
+(% 7 3) -- 1
+(% 0 5) -- 0
