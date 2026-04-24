@@ -613,7 +613,7 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
             /* Single index */
             int64_t i = as_i64(idx);
             ray_release(idx);
-            if (i < 0 || i >= var->len) { ray_release(val); ray_release(name_sym); return ray_error("range", NULL); }
+            if (i < 0 || i >= var->len) { ray_release(val); ray_release(name_sym); return ray_error("index", NULL); }
             store_typed_elem(var, i, val);
         } else if (ray_is_vec(idx)) {
             /* Vector of indices — set each to val.

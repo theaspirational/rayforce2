@@ -1355,7 +1355,10 @@ static void binary_range(ray_op_t* op, int8_t out_type,
     int32_t* lp_i32 = NULL; uint32_t* lp_u32 = NULL; int16_t* lp_i16 = NULL;
     int32_t* rp_i32 = NULL; uint32_t* rp_u32 = NULL; int16_t* rp_i16 = NULL;
 
-    int64_t lsym_buf[n], rsym_buf[n]; /* stack VLA for narrow RAY_SYM (n<=1024) */
+    /* VLA bound of zero is UB; guarantee >=1 slot.  The fill loops below
+     * are bounded by n so extra slots are harmless. */
+    int64_t _sym_buf_n = n ? n : 1;
+    int64_t lsym_buf[_sym_buf_n], rsym_buf[_sym_buf_n]; /* stack VLA for narrow RAY_SYM (n<=1024) */
     if (!l_scalar) {
         int64_t l_off = start;
         void* l_data = resolve_vec_data(lhs, &l_off);

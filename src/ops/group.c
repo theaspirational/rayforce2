@@ -51,8 +51,11 @@ static void reduce_acc_init(reduce_acc_t* acc) {
         for (int64_t row = start; row < end; row++) { \
             if (has_nulls && (null_bm[row/8] >> (row%8)) & 1) { (acc)->null_count++; continue; } \
             int64_t v = (int64_t)d[row]; \
-            (acc)->sum_i += v; (acc)->sum_sq_i += v * v; \
-            (acc)->prod_i = (int64_t)((uint64_t)(acc)->prod_i * (uint64_t)v); \
+            /* sum/sum_sq may overflow on signed arithmetic — use defined \
+             * unsigned wrap (same semantic, no UBSan whine). */ \
+            (acc)->sum_i    = (int64_t)((uint64_t)(acc)->sum_i    + (uint64_t)v); \
+            (acc)->sum_sq_i = (int64_t)((uint64_t)(acc)->sum_sq_i + (uint64_t)v * (uint64_t)v); \
+            (acc)->prod_i   = (int64_t)((uint64_t)(acc)->prod_i   * (uint64_t)v); \
             if (v < (acc)->min_i) (acc)->min_i = v; \
             if (v > (acc)->max_i) (acc)->max_i = v; \
             if (!(acc)->has_first) { (acc)->first_i = v; (acc)->has_first = true; } \
@@ -130,9 +133,10 @@ static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_t
         if (src->min_f < dst->min_f) dst->min_f = src->min_f;
         if (src->max_f > dst->max_f) dst->max_f = src->max_f;
     } else {
-        dst->sum_i += src->sum_i;
-        dst->sum_sq_i += src->sum_sq_i;
-        dst->prod_i *= src->prod_i;
+        /* Defined unsigned wrap — matches REDUCE_LOOP_I's per-row path. */
+        dst->sum_i    = (int64_t)((uint64_t)dst->sum_i    + (uint64_t)src->sum_i);
+        dst->sum_sq_i = (int64_t)((uint64_t)dst->sum_sq_i + (uint64_t)src->sum_sq_i);
+        dst->prod_i   = (int64_t)((uint64_t)dst->prod_i   * (uint64_t)src->prod_i);
         if (src->min_i < dst->min_i) dst->min_i = src->min_i;
         if (src->max_i > dst->max_i) dst->max_i = src->max_i;
     }
@@ -2670,7 +2674,11 @@ da_path:;
                     if (mm_maxs[w] > kmax) kmax = mm_maxs[w];
                 }
                 da_key_min[k]   = kmin;
-                da_key_range[k] = kmax - kmin + 1;
+                /* kmax - kmin may overflow i64 when keys span full range.
+                 * Compute in uint64_t and reject if the span exceeds i64. */
+                uint64_t span = (uint64_t)kmax - (uint64_t)kmin + 1;
+                if (span > (uint64_t)INT64_MAX) { da_fits = false; break; }
+                da_key_range[k] = (int64_t)span;
                 if (da_key_range[k] <= 0) { da_fits = false; break; }
                 total_slots *= (uint64_t)da_key_range[k];
                 if (total_slots > DA_MAX_COMPOSITE_SLOTS) da_fits = false;

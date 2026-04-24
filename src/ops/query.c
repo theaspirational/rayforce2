@@ -4109,11 +4109,14 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
                 if (ray_table_col_name(tbl, c) == dk) { found_in_tbl = 1; break; }
             }
             if (!found_in_tbl) {
+                /* Dict key doesn't correspond to any table column — a
+                 * schema-value mismatch, classified as "value" rather
+                 * than "domain" (which means out-of-range). */
                 for (int64_t c = 0; c < ncols; c++) if (dv[c]) ray_release(dv[c]);
                 dict_vals->len = 0;
                 ray_free(dict_vals);
                 ray_release(tbl); ray_release(row_orig);
-                return ray_error("domain", NULL);
+                return ray_error("value", NULL);
             }
         }
         row = dict_vals;
@@ -4262,7 +4265,74 @@ ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
     /* Table row: iterate row-by-row for proper upsert semantics */
     if (row->type == RAY_TABLE) {
         int64_t src_nrows = ray_table_nrows(row);
-        /* Get source columns by matching target column names; missing cols → NULL */
+        int64_t src_ncols = ray_table_ncols(row);
+
+        /* Zero-row payload → upsert is a no-op regardless of payload
+         * schema.  Skip all schema-strictness here: rejecting an empty
+         * partial payload (e.g. for missing key columns) regresses the
+         * pre-existing "empty input = do nothing" behavior.  No data
+         * flows, so neither silent-drop nor null-key crashes are
+         * possible below. */
+        if (src_nrows == 0) {
+            ray_release(key_sym); ray_release(row);
+            return tbl;
+        }
+
+        /* Schema-strictness (table payload is a PARTIAL view — columns
+         * in target but not in source are intentionally null-filled).
+         * We only need to reject:
+         *   (a) a source column whose name isn't in the target (extra
+         *       → silent drop of user data);
+         *   (b) a source column name that appears more than once in the
+         *       source (ambiguous);
+         *   (c) a source column name whose target column appears more
+         *       than once in `tbl` (name-keyed gather can't tell which
+         *       target slot the value belongs to → silent duplication).
+         * Duplicate target columns whose names don't appear in `row`
+         * are harmless — they get null-filled like any other missing
+         * column. */
+        for (int64_t sc = 0; sc < src_ncols; sc++) {
+            int64_t scn = ray_table_col_name(row, sc);
+            int64_t tbl_matches = 0, src_matches = 0;
+            for (int64_t i = 0; i < ncols;     i++) if (ray_table_col_name(tbl, i) == scn) tbl_matches++;
+            for (int64_t i = 0; i < src_ncols; i++) if (ray_table_col_name(row, i) == scn) src_matches++;
+            if (tbl_matches != 1 || src_matches != 1) {
+                ray_release(tbl); ray_release(key_sym); ray_release(row);
+                return ray_error("value", NULL);
+            }
+        }
+
+        /* Partial updates may null-fill ordinary columns, but the key
+         * column(s) MUST be present — otherwise the recursive upsert
+         * reads a NULL from row_elems[key_col] and segfaults.  Resolve
+         * key names from key_sym and require each to appear in row. */
+        int64_t key_names[16];
+        int64_t n_key = 0;
+        if (key_sym->type == -RAY_SYM) {
+            key_names[n_key++] = key_sym->i64;
+        } else if (key_sym->type == -RAY_I64) {
+            int64_t k = key_sym->i64;
+            if (k <= 0 || k > ncols || k > 16) {
+                ray_release(tbl); ray_release(key_sym); ray_release(row);
+                return ray_error("domain", NULL);
+            }
+            for (int64_t i = 0; i < k; i++)
+                key_names[n_key++] = ray_table_col_name(tbl, i);
+        } else {
+            ray_release(tbl); ray_release(key_sym); ray_release(row);
+            return ray_error("type", NULL);
+        }
+        for (int64_t k = 0; k < n_key; k++) {
+            int found = 0;
+            for (int64_t i = 0; i < src_ncols; i++)
+                if (ray_table_col_name(row, i) == key_names[k]) { found = 1; break; }
+            if (!found) {
+                ray_release(tbl); ray_release(key_sym); ray_release(row);
+                return ray_error("value", NULL);
+            }
+        }
+
+        /* Gather source columns in target order (now guaranteed 1-to-1). */
         ray_t* src_cols[64];
         for (int64_t c = 0; c < ncols && c < 64; c++) {
             int64_t cn = ray_table_col_name(tbl, c);
@@ -4303,13 +4373,38 @@ ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
     /* Dict row: extract values in column order to create a plain list */
     ray_t* dict_row_list = NULL;
     if (row->attrs & RAY_ATTR_DICT) {
+        ray_t** dict_items = (ray_t**)ray_data(row);
+        int64_t dict_len   = ray_len(row);
+        int64_t n_pairs    = dict_len / 2;
+
+        /* Schema-strictness: same rule as the table-payload path —
+         * every column name must appear exactly once on each side.
+         * A presence-only check would let tbl=[a a b] + dict [a b] slip
+         * through (both target `a` slots wired to the same dict value),
+         * and dict [a a b] + tbl [a b] (second `a` key silently dropped).
+         * The uniqueness requirement rejects either ambiguity. */
+        if (n_pairs != ncols) {
+            ray_release(tbl); ray_release(key_sym); ray_release(row);
+            return ray_error("value", NULL);
+        }
+        for (int64_t c = 0; c < ncols; c++) {
+            int64_t cn = ray_table_col_name(tbl, c);
+            int64_t tbl_matches = 0, dict_matches = 0;
+            for (int64_t i = 0; i < ncols; i++)
+                if (ray_table_col_name(tbl, i) == cn) tbl_matches++;
+            for (int64_t d = 0; d + 1 < dict_len; d += 2)
+                if (dict_items[d]->type == -RAY_SYM && dict_items[d]->i64 == cn) dict_matches++;
+            if (tbl_matches != 1 || dict_matches != 1) {
+                ray_release(tbl); ray_release(key_sym); ray_release(row);
+                return ray_error("value", NULL);
+            }
+        }
+
         dict_row_list = ray_alloc(ncols * sizeof(ray_t*));
         if (!dict_row_list) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("oom", NULL); }
         dict_row_list->type = RAY_LIST;
         dict_row_list->len = ncols;
         ray_t** drl = (ray_t**)ray_data(dict_row_list);
-        ray_t** dict_items = (ray_t**)ray_data(row);
-        int64_t dict_len = ray_len(row);
         for (int64_t c = 0; c < ncols; c++) {
             int64_t col_name = ray_table_col_name(tbl, c);
             drl[c] = NULL;
@@ -4320,13 +4415,7 @@ ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
                     break;
                 }
             }
-            if (!drl[c]) {
-                for (int64_t j = 0; j < c; j++) if (drl[j]) ray_release(drl[j]);
-                dict_row_list->len = 0;
-                ray_free(dict_row_list);
-                ray_release(tbl); ray_release(key_sym); ray_release(row);
-                return ray_error("domain", NULL);
-            }
+            /* drl[c] guaranteed non-NULL by the uniqueness check above. */
         }
         ray_release(row);
         row = dict_row_list;
@@ -5524,7 +5613,7 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
 /* (asof-join [key1 key2 ... timeKey] leftTable rightTable)
  * Last key is the time/asof column, rest are equality keys. */
 ray_t* ray_asof_join_fn(ray_t** args, int64_t n) {
-    if (n < 3) return ray_error("domain", NULL);
+    if (n < 3) return ray_error("arity", NULL);
     ray_t* keys_vec   = args[0];
     ray_t* left_tbl   = args[1];
     ray_t* right_tbl  = args[2];

@@ -2086,14 +2086,11 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
                 }
             }
             if (!bcol) {
-                /* Column not found in b -- error if b also has columns not in a */
-                if (ncols_b > ncols_a) {
-                    ray_release(result);
-                    return ray_error("domain", NULL);
-                }
-                /* Otherwise error */
+                /* Column not present in b — schema mismatch is a "value"
+                 * error (the table values have incompatible columns), not
+                 * a "domain" error (which semantically means out-of-range). */
                 ray_release(result);
-                return ray_error("domain", NULL);
+                return ray_error("value", NULL);
             }
             /* Type check: columns must have the same type */
             if (acol->type != bcol->type) {

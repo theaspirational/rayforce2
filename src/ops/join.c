@@ -760,10 +760,14 @@ ray_t* exec_join(ray_graph_t* g, ray_op_t* op, ray_t* left_table, ray_t* right_t
     uint8_t n_keys = ext->join.n_join_keys;
     uint8_t join_type = ext->join.join_type;
 
-    ray_t* l_key_vecs[n_keys];
-    ray_t* r_key_vecs[n_keys];
-    memset(l_key_vecs, 0, n_keys * sizeof(ray_t*));
-    memset(r_key_vecs, 0, n_keys * sizeof(ray_t*));
+    /* VLA bound of zero is UB under -fsanitize=undefined.  Guarantee >=1
+     * slot; iterations below are bounded by n_keys so the extra slot is
+     * untouched when n_keys == 0. */
+    size_t key_slots = n_keys ? n_keys : 1;
+    ray_t* l_key_vecs[key_slots];
+    ray_t* r_key_vecs[key_slots];
+    memset(l_key_vecs, 0, key_slots * sizeof(ray_t*));
+    memset(r_key_vecs, 0, key_slots * sizeof(ray_t*));
 
     for (uint8_t k = 0; k < n_keys; k++) {
         ray_op_ext_t* lk = find_ext(g, ext->join.left_keys[k]->id);

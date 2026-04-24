@@ -199,7 +199,7 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
     if (vec->type == RAY_TABLE && ray_is_vec(mask) && mask->type == RAY_BOOL) {
         int64_t ncols = vec->len;
         int64_t nrows = ray_table_nrows(vec);
-        if (nrows != mask->len) return ray_error("domain", NULL);
+        if (nrows != mask->len) return ray_error("length", NULL);
         ray_t* schema = ray_table_schema(vec);
         ray_t* result = ray_table_new((int32_t)ncols);
         if (RAY_IS_ERR(result)) return result;
@@ -220,7 +220,7 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
         const char* sp = ray_str_ptr(vec);
         size_t slen = ray_str_len(vec);
         int64_t mlen = mask->len;
-        if ((int64_t)slen != mlen) return ray_error("domain", NULL);
+        if ((int64_t)slen != mlen) return ray_error("length", NULL);
         bool* mb = (bool*)ray_data(mask);
         int64_t count = 0;
         for (int64_t i = 0; i < mlen; i++) if (mb[i]) count++;
@@ -237,7 +237,7 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
     if (ray_is_vec(vec) && ray_is_vec(mask) && mask->type == RAY_BOOL) {
         int64_t len = vec->len;
         int64_t mlen = mask->len;
-        if (len != mlen) return ray_error("domain", NULL);
+        if (len != mlen) return ray_error("length", NULL);
         bool* mb = (bool*)ray_data(mask);
 
         /* Count true values */
@@ -272,7 +272,7 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
     if (!is_list(vec) || !is_list(mask)) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("type", NULL); }
     int64_t len = ray_len(vec);
     int64_t mlen = ray_len(mask);
-    if (len != mlen) return ray_error("domain", NULL);
+    if (len != mlen) return ray_error("length", NULL);
 
     ray_t** velems = (ray_t**)ray_data(vec);
     ray_t** melems = (ray_t**)ray_data(mask);
@@ -872,6 +872,12 @@ ray_t* ray_sect_fn(ray_t* vec1, ray_t* vec2) {
 /* (take vec n) — first n elements (positive) or last |n| elements (negative) */
 ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
     if (ray_is_lazy(vec)) vec = ray_lazy_materialize(vec);
+    /* N must be an integer (or 2-elem i64 vector for range-take).  Reject
+     * floats up front: as_i64(f64) reads the bit pattern and would cause
+     * e.g. (take 1.0 2.0) to attempt a 4.6-quintillion-element allocation
+     * and surface as "oom" — misleading for what is really a type error. */
+    if (ray_is_atom(n_obj) && n_obj->type == -RAY_F64)
+        return ray_error("type", NULL);
     /* Range take: (take collection [start amount]) — slice from start for amount elements */
     if (ray_is_vec(n_obj) && n_obj->type == RAY_I64 && ray_len(n_obj) == 2) {
         int64_t* idx = (int64_t*)ray_data(n_obj);
