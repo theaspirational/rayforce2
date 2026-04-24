@@ -77,5 +77,7 @@ clean:
 	-rm -f $(LIB_OBJ) $(MAIN_OBJ) $(TEST_OBJ)
 	-rm -f $(TARGET) $(TARGET).test lib$(TARGET).a
 	-rm -rf build build_release
+	# Test-generated fixtures (see test/rfl/system/*.rfl) — should not linger after a run.
+	-rm -f rf_test_*.csv
 
 .PHONY: default debug release lib test clean
