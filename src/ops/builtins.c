@@ -30,6 +30,7 @@
 #include "vec/vec.h"
 #include "lang/nfo.h"
 #include "lang/parse.h"
+#include "core/pool.h"
 #include "core/types.h"
 #include "io/csv.h"
 #include "ops/ops.h"
@@ -552,13 +553,336 @@ static ray_t* cast_vec_copy_nulls(ray_t* vec, ray_t* val) {
     return vec;
 }
 
+/* Bulk-cast loop over [_lo, _hi).  Reads `R` from `_src_p`, writes `W`
+ * to `_dst_p`.  No atom allocations.  The single-threaded path passes
+ * the whole [0, n2) range; the parallel worker passes its slice. */
+#define CAST_LOOP_RANGE(R, W, EXPR, _lo, _hi) do {                     \
+    const R* _src = (const R*)_src_p;                                  \
+    W* _dst = (W*)_dst_p;                                              \
+    for (int64_t _i = (_lo); _i < (_hi); _i++) {                       \
+        R _v = _src[_i];                                               \
+        _dst[_i] = (EXPR);                                             \
+    }                                                                  \
+} while (0)
+#define CAST_LOOP(R, W, EXPR) CAST_LOOP_RANGE(R, W, EXPR, 0, n2)
+
+/* Same-byte-rep type relabels (I64↔TIMESTAMP, I32↔DATE↔TIME): the
+ * per-element data is identical, so a single memcpy populates the new
+ * vector.  Returns true on hit. */
+static bool cast_vec_relabel_compat(int8_t a, int8_t b) {
+    if (a == b) return true;
+    if ((a == RAY_I64 || a == RAY_TIMESTAMP) &&
+        (b == RAY_I64 || b == RAY_TIMESTAMP)) return true;
+    if ((a == RAY_I32 || a == RAY_DATE || a == RAY_TIME) &&
+        (b == RAY_I32 || b == RAY_DATE || b == RAY_TIME)) return true;
+    return false;
+}
+
+/* Vec→vec numeric cast on raw arrays (no per-element atom allocs).
+ * Returns the populated `vec` on success, or NULL if the (in_type,
+ * out_type) pair is unsupported here — caller falls back to the generic
+ * path.
+ *
+ * Temporal cross-unit pairs match the per-atom slow path:
+ *   DATE → TIMESTAMP : multiply by 86_400e9 ns/day
+ *   TIMESTAMP → DATE : divide   by 86_400e9
+ *   TIMESTAMP → TIME : modulo   by 86_400e9
+ * All other cross-type pairs are plain numeric casts. */
+#define NS_PER_DAY 86400000000000LL
+
+/* Element-wise cast worker: writes _dst_p[lo..hi) from _src_p[lo..hi).
+ * Used by both the single-threaded fast path and the parallel dispatch.
+ * Returns true on hit; false means caller falls back to the generic
+ * (atom) path. */
+static bool cast_range_worker(const void* _src_p, void* _dst_p,
+                              int64_t lo, int64_t hi,
+                              int8_t in_type, int8_t out_type) {
+    /* Temporal unit conversions. */
+    if (in_type == RAY_DATE && out_type == RAY_TIMESTAMP) {
+        CAST_LOOP_RANGE(int32_t, int64_t, (int64_t)_v * NS_PER_DAY, lo, hi);
+        return true;
+    }
+    if (in_type == RAY_TIMESTAMP && out_type == RAY_DATE) {
+        CAST_LOOP_RANGE(int64_t, int32_t, (int32_t)(_v / NS_PER_DAY), lo, hi);
+        return true;
+    }
+    if (in_type == RAY_TIMESTAMP && out_type == RAY_TIME) {
+        CAST_LOOP_RANGE(int64_t, int32_t, (int32_t)((_v % NS_PER_DAY) / 1000000LL), lo, hi);
+        return true;
+    }
+    /* Generic numeric pairs.  The big switch dispatches on (out_type,
+     * in_type); each leaf is a tight typed loop the compiler vectorizes. */
+#define CL(R, W, EXPR) do { CAST_LOOP_RANGE(R, W, EXPR, lo, hi); return true; } while (0)
+    switch (out_type) {
+    case RAY_I64: case RAY_TIMESTAMP:
+        switch (in_type) {
+        case RAY_BOOL:  CL(uint8_t,  int64_t, _v ? 1 : 0);
+        case RAY_U8:    CL(uint8_t,  int64_t, (int64_t)_v);
+        case RAY_I16:   CL(int16_t,  int64_t, (int64_t)_v);
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+                        CL(int32_t,  int64_t, (int64_t)_v);
+        case RAY_F64:   CL(double,   int64_t, (int64_t)_v);
+        }
+        break;
+    case RAY_I32: case RAY_DATE: case RAY_TIME:
+        switch (in_type) {
+        case RAY_BOOL:  CL(uint8_t,  int32_t, _v ? 1 : 0);
+        case RAY_U8:    CL(uint8_t,  int32_t, (int32_t)_v);
+        case RAY_I16:   CL(int16_t,  int32_t, (int32_t)_v);
+        case RAY_I64: case RAY_TIMESTAMP:
+                        CL(int64_t,  int32_t, (int32_t)_v);
+        case RAY_F64:   CL(double,   int32_t, (int32_t)_v);
+        }
+        break;
+    case RAY_I16:
+        switch (in_type) {
+        case RAY_BOOL:  CL(uint8_t,  int16_t, _v ? 1 : 0);
+        case RAY_U8:    CL(uint8_t,  int16_t, (int16_t)_v);
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+                        CL(int32_t,  int16_t, (int16_t)_v);
+        case RAY_I64: case RAY_TIMESTAMP:
+                        CL(int64_t,  int16_t, (int16_t)_v);
+        case RAY_F64:   CL(double,   int16_t, (int16_t)_v);
+        }
+        break;
+    case RAY_U8:
+        switch (in_type) {
+        case RAY_BOOL:  CL(uint8_t,  uint8_t, _v ? 1 : 0);
+        case RAY_I16:   CL(int16_t,  uint8_t, (uint8_t)_v);
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+                        CL(int32_t,  uint8_t, (uint8_t)_v);
+        case RAY_I64: case RAY_TIMESTAMP:
+                        CL(int64_t,  uint8_t, (uint8_t)_v);
+        case RAY_F64:   CL(double,   uint8_t, (uint8_t)_v);
+        }
+        break;
+    case RAY_F64:
+        switch (in_type) {
+        case RAY_BOOL:  CL(uint8_t,  double, _v ? 1.0 : 0.0);
+        case RAY_U8:    CL(uint8_t,  double, (double)_v);
+        case RAY_I16:   CL(int16_t,  double, (double)_v);
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+                        CL(int32_t,  double, (double)_v);
+        case RAY_I64: case RAY_TIMESTAMP:
+                        CL(int64_t,  double, (double)_v);
+        }
+        break;
+    case RAY_BOOL:
+        switch (in_type) {
+        case RAY_U8:    CL(uint8_t,  uint8_t, _v != 0 ? 1 : 0);
+        case RAY_I16:   CL(int16_t,  uint8_t, _v != 0 ? 1 : 0);
+        case RAY_I32: case RAY_DATE: case RAY_TIME:
+                        CL(int32_t,  uint8_t, _v != 0 ? 1 : 0);
+        case RAY_I64: case RAY_TIMESTAMP:
+                        CL(int64_t,  uint8_t, _v != 0 ? 1 : 0);
+        case RAY_F64:   CL(double,   uint8_t, _v != 0.0 ? 1 : 0);
+        }
+        break;
+    }
+#undef CL
+    return false;
+}
+
+typedef struct {
+    const void* src;
+    void*       dst;
+    int8_t      in_type;
+    int8_t      out_type;
+} cast_par_ctx_t;
+
+static void cast_par_fn(void* arg, uint32_t worker_id, int64_t lo, int64_t hi) {
+    (void)worker_id;
+    /* Honor SIGINT (ray_request_interrupt / ray_interrupted) per task —
+     * the pool's own per-task gate checks `pool->cancelled` only, so
+     * a Ctrl-C arriving during dispatch wouldn't otherwise short-
+     * circuit the workers.  Skip the task on interrupt; the caller
+     * post-checks via CANCELLED() and returns an error. */
+    if (ray_interrupted()) return;
+    cast_par_ctx_t* ctx = (cast_par_ctx_t*)arg;
+    cast_range_worker(ctx->src, ctx->dst, lo, hi, ctx->in_type, ctx->out_type);
+}
+
+/* Threshold below which the dispatch overhead outweighs the speedup.
+ * Memory-bound conversions saturate ~3 GB/s single-thread; with 8
+ * workers we approach DRAM peak (~25 GB/s).  Below ~256 K elements the
+ * 50 µs dispatch cost dominates. */
+#define CAST_PAR_MIN_ELEMS 262144
+
+static ray_t* cast_vec_numeric_fast(ray_t* val, ray_t* vec, int8_t out_type) {
+    int8_t in_type = val->type;
+    int64_t n2 = val->len;
+    ray_pool_t* pool = ray_pool_get();
+
+/* A cast is "cancelled" if EITHER:
+ *   (a) the pool's per-query cancel flag is set (e.g. via ray_cancel
+ *       from another thread or a long-query timeout), or
+ *   (b) the eval-loop interrupt flag is set (Ctrl-C / SIGINT, signalled
+ *       by ray_request_interrupt and observed via ray_interrupted).
+ * Both must be polled — they're independent signals and either one
+ * means the user wants the operation to abort. */
+#define CANCELLED() ((pool && atomic_load_explicit(&pool->cancelled,   \
+                                                   memory_order_acquire)) \
+                     || ray_interrupted())
+#define CHECK_CANCEL_OR(retval) do {                                   \
+    if (CANCELLED()) return ray_error("cancel", NULL);                 \
+    return (retval);                                                   \
+} while (0)
+
+    /* Function-entry cancel check — gates ALL paths below (relabel,
+     * parallel, and chunked single-thread).  Without this, a cancel
+     * pending at entry would still execute the first ~50 µs of any
+     * path before being observed. */
+    if (CANCELLED()) return ray_error("cancel", NULL);
+
+    /* Same byte-rep types: chunked memcpy.  A single
+     * memcpy(_, _, n*esz) on a 10M-element TIMESTAMP relabel is ~80 MB
+     * and ~10 ms of opaque work — cancel arriving during it can't
+     * interrupt the libc copy, so we'd happily return `vec` even if
+     * the user asked to abort.  Break the copy into ~1 MB chunks and
+     * poll cancel between them; max in-flight work between checks is
+     * one chunk (~100 µs at realistic bandwidth). */
+    if (cast_vec_relabel_compat(in_type, out_type)) {
+        size_t esz = (size_t)ray_elem_size(out_type);
+        if (n2 > 0 && esz > 0) {
+            const char* sp = (const char*)ray_data(val);
+            char* dp = (char*)ray_data(vec);
+            size_t total = (size_t)n2 * esz;
+            const size_t chunk_bytes = (size_t)1 << 20;  /* 1 MiB */
+            size_t off = 0;
+            while (off < total) {
+                if (CANCELLED()) return ray_error("cancel", NULL);
+                size_t cn = total - off;
+                if (cn > chunk_bytes) cn = chunk_bytes;
+                memcpy(dp + off, sp + off, cn);
+                off += cn;
+            }
+        }
+        /* Post-check: a cancel landing in the final chunk would have
+         * been missed by the in-loop check (we copy then exit). */
+        if (CANCELLED()) return ray_error("cancel", NULL);
+        return vec;
+    }
+
+    const void* src_p = ray_data(val);
+    void* dst_p = ray_data(vec);
+
+    /* Three return states from this point on (helper does NOT touch
+     * `vec`'s reference count):
+     *
+     *   - `vec`           : success, fully populated, no cancel observed
+     *   - error pointer   : cancellation observed at any point — the
+     *                       helper bails out as soon as it notices,
+     *                       even mid-loop in the single-thread path
+     *   - NULL            : (in_type, out_type) pair unsupported here
+     *                       AND no cancellation observed — caller may
+     *                       safely fall through to the per-atom slow
+     *                       path with `vec` still valid */
+
+    if (pool && n2 >= CAST_PAR_MIN_ELEMS && ray_pool_total_workers(pool) >= 2) {
+        cast_par_ctx_t pctx = { .src = src_p, .dst = dst_p,
+                                .in_type = in_type, .out_type = out_type };
+        /* Probe the worker on a single element to verify the pair is
+         * supported here.  If unsupported, fall through (NULL) — but
+         * still re-check cancel first so a cancel raced into the probe
+         * window is not swallowed. */
+        if (n2 > 0 && cast_range_worker(src_p, dst_p, 0, 1, in_type, out_type)) {
+            ray_pool_dispatch(pool, cast_par_fn, &pctx, n2);
+            if (CANCELLED()) return ray_error("cancel", NULL);
+            return vec;
+        }
+        CHECK_CANCEL_OR(NULL);
+    }
+
+    /* Chunked single-thread path.  Tight typed loops vectorize well
+     * but block cancellation for the whole `n2` range — chunk into
+     * cache-sized pieces so cancel is honored within ~one chunk
+     * (64K elements ≈ 50 µs at realistic bandwidth). */
+    if (n2 == 0)
+        CHECK_CANCEL_OR(vec);
+    /* Re-check cancel right before the first chunk runs (entry cancel
+     * check above is over the whole helper, but if a cancel raced in
+     * between the relabel path and here we want to bail before doing
+     * any work). */
+    if (CANCELLED()) return ray_error("cancel", NULL);
+    int64_t chunk = (int64_t)65536;
+    int64_t lo = 0;
+    int64_t hi = (n2 < chunk) ? n2 : chunk;
+    /* Probe the first chunk; if it fails, the (in, out) pair is
+     * unsupported here and the caller falls through. */
+    if (!cast_range_worker(src_p, dst_p, lo, hi, in_type, out_type))
+        CHECK_CANCEL_OR(NULL);
+    lo = hi;
+    while (lo < n2) {
+        if (CANCELLED()) return ray_error("cancel", NULL);
+        hi = lo + chunk;
+        if (hi > n2) hi = n2;
+        cast_range_worker(src_p, dst_p, lo, hi, in_type, out_type);
+        lo = hi;
+    }
+    CHECK_CANCEL_OR(vec);
+#undef CHECK_CANCEL_OR
+#undef CANCELLED
+}
+
 /* Helper: cast a vector/list to a numeric/temporal/bool type.
- * Handles I64, I32, I16, U8, F64, BOOL, DATE, TIME, TIMESTAMP, SYM. */
+ * Handles I64, I32, I16, U8, F64, BOOL, DATE, TIME, TIMESTAMP, SYM.
+ * Fast path for typed numeric input vectors (no per-element atoms);
+ * generic path for RAY_LIST and other shapes. */
 static ray_t* cast_vec_numeric(ray_t* type_sym, ray_t* val, int8_t out_type) {
     int64_t n2 = val->len;
     ray_t* vec = ray_vec_new(out_type, n2);
     if (RAY_IS_ERR(vec)) return vec;
     vec->len = n2;
+
+    /* Fast path: typed numeric vec → numeric vec, no list/string. */
+    if (ray_is_vec(val) && val->type != RAY_STR && val->type != RAY_SYM &&
+        val->type != RAY_GUID && out_type != RAY_SYM) {
+        ray_t* fast = cast_vec_numeric_fast(val, vec, out_type);
+        /* Three return states (helper does NOT release `vec`):
+         *   - vec on success
+         *   - error pointer on cancellation — caller releases `vec`
+         *   - NULL on unsupported (in_type, out_type) — fall through */
+        if (RAY_IS_ERR(fast)) { ray_release(vec); return fast; }
+        if (fast != NULL) {
+            /* Close the cancellation gap that surrounds the post-cast
+             * nullmap copy.  cast_vec_copy_nulls runs after the
+             * cancel-aware fast cast — for nullable inputs it does a
+             * bitmap copy (and a per-element scan on RAY_LIST inputs
+             * of length n2).  A cancel arriving in that window would
+             * otherwise be masked by the success return.  Pre-check
+             * gates the nullmap work; post-check catches a cancel
+             * landing during it. */
+            ray_pool_t* fp = ray_pool_get();
+#define _FP_CANCELLED() ((fp && atomic_load_explicit(&fp->cancelled, \
+                                                     memory_order_acquire)) \
+                         || ray_interrupted())
+            if (_FP_CANCELLED()) { ray_release(vec); return ray_error("cancel", NULL); }
+            ray_t* result = cast_vec_copy_nulls(vec, val);
+            if (RAY_IS_ERR(result)) return result;
+            if (_FP_CANCELLED()) { ray_release(vec); return ray_error("cancel", NULL); }
+#undef _FP_CANCELLED
+            return vec;
+        }
+    }
+
+    /* Fast path: STR vec → SYM vec.  Direct intern from each element's
+     * (ptr, len), no atom alloc or recursive cast.  ray_sym_intern uses
+     * the table's coarse lock so this stays single-threaded — but it
+     * skips ~150 ns of overhead per row. */
+    if (out_type == RAY_SYM && ray_is_vec(val) && val->type == RAY_STR) {
+        int64_t* ids = (int64_t*)ray_data(vec);
+        for (int64_t i = 0; i < n2; i++) {
+            size_t slen = 0;
+            const char* sp = ray_str_vec_get(val, i, &slen);
+            int64_t id = ray_sym_intern(sp ? sp : "", sp ? slen : 0);
+            if (id < 0) { ray_release(vec); return ray_error("oom", NULL); }
+            ids[i] = id;
+        }
+        ray_t* result = cast_vec_copy_nulls(vec, val);
+        if (RAY_IS_ERR(result)) return result;
+        return vec;
+    }
+
     void* out = ray_data(vec);
     for (int64_t i = 0; i < n2; i++) {
         int alloc = 0;
@@ -874,7 +1198,10 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I64) return ray_time(val->i64);
         if (val->type == -RAY_F64) return ray_time((int64_t)val->f64);
         if (val->type == -RAY_DATE) return ray_time((int64_t)val->i32);
-        if (val->type == -RAY_TIMESTAMP) return ray_time((int64_t)(val->i64 % 86400000000000LL));
+        if (val->type == -RAY_TIMESTAMP)
+            /* TIMESTAMP is ns since epoch; TIME stores ms-of-day, so we
+             * need to take the within-day remainder and convert ns→ms. */
+            return ray_time((int64_t)((val->i64 % 86400000000000LL) / 1000000LL));
         if (val->type == -RAY_STR) {
             /* Parse "HH:MM:SS[.mmm]" */
             const char* sp = ray_str_ptr(val);
