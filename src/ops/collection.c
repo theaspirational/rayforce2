@@ -1072,10 +1072,24 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
         char* dst = (char*)ray_data(result);
         if (len == 0) {
             memset(dst, 0, (size_t)(abs_n * esz));
-        } else if (n >= 0) {
-            for (int64_t i = 0; i < abs_n; i++)
-                memcpy(dst + i * esz, src + (i % len) * esz, esz);
-        } else {
+        } else if (n >= 0 && abs_n > 0) {
+            /* Doubling tile-copy: O(log(abs_n/len)) memcpys instead of
+             * abs_n calls of esz bytes each.  Invariant: after every
+             * memcpy `copied` is a multiple of `len`, so dst[0..copied)
+             * holds a perfect tile and we can keep doubling from dst[0].
+             * The final partial copy is < copied so it stays within the
+             * already-tiled prefix. */
+            int64_t to_copy = abs_n < len ? abs_n : len;
+            memcpy(dst, src, (size_t)(to_copy * esz));
+            int64_t copied = to_copy;
+            while (copied + copied <= abs_n) {
+                memcpy(dst + copied * esz, dst, (size_t)(copied * esz));
+                copied *= 2;
+            }
+            int64_t remaining = abs_n - copied;
+            if (remaining > 0)
+                memcpy(dst + copied * esz, dst, (size_t)(remaining * esz));
+        } else if (n < 0) {
             /* Negative: take from end with wrap */
             for (int64_t i = 0; i < abs_n; i++) {
                 int64_t si = len - (abs_n - i) % len;
