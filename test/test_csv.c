@@ -474,8 +474,56 @@ static test_result_t test_csv_escaped_str_roundtrip(void) {
     PASS();
 }
 
+/* Regression: GUID columns used to fall through the schema map to the SYM
+ * pipeline, so a round-trip through CSV produced a column filled with sym
+ * IDs reinterpreted as 16-byte GUIDs (see flips.rfl example).  After the
+ * dedicated CSV_TYPE_GUID path, a written GUID must read back identically. */
+static test_result_t test_csv_guid_roundtrip(void) {
+    ray_heap_init();
+    (void)ray_sym_init();
+
+    /* 4 deterministic 16-byte GUIDs, written canonical 8-4-4-4-12 form. */
+    uint8_t guids[4][16];
+    for (int r = 0; r < 4; r++)
+        for (int b = 0; b < 16; b++)
+            guids[r][b] = (uint8_t)(0x10 + r * 16 + b);
+
+    ray_t* vec = ray_vec_from_raw(RAY_GUID, guids, 4);
+    int64_t name = ray_sym_intern("g", 1);
+    ray_t* tbl = ray_table_new(1);
+    tbl = ray_table_add_col(tbl, name, vec);
+    ray_release(vec);
+
+    ray_err_t err = ray_write_csv(tbl, TMP_CSV);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
+
+    int8_t schema[1] = { RAY_GUID };
+    ray_t* loaded = ray_read_csv_opts(TMP_CSV, 0, true, schema, 1);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(ray_table_nrows(loaded), 4);
+
+    ray_t* col = ray_table_get_col_idx(loaded, 0);
+    TEST_ASSERT_EQ_I(col->type, RAY_GUID);
+    const uint8_t* d = (const uint8_t*)ray_data(col);
+    for (int r = 0; r < 4; r++) {
+        for (int b = 0; b < 16; b++) {
+            TEST_ASSERT_FMT(d[r * 16 + b] == guids[r][b],
+                "row %d byte %d: got 0x%02x, want 0x%02x",
+                r, b, d[r * 16 + b], guids[r][b]);
+        }
+    }
+
+    ray_release(loaded);
+    ray_release(tbl);
+    unlink(TMP_CSV);
+    ray_sym_destroy();
+    ray_heap_destroy();
+    PASS();
+}
+
 const test_entry_t csv_entries[] = {
     { "csv/roundtrip_i64", test_csv_roundtrip_i64, NULL, NULL },
+    { "csv/roundtrip_guid", test_csv_guid_roundtrip, NULL, NULL },
     { "csv/roundtrip_f64", test_csv_roundtrip_f64, NULL, NULL },
     { "csv/multi_column", test_csv_multi_column, NULL, NULL },
     { "csv/empty_table", test_csv_empty_table, NULL, NULL },

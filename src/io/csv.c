@@ -40,6 +40,7 @@
 #include "csv.h"
 #include "mem/heap.h"
 #include "mem/sys.h"
+#include "core/numparse.h"
 #include "core/pool.h"
 #include "lang/format.h"
 #include "ops/hash.h"
@@ -53,7 +54,7 @@
 
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>  /* strtoll fallback for fast_i64 overflow */
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #ifndef RAY_OS_WINDOWS
@@ -129,7 +130,8 @@ typedef enum {
     CSV_TYPE_STR,
     CSV_TYPE_DATE,
     CSV_TYPE_TIME,
-    CSV_TYPE_TIMESTAMP
+    CSV_TYPE_TIMESTAMP,
+    CSV_TYPE_GUID
 } csv_type_t;
 
 static csv_type_t detect_type(const char* f, size_t len) {
@@ -328,195 +330,23 @@ RAY_INLINE const char* scan_field(const char* p, const char* buf_end,
 }
 
 /* --------------------------------------------------------------------------
- * Fast inline integer parser (replaces strtoll)
+ * Numeric field parsers — thin wrappers over core/numparse with the
+ * CSV semantics that the *entire* field must be consumed; otherwise
+ * the cell is null.
  * -------------------------------------------------------------------------- */
 
 RAY_INLINE int64_t fast_i64(const char* p, size_t len, bool* is_null) {
-    if (RAY_UNLIKELY(len == 0)) { *is_null = true; return 0; }
-    *is_null = false;
-
-    const char* end = p + len;
-    const char* start = p;
-    bool neg = false;
-    if (*p == '-') { neg = true; p++; }
-    else if (*p == '+') { p++; }
-
-    /* Count digit span; if >18, fall back to strtoll to avoid overflow */
-    size_t digit_len = 0;
-    for (const char* q = p; q < end && (unsigned char)(*q - '0') <= 9; q++)
-        digit_len++;
-    if (RAY_UNLIKELY(digit_len > 18)) {
-        /* max int64 = 20 chars; 31-byte limit safe for valid integers. */
-        char tmp[32];
-        size_t slen = (size_t)(end - start);
-        if (slen > sizeof(tmp) - 1) slen = sizeof(tmp) - 1;
-        memcpy(tmp, start, slen);
-        tmp[slen] = '\0';
-        char* endp;
-        int64_t v = strtoll(tmp, &endp, 10);
-        if (*endp != '\0') { *is_null = true; return 0; }
-        return v;
-    }
-
-    uint64_t val = 0;
-    while (p < end) {
-        unsigned d = (unsigned char)*p - '0';
-        if (d > 9) break; /* stop on non-digit */
-        val = val * 10 + d;
-        p++;
-    }
-
-    /* If digit scan didn't consume entire field → unparseable */
-    if (p != end) { *is_null = true; return 0; }
-
-    /* 18-digit values may exceed int64 range; fall back to strtoll for safety */
-    if (RAY_UNLIKELY(digit_len == 18)) {
-        uint64_t limit = neg ? (uint64_t)INT64_MAX + 1u : (uint64_t)INT64_MAX;
-        if (val > limit) {
-            char tmp[32];
-            size_t slen = (size_t)(end - start);
-            if (slen > sizeof(tmp) - 1) slen = sizeof(tmp) - 1;
-            memcpy(tmp, start, slen);
-            tmp[slen] = '\0';
-            char* endp;
-            int64_t v = strtoll(tmp, &endp, 10);
-            if (*endp != '\0') { *is_null = true; return 0; }
-            return v;
-        }
-    }
-    /* Negate in unsigned to avoid signed overflow UB */
-    return neg ? (int64_t)(~val + 1u) : (int64_t)val;
+    int64_t v = 0;
+    size_t n = ray_parse_i64(p, len, &v);
+    *is_null = (n == 0 || n != len);
+    return *is_null ? 0 : v;
 }
 
-/* --------------------------------------------------------------------------
- * Fast inline float parser (replaces strtod)
- *
- * Handles: [+-]digits[.digits][eE[+-]digits]
- * Uses pow10 lookup table for exponents up to +/-22.
- * -------------------------------------------------------------------------- */
-
-static const double g_pow10[] = {
-    1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,
-    1e8,  1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
-    1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22
-};
-
 RAY_INLINE double fast_f64(const char* p, size_t len, bool* is_null) {
-    if (RAY_UNLIKELY(len == 0)) { *is_null = true; return 0.0; }
-    *is_null = false;
-
-    /* NaN/Inf string literals — check before numeric parse (valid, not null) */
-    if (RAY_UNLIKELY(len <= 4)) {
-        if (len == 3 &&
-            (p[0]=='n'||p[0]=='N') && (p[1]=='a'||p[1]=='A') && (p[2]=='n'||p[2]=='N'))
-            return __builtin_nan("");
-        if (len == 3 &&
-            (p[0]=='i'||p[0]=='I') && (p[1]=='n'||p[1]=='N') && (p[2]=='f'||p[2]=='F'))
-            return __builtin_inf();
-        if (len == 4 && p[0] == '+' &&
-            (p[1]=='i'||p[1]=='I') && (p[2]=='n'||p[2]=='N') && (p[3]=='f'||p[3]=='F'))
-            return __builtin_inf();
-        if (len == 4 && p[0] == '-' &&
-            (p[1]=='i'||p[1]=='I') && (p[2]=='n'||p[2]=='N') && (p[3]=='f'||p[3]=='F'))
-            return -__builtin_inf();
-    }
-
-    const char* start = p;
-    const char* end = p + len;
-    int negative = 0;
-    if (*p == '-') { negative = 1; p++; }
-    else if (*p == '+') { p++; }
-
-    /* Integer part */
-    uint64_t int_part = 0;
-    int idigits = 0;
-    while (p < end && (unsigned)(*p - '0') < 10) {
-        int_part = int_part * 10 + (uint64_t)(*p - '0');
-        idigits++;
-        p++;
-        if (idigits > 18) goto strtod_fallback;
-    }
-    /* 18-digit integer parts risk uint64 overflow in subsequent mul;
-     * fall back to strtod for exact conversion. */
-    if (RAY_UNLIKELY(idigits == 18 && int_part > (uint64_t)999999999999999999ULL))
-        goto strtod_fallback;
-    double val = (double)int_part;
-
-    /* Fractional part */
-    if (p < end && *p == '.') {
-        p++;
-        uint64_t frac = 0;
-        int frac_digits = 0;
-        while (p < end && (unsigned)(*p - '0') < 10) {
-            frac = frac * 10 + (uint64_t)(*p - '0');
-            frac_digits++;
-            p++;
-            if (frac_digits > 18) {
-                /* Cap fractional accumulation — skip remaining fractional digits */
-                while (p < end && (unsigned)(*p - '0') < 10) p++;
-                break;
-            }
-        }
-        if (frac_digits > 0 && frac_digits <= 22) {
-            val += (double)frac / g_pow10[frac_digits];
-        } else if (frac_digits > 0) {
-            double f = (double)frac;
-            int d = frac_digits;
-            while (d > 22) { f /= 1e22; d -= 22; }
-            f /= g_pow10[d];
-            val += f;
-        }
-    }
-
-    /* Exponent */
-    if (p < end && (*p == 'e' || *p == 'E')) {
-        p++;
-        int exp_neg = 0;
-        if (p < end) {
-            if (*p == '-') { exp_neg = 1; p++; }
-            else if (*p == '+') { p++; }
-        }
-        int exp_val = 0;
-        while (p < end && (unsigned)(*p - '0') < 10) {
-            exp_val = exp_val * 10 + (*p - '0');
-            /* Clamp exponent to avoid int overflow on crafted input (e.g. 1e9999999999).
-             * 10^999 is far beyond double range (max ~10^308), so the result
-             * will be inf/0.0 anyway, but the integer arithmetic stays defined. */
-            if (exp_val > 999) exp_val = 999;
-            p++;
-        }
-        if (exp_val <= 22) {
-            if (exp_neg) val /= g_pow10[exp_val];
-            else         val *= g_pow10[exp_val];
-        } else {
-            int e = exp_val;
-            if (exp_neg) {
-                while (e > 22) { val /= 1e22; e -= 22; }
-                val /= g_pow10[e];
-            } else {
-                while (e > 22) { val *= 1e22; e -= 22; }
-                val *= g_pow10[e];
-            }
-        }
-    }
-
-    /* If we didn't consume all input, field is unparseable */
-    if (p != end) { *is_null = true; return 0.0; }
-
-    return negative ? -val : val;
-
-strtod_fallback:
-    {
-        char tmp[64];
-        size_t slen = (size_t)(end - start);
-        if (slen > sizeof(tmp) - 1) slen = sizeof(tmp) - 1;
-        memcpy(tmp, start, slen);
-        tmp[slen] = '\0';
-        char* endp;
-        double v = strtod(tmp, &endp);
-        if (*endp != '\0') { *is_null = true; return 0.0; }
-        return v;
-    }
+    double v = 0.0;
+    size_t n = ray_parse_f64(p, len, &v);
+    *is_null = (n == 0 || n != len);
+    return *is_null ? 0.0 : v;
 }
 
 /* --------------------------------------------------------------------------
@@ -628,6 +458,37 @@ RAY_INLINE uint8_t fast_bool(const char* s, size_t len, bool* is_null) {
         return 0;
     *is_null = true;
     return 0;
+}
+
+/* --------------------------------------------------------------------------
+ * GUID parser (mirrors csv_write_guid: 8-4-4-4-12 hex, 36 chars).
+ * Writes 16 bytes to `dst`.  Sets *is_null on shape or hex mismatch.
+ * -------------------------------------------------------------------------- */
+
+RAY_INLINE int hex_nibble(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+RAY_INLINE void fast_guid(const char* p, size_t len, uint8_t* dst, bool* is_null) {
+    if (RAY_UNLIKELY(len != 36 ||
+                     p[8]  != '-' || p[13] != '-' ||
+                     p[18] != '-' || p[23] != '-')) {
+        *is_null = true;
+        return;
+    }
+    /* Layout: bytes 0..3 from chars 0..7, then 4..5 from 9..12,
+     * 6..7 from 14..17, 8..9 from 19..22, 10..15 from 24..35. */
+    static const uint8_t pos[16] = { 0,2,4,6,  9,11, 14,16, 19,21, 24,26,28,30,32,34 };
+    for (int i = 0; i < 16; i++) {
+        int hi = hex_nibble((unsigned char)p[pos[i]]);
+        int lo = hex_nibble((unsigned char)p[pos[i] + 1]);
+        if (RAY_UNLIKELY((hi | lo) < 0)) { *is_null = true; return; }
+        dst[i] = (uint8_t)((hi << 4) | lo);
+    }
+    *is_null = false;
 }
 
 /* --------------------------------------------------------------------------
@@ -839,6 +700,42 @@ static bool csv_fill_str_cols(csv_strref_t** str_refs, int n_cols,
 }
 
 /* --------------------------------------------------------------------------
+ * Stage 9b helper: dispatch csv_fill_str_cols and csv_intern_strings on
+ * separate threads when a pool is available.  They write to disjoint
+ * column data, and intern_strings is the only one that touches the
+ * global sym table (so it stays single-threaded; we just run it in
+ * parallel with fill_str_cols).
+ * -------------------------------------------------------------------------- */
+
+typedef struct {
+    csv_strref_t**    str_refs;
+    int               n_cols;
+    const csv_type_t* parse_types;
+    const int8_t*     resolved_types;
+    void**            col_data;
+    ray_t**           col_vecs;
+    int64_t           n_rows;
+    int64_t*          sym_max_ids;
+    uint8_t**         col_nullmaps;
+    bool              fill_ok;
+    bool              intern_ok;
+} csv_finalize_ctx_t;
+
+static void csv_finalize_task(void* arg, uint32_t worker_id,
+                              int64_t start, int64_t end_idx) {
+    (void)worker_id; (void)end_idx;
+    csv_finalize_ctx_t* ctx = (csv_finalize_ctx_t*)arg;
+    if (start == 0) {
+        ctx->fill_ok = csv_fill_str_cols(ctx->str_refs, ctx->n_cols,
+            ctx->resolved_types, ctx->col_vecs, ctx->n_rows, ctx->col_nullmaps);
+    } else {
+        ctx->intern_ok = csv_intern_strings(ctx->str_refs, ctx->n_cols,
+            ctx->parse_types, ctx->resolved_types, ctx->col_data,
+            ctx->n_rows, ctx->sym_max_ids, ctx->col_nullmaps);
+    }
+}
+
+/* --------------------------------------------------------------------------
  * Parallel parse context and callback
  * -------------------------------------------------------------------------- */
 
@@ -881,6 +778,9 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                         case CSV_TYPE_TIME: ((int32_t*)ctx->col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIMESTAMP:
                             ((int64_t*)ctx->col_data[c])[row] = 0; break;
+                        case CSV_TYPE_GUID:
+                            memset((uint8_t*)ctx->col_data[c] + (size_t)row * 16, 0, 16);
+                            break;
                         case CSV_TYPE_STR:
                             ctx->str_refs[c][row].ptr = NULL;
                             ctx->str_refs[c][row].len = 0;
@@ -963,6 +863,17 @@ static void csv_parse_fn(void* arg, uint32_t worker_id,
                     }
                     break;
                 }
+                case CSV_TYPE_GUID: {
+                    bool is_null;
+                    uint8_t* slot = (uint8_t*)ctx->col_data[c] + (size_t)row * 16;
+                    fast_guid(fld, flen, slot, &is_null);
+                    if (is_null) {
+                        memset(slot, 0, 16);
+                        ctx->col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
+                        my_had_null[c] = true;
+                    }
+                    break;
+                }
                 case CSV_TYPE_STR: {
                     if (flen == 0) {
                         ctx->str_refs[c][row].ptr = NULL;
@@ -1025,6 +936,9 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                         case CSV_TYPE_TIME: ((int32_t*)col_data[c])[row] = 0; break;
                         case CSV_TYPE_TIMESTAMP:
                             ((int64_t*)col_data[c])[row] = 0; break;
+                        case CSV_TYPE_GUID:
+                            memset((uint8_t*)col_data[c] + (size_t)row * 16, 0, 16);
+                            break;
                         case CSV_TYPE_STR:
                             str_refs[c][row].ptr = NULL;
                             str_refs[c][row].len = 0;
@@ -1102,6 +1016,17 @@ static void csv_parse_serial(const char* buf, size_t buf_size,
                     int64_t v = fast_timestamp(fld, flen, &is_null);
                     ((int64_t*)col_data[c])[row] = v;
                     if (is_null) {
+                        col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
+                        col_had_null[c] = true;
+                    }
+                    break;
+                }
+                case CSV_TYPE_GUID: {
+                    bool is_null;
+                    uint8_t* slot = (uint8_t*)col_data[c] + (size_t)row * 16;
+                    fast_guid(fld, flen, slot, &is_null);
+                    if (is_null) {
+                        memset(slot, 0, 16);
                         col_nullmaps[c][row >> 3] |= (uint8_t)(1u << (row & 7));
                         col_had_null[c] = true;
                     }
@@ -1355,6 +1280,7 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
             case RAY_DATE:      parse_types[c] = CSV_TYPE_DATE;      break;
             case RAY_TIME:      parse_types[c] = CSV_TYPE_TIME;      break;
             case RAY_TIMESTAMP: parse_types[c] = CSV_TYPE_TIMESTAMP; break;
+            case RAY_GUID:      parse_types[c] = CSV_TYPE_GUID;      break;
             default:           parse_types[c] = CSV_TYPE_STR;       break;
         }
     }
@@ -1433,20 +1359,33 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
         }
     }
 
-    /* ---- 9b. Batch-intern sym columns / materialize RAY_STR columns ---- */
+    /* ---- 9b. Materialize RAY_STR columns AND batch-intern sym columns ----
+     * These two phases touch disjoint columns and (after the GUID fix)
+     * intern_strings is the only one that mutates the global sym table.
+     * Dispatch them as two thread-pool tasks so they overlap in wall time
+     * — typically saves the smaller of the two phases. */
     if (has_str_cols) {
-        bool fill_ok = csv_fill_str_cols(str_ref_bufs, ncols, resolved_types,
-                           col_vecs, n_rows, col_nullmaps);
-        if (!fill_ok) {
-            csv_free_escaped_strrefs(str_ref_bufs, ncols, parse_types, n_rows, buf, file_size);
-            for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
-            for (int c = 0; c < ncols; c++) ray_release(col_vecs[c]);
-            goto fail_offsets;
+        csv_finalize_ctx_t fctx = {
+            .str_refs       = str_ref_bufs,
+            .n_cols         = ncols,
+            .parse_types    = parse_types,
+            .resolved_types = resolved_types,
+            .col_data       = col_data,
+            .col_vecs       = col_vecs,
+            .n_rows         = n_rows,
+            .sym_max_ids    = sym_max_ids,
+            .col_nullmaps   = col_nullmaps,
+            .fill_ok        = true,
+            .intern_ok      = true,
+        };
+        ray_pool_t* fpool = ray_pool_get();
+        if (fpool && ray_pool_total_workers(fpool) >= 2) {
+            ray_pool_dispatch_n(fpool, csv_finalize_task, &fctx, 2);
+        } else {
+            csv_finalize_task(&fctx, 0, 0, 1);
+            csv_finalize_task(&fctx, 0, 1, 2);
         }
-        bool intern_ok = csv_intern_strings(str_ref_bufs, ncols, parse_types,
-                           resolved_types, col_data, n_rows, sym_max_ids,
-                           col_nullmaps);
-        if (!intern_ok) {
+        if (!fctx.fill_ok || !fctx.intern_ok) {
             csv_free_escaped_strrefs(str_ref_bufs, ncols, parse_types, n_rows, buf, file_size);
             for (int c = 0; c < ncols; c++) scratch_free(str_ref_hdrs[c]);
             for (int c = 0; c < ncols; c++) ray_release(col_vecs[c]);
