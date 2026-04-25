@@ -124,9 +124,21 @@ void ray_lang_print(FILE* fp, ray_t* val) {
         fprintf(fp, "%s", name[0] ? name : "builtin");
         break;
     }
-    default:
-        fprintf(fp, "<type:%d>", val->type);
+    default: {
+        /* Fall back to ray_fmt for everything else: i16, i32, u8, all
+         * vector types (I16/I32/F64/SYM/...), DICT, GUID, temporal, etc.
+         * Without this println on (println 5i) printed "<type:-4>" — a
+         * debug placeholder, not the value. */
+        ray_t* s = ray_fmt(val, 0);
+        if (s && !RAY_IS_ERR(s)) {
+            fprintf(fp, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
+            ray_release(s);
+        } else {
+            fprintf(fp, "<type:%d>", val->type);
+            if (s) ray_release(s);
+        }
         break;
+    }
     }
 }
 
