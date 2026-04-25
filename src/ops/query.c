@@ -3582,6 +3582,15 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                             if (RAY_IS_ERR(bcast)) { ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return bcast; }
                         }
                     }
+                    /* Preserve typed-null markers across broadcast.  Without
+                     * this, (update {a: 0N from: t}) silently writes plain
+                     * zeros into the I64 column — the value bits get copied
+                     * but the null bitmap doesn't, so (nil? a) reports false
+                     * on what should be null cells. */
+                    if (RAY_ATOM_IS_NULL(expr_vec)) {
+                        for (int64_t r = 0; r < nrows; r++)
+                            ray_vec_set_null(bcast, r, true);
+                    }
                     ray_release(expr_vec);
                     expr_vec = bcast;
                 }
@@ -3628,9 +3637,17 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                     uint8_t* orig_data = (uint8_t*)ray_data(orig_col);
                     uint8_t* expr_data = (uint8_t*)ray_data(expr_vec);
                     for (int64_t r = 0; r < nrows; r++) {
-                        void* src = mask[r] ? (expr_data + r * elem_sz) : (orig_data + r * elem_sz);
-                        new_col = ray_vec_append(new_col, src);
+                        ray_t* src_vec = mask[r] ? expr_vec : orig_col;
+                        uint8_t* base  = mask[r] ? expr_data : orig_data;
+                        new_col = ray_vec_append(new_col, base + r * elem_sz);
                         if (RAY_IS_ERR(new_col)) { ray_release(expr_vec); ray_release(result); ray_release(mask_vec); ray_release(tbl); return new_col; }
+                        /* Propagate null bit from whichever side supplied
+                         * the value.  Without this, masking in a typed-null
+                         * broadcast would copy zero bytes into the slot but
+                         * leave the destination's nullmap clear → silent
+                         * loss of null marker. */
+                        if (ray_vec_is_null(src_vec, r))
+                            ray_vec_set_null(new_col, new_col->len - 1, true);
                     }
                 }
                 result = ray_table_add_col(result, col_name, new_col);
@@ -3748,6 +3765,12 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                         bcast = ray_vec_append(bcast, elem);
                         if (RAY_IS_ERR(bcast)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return bcast; }
                     }
+                }
+                /* Preserve typed-null markers across broadcast (mirrors the
+                 * WHERE branch fix at the analogous site above). */
+                if (RAY_ATOM_IS_NULL(expr_vec)) {
+                    for (int64_t r = 0; r < nrows; r++)
+                        ray_vec_set_null(bcast, r, true);
                 }
                 ray_release(expr_vec);
                 expr_vec = bcast;

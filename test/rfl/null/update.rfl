@@ -1,0 +1,20 @@
+;; Regression — (update {a: 0N from: t}) used to silently strip the null
+;; bitmap during scalar-broadcast.  Column got 0s, not nulls.
+
+(set t (table [a b] (list [1 2 3] [10 20 30])))
+(set r (update {a: 0N from: t}))
+
+;; Every cell in the updated column must be null.
+(count (at r 'a)) -- (sum (map nil? (at r 'a)))
+
+;; The other column must NOT have nulls (untouched).
+0 -- (sum (map nil? (at r 'b)))
+
+;; Same with WHERE clause (mask path also strips null without the fix).
+(set t2 (table [a b] (list [1 2 3 4] [10 20 30 40])))
+(set r2 (update {a: 0Nl where: (> b 15) from: t2}))
+;; Rows 1, 2, 3 (b > 15) should now be null in column a; row 0 unchanged.
+(at (at r2 'a) 0) -- 1
+(nil? (at (at r2 'a) 1)) -- true
+(nil? (at (at r2 'a) 2)) -- true
+(nil? (at (at r2 'a) 3)) -- true
