@@ -583,12 +583,29 @@ static bool cast_vec_relabel_compat(int8_t a, int8_t b) {
  * out_type) pair is unsupported here — caller falls back to the generic
  * path.
  *
- * Temporal cross-unit pairs match the per-atom slow path:
- *   DATE → TIMESTAMP : multiply by 86_400e9 ns/day
- *   TIMESTAMP → DATE : divide   by 86_400e9
- *   TIMESTAMP → TIME : modulo   by 86_400e9
- * All other cross-type pairs are plain numeric casts. */
+ * Temporal cross-unit pairs (matched between the per-atom slow path
+ * and the fast path):
+ *   DATE → TIMESTAMP : days * NS_PER_DAY
+ *   TIMESTAMP → DATE : floor-div by NS_PER_DAY (so ns=-1 → -1 day,
+ *                       i.e. 1999-12-31, not 2000-01-01).
+ *   TIMESTAMP → TIME : floor-mod by NS_PER_DAY then /1_000_000
+ *                       (ns→ms within day, always in [0, 86_400_000)).
+ * Plain `% / /` would truncate toward zero per C semantics and give
+ * wrong components for pre-2000 timestamps; the helpers below give
+ * Python-style floor semantics for a positive divisor. */
 #define NS_PER_DAY 86400000000000LL
+
+static inline int64_t ts_days_floor(int64_t ns) {
+    int64_t q = ns / NS_PER_DAY;
+    int64_t r = ns - q * NS_PER_DAY;
+    if (r < 0) q -= 1;
+    return q;
+}
+static inline int64_t ts_ns_in_day(int64_t ns) {
+    int64_t r = ns % NS_PER_DAY;
+    if (r < 0) r += NS_PER_DAY;
+    return r;
+}
 
 /* Element-wise cast worker: writes _dst_p[lo..hi) from _src_p[lo..hi).
  * Used by both the single-threaded fast path and the parallel dispatch.
@@ -603,11 +620,15 @@ static bool cast_range_worker(const void* _src_p, void* _dst_p,
         return true;
     }
     if (in_type == RAY_TIMESTAMP && out_type == RAY_DATE) {
-        CAST_LOOP_RANGE(int64_t, int32_t, (int32_t)(_v / NS_PER_DAY), lo, hi);
+        /* Floor-div, not truncate-toward-zero: ns=-1 must give -1 day
+         * (1999-12-31), not 0 (2000-01-01). */
+        CAST_LOOP_RANGE(int64_t, int32_t, (int32_t)ts_days_floor(_v), lo, hi);
         return true;
     }
     if (in_type == RAY_TIMESTAMP && out_type == RAY_TIME) {
-        CAST_LOOP_RANGE(int64_t, int32_t, (int32_t)((_v % NS_PER_DAY) / 1000000LL), lo, hi);
+        /* Floor-mod ns within day, then ns→ms. */
+        CAST_LOOP_RANGE(int64_t, int32_t,
+                        (int32_t)(ts_ns_in_day(_v) / 1000000LL), lo, hi);
         return true;
     }
     /* Generic numeric pairs.  The big switch dispatches on (out_type,
@@ -1164,7 +1185,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I64) return ray_date(val->i64);
         if (val->type == -RAY_F64) return ray_date((int64_t)val->f64);
         if (val->type == -RAY_TIME) return ray_date((int64_t)val->i32);
-        if (val->type == -RAY_TIMESTAMP) return ray_date((int64_t)(val->i64 / 86400000000000LL));
+        if (val->type == -RAY_TIMESTAMP) return ray_date(ts_days_floor(val->i64));
         if (val->type == -RAY_STR) {
             /* Parse "YYYY.MM.DD" format */
             const char* sp = ray_str_ptr(val);
@@ -1199,9 +1220,11 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_F64) return ray_time((int64_t)val->f64);
         if (val->type == -RAY_DATE) return ray_time((int64_t)val->i32);
         if (val->type == -RAY_TIMESTAMP)
-            /* TIMESTAMP is ns since epoch; TIME stores ms-of-day, so we
-             * need to take the within-day remainder and convert ns→ms. */
-            return ray_time((int64_t)((val->i64 % 86400000000000LL) / 1000000LL));
+            /* TIMESTAMP is ns since epoch; TIME stores ms-of-day.  Use
+             * floor-mod (not C-style truncate-toward-zero %) so pre-
+             * 2000 timestamps give time-of-day in [0, 86_400_000) ms,
+             * matching wall-clock semantics. */
+            return ray_time((int64_t)(ts_ns_in_day(val->i64) / 1000000LL));
         if (val->type == -RAY_STR) {
             /* Parse "HH:MM:SS[.mmm]" */
             const char* sp = ray_str_ptr(val);
