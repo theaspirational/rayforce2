@@ -3522,6 +3522,16 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                         else if (ct == RAY_F64 && expr_type == RAY_I64)
                             ((double*)ray_data(new_col))[r] = (double)((int64_t*)ray_data(expr_vec))[r];
                     }
+                    /* Null-bit propagation: memcpy above only copies values,
+                     * not the nullmap.  Carry over orig_col's nulls for the
+                     * untouched rows, and pull expr_vec's nulls in for the
+                     * masked rows.  Without this, casting a null F64 expr
+                     * back to an I64 column silently produces 0. */
+                    for (int64_t r = 0; r < nrows; r++) {
+                        ray_t* src = mask[r] ? expr_vec : orig_col;
+                        if (ray_vec_is_null(src, r))
+                            ray_vec_set_null(new_col, r, true);
+                    }
                     ray_release(expr_vec);
                     result = ray_table_add_col(result, col_name, new_col);
                     ray_release(new_col);
@@ -3606,6 +3616,10 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                         promoted = ray_vec_append(promoted, &v);
                         if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return promoted; }
                     }
+                    /* Carry the nullmap across the I64→F64 promotion. */
+                    for (int64_t r = 0; r < nr; r++)
+                        if (ray_vec_is_null(expr_vec, r))
+                            ray_vec_set_null(promoted, r, true);
                     ray_release(expr_vec);
                     expr_vec = promoted;
                 }
@@ -3616,7 +3630,10 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                     return ray_error("type", NULL);
                 }
 
-                /* Merge: use expr_vec for matching rows, orig_col for non-matching */
+                /* Merge: use expr_vec for matching rows, orig_col for non-matching.
+                 * Null-bit propagation applies to STR/SYM as well — a null in
+                 * either the orig column (unmasked rows) or the expr (masked
+                 * rows) must travel into new_col's nullmap. */
                 if (ct == RAY_STR) {
                     for (int64_t r = 0; r < nrows; r++) {
                         ray_t* src_vec = mask[r] ? expr_vec : orig_col;
@@ -3624,6 +3641,8 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                         const char* sp = ray_str_vec_get(src_vec, r, &slen);
                         new_col = ray_str_vec_append(new_col, sp ? sp : "", sp ? slen : 0);
                         if (RAY_IS_ERR(new_col)) { ray_release(expr_vec); ray_release(result); ray_release(mask_vec); ray_release(tbl); return new_col; }
+                        if (ray_vec_is_null(src_vec, r))
+                            ray_vec_set_null(new_col, new_col->len - 1, true);
                     }
                 } else if (ct == RAY_SYM) {
                     for (int64_t r = 0; r < nrows; r++) {
@@ -3631,6 +3650,8 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                         int64_t sym_val = ray_read_sym(ray_data(src_vec), r, src_vec->type, src_vec->attrs);
                         new_col = ray_vec_append(new_col, &sym_val);
                         if (RAY_IS_ERR(new_col)) { ray_release(expr_vec); ray_release(result); ray_release(mask_vec); ray_release(tbl); return new_col; }
+                        if (ray_vec_is_null(src_vec, r))
+                            ray_vec_set_null(new_col, new_col->len - 1, true);
                     }
                 } else {
                     size_t elem_sz = (ct == RAY_BOOL) ? 1 : 8;
@@ -3787,6 +3808,10 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
                     promoted = ray_vec_append(promoted, &v);
                     if (RAY_IS_ERR(promoted)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return promoted; }
                 }
+                /* Carry the nullmap across the I64→F64 promotion. */
+                for (int64_t r = 0; r < nr; r++)
+                    if (ray_vec_is_null(expr_vec, r))
+                        ray_vec_set_null(promoted, r, true);
                 ray_release(expr_vec);
                 expr_vec = promoted;
             }
@@ -3851,6 +3876,14 @@ no_where_add_col:
             for (int64_t r = 0; r < nrows; r++) {
                 bcast = ray_vec_append(bcast, elem);
                 if (RAY_IS_ERR(bcast)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return bcast; }
+            }
+            /* Preserve typed-null markers across broadcast (mirrors the
+             * existing-column branches above).  Without this,
+             * (update {c: 0N from: t}) would silently materialise a
+             * brand-new column of plain zeros. */
+            if (RAY_ATOM_IS_NULL(expr_vec)) {
+                for (int64_t r = 0; r < nrows; r++)
+                    ray_vec_set_null(bcast, r, true);
             }
             ray_release(expr_vec);
             expr_vec = bcast;
