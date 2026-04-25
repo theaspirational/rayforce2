@@ -1,0 +1,18 @@
+;; Sort behaviour with nulls.
+
+;; asc: nulls sort first
+(at (asc [3 0N 1 2]) 0) -- 0Nl
+(at (asc [3 0N 1 2]) 1) -- 1
+
+;; desc: nulls sort last
+(at (desc [3 0N 1 2]) 3) -- 0Nl
+(at (desc [3 0N 1 2]) 0) -- 3
+
+;; Length preserved
+(count (asc [3 0N 1 0N])) -- 4
+(count (desc [3 0N 1 0N])) -- 4
+
+;; iasc/idesc treat nulls consistently — at-projection roundtrips
+(set V [3 0N 1 2])
+(at V (iasc V)) -- (asc V)
+(at V (idesc V)) -- (desc V)

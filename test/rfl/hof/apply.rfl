@@ -1,0 +1,14 @@
+;; `apply` zip-applies a binary fn over two args (vectors or scalars).
+;; Signature: (apply fn x y).
+
+;; scalar/scalar — returns a scalar
+(apply + 5 10) -- 15
+(apply * 3 4) -- 12
+
+;; vec/vec — zip-applies pairwise
+(apply + [1 2 3] [10 20 30]) -- [11 22 33]
+(apply * [1 2 3] [4 5 6]) -- [4 10 18]
+(apply - [10 20] [1 2]) -- [9 18]
+
+;; Mismatched lengths take the shorter side.
+(apply + [1 2 3 4] [10 20]) -- [11 22]
