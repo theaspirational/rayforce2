@@ -24,12 +24,11 @@
 #include "lang/parse.h"
 #include "lang/nfo.h"
 #include "lang/env.h"
+#include "core/numparse.h"
 #include <string.h>
-#include <stdlib.h>
 #include <limits.h>
 #include <stdint.h>
 #include <math.h>
-#include <errno.h>
 
 /* ══════════════════════════════════════════
  * ASCII dispatch table (128 bytes)
@@ -184,10 +183,10 @@ static ray_t* parse_number(ray_parser_t *p) {
     /* Hex literal: 0x.. */
     if (p->pos[0] == '0' && p->pos[1] == 'x') {
         p->pos += 2;
-        char *end;
-        unsigned long v = strtoul(p->pos, &end, 16);
-        if (end == p->pos) return ray_error("parse", NULL);
-        p->pos = end;
+        uint64_t v;
+        size_t n = ray_parse_u64_hex(p->pos, SIZE_MAX, &v);
+        if (n == 0) return ray_error("parse", NULL);
+        p->pos += n;
         return ray_u8((uint8_t)v);
     }
 
@@ -223,7 +222,7 @@ static ray_t* parse_number(ray_parser_t *p) {
         p->pos[1] >= '0' && p->pos[1] <= '9' &&
         p->pos[2] >= '0' && p->pos[2] <= '9' &&
         p->pos[3] == '.') {
-        int year = (int)strtol(dstart, NULL, 10);
+        int year = (int)ray_parse_4_digits(dstart);
         p->pos++; /* skip first '.' */
         int month = (p->pos[0] - '0') * 10 + (p->pos[1] - '0');
         p->pos += 2;
@@ -299,17 +298,24 @@ plain_number:;
         while (*p->pos >= '0' && *p->pos <= '9') p->pos++;
     }
 
+    size_t span = (size_t)(p->pos - start);
+
     if (is_float) {
-        double v = strtod(start, NULL);
+        double v = 0.0;
+        if (ray_parse_f64(start, span, &v) == 0)
+            return ray_error("parse", NULL);
         return ray_f64(v);
     }
 
-    /* Check for integer overflow → promote to f64 */
-    errno = 0;
-    char* endp;
-    int64_t v = strtoll(start, &endp, 10);
-    if (errno == ERANGE) {
-        double fv = strtod(start, NULL);
+    /* Integer parse — overflow signalled by `n == 0` (digits present but
+     * value didn't fit int64).  Promote to f64 in that case, matching the
+     * historical strtoll/ERANGE → strtod behavior. */
+    int64_t v = 0;
+    size_t n = ray_parse_i64(start, span, &v);
+    if (n == 0) {
+        double fv = 0.0;
+        if (ray_parse_f64(start, span, &fv) == 0)
+            return ray_error("parse", NULL);
         return ray_f64(fv);
     }
 

@@ -92,6 +92,7 @@ extern const test_entry_t lftj_entries[];
 extern const test_entry_t list_entries[];
 extern const test_entry_t meta_entries[];
 extern const test_entry_t morsel_entries[];
+extern const test_entry_t numparse_entries[];
 extern const test_entry_t opt_entries[];
 extern const test_entry_t pipe_entries[];
 extern const test_entry_t platform_entries[];
@@ -113,7 +114,8 @@ static const test_entry_t* const compiled_groups[] = {
     csv_entries,      datalog_entries,  embedding_entries, exec_entries,
     format_entries,   fvec_entries,     graph_entries,    lang_entries,
     lftj_entries,     list_entries,     meta_entries,     morsel_entries,
-    opt_entries,      pipe_entries,     platform_entries, pool_entries,
+    numparse_entries, opt_entries,      pipe_entries,     platform_entries,
+    pool_entries,
     rowsel_entries,   runtime_entries,  sel_entries,      store_entries,
     str_entries,      sym_entries,      sys_entries,      table_entries,
     types_entries,    vec_entries,
