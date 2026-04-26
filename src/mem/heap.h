@@ -52,6 +52,8 @@
  *
  *   Bits 0x01-0x03  RAY_SYM vectors:  sym index width (RAY_SYM_W8/W16/W32/W64)
  *   Bits 0x01-0x10  function objects (RAY_UNARY/BINARY/VARY): RAY_FN_* flags
+ *   Bit  0x04       -RAY_I64 atoms:  RAY_ATTR_HNSW (HNSW handle in .i64)
+ *   Bit  0x08       vectors:         RAY_ATTR_HAS_INDEX (index ray_t* in nullmap[0..7])
  *   Bit  0x10       vectors:         RAY_ATTR_SLICE
  *   Bit  0x20       vectors:         RAY_ATTR_NULLMAP_EXT
  *   Bit  0x20       -RAY_SYM:        RAY_ATTR_NAME (variable reference)
@@ -72,6 +74,27 @@
 /* I64 atom carries an owning ray_hnsw_t* in its .i64 slot.
  * Checked by HNSW builtins before dereferencing.  User must (hnsw-free h). */
 #define RAY_ATTR_HNSW         0x04
+
+/* Vector carries an attached accelerator index in nullmap[0..7] (a ray_t*
+ * of type RAY_INDEX).  The original 16-byte nullmap union content (inline
+ * bitmap, ext_nullmap, str_ext_null/str_pool, sym_dict) is preserved inside
+ * the index ray_t and restored on detach.
+ *
+ * Attribute-bit invariant when HAS_INDEX is set:
+ *   - HAS_NULLS is *preserved* (not cleared).  Many call sites use it as a
+ *     cheap "do I need null-aware logic?" gate; clearing it would silently
+ *     break correctness for nullable columns.  The bit is authoritative.
+ *   - NULLMAP_EXT is *cleared*.  The parent's ext_nullmap field is now the
+ *     index pointer, not a U8 bitmap vec; readers that gate on NULLMAP_EXT
+ *     and dereference ext_nullmap directly would otherwise read garbage.
+ *     The displaced ext-nullmap pointer (if any) lives in
+ *     ix->saved_nullmap[0..7]; ix->saved_attrs records the original
+ *     NULLMAP_EXT bit for restoration on detach.
+ *
+ * Direct nullmap-byte readers (morsel iteration, ray_vec_is_null) MUST
+ * check HAS_INDEX first and route through ix->saved_nullmap / saved_attrs.
+ * See src/ops/idxop.h. */
+#define RAY_ATTR_HAS_INDEX    0x08
 
 /* ===== Internal Allocator Variants ===== */
 

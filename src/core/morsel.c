@@ -25,6 +25,7 @@
 #include "core/platform.h"
 #include "mem/heap.h"
 #include "table/sym.h"
+#include "ops/idxop.h"
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -70,10 +71,25 @@ bool ray_morsel_next(ray_morsel_t* m) {
     /* Null bitmap: only if HAS_NULLS.
      * M5: null_bits points to the byte containing bit (m->offset).
      * Callers must account for (m->offset % 8) bit offset within the
-     * first byte of null_bits when testing individual null bits. */
+     * first byte of null_bits when testing individual null bits.
+     *
+     * HAS_INDEX path: when an accelerator index is attached, the parent's
+     * 16-byte nullmap union holds the index pointer instead of bitmap data
+     * (or ext_nullmap pointer).  The original bytes are preserved inside
+     * ix->saved_nullmap.  Route through that snapshot here so null-aware
+     * loops still see the correct bits. */
     m->null_bits = NULL;
     if (m->vec->attrs & RAY_ATTR_HAS_NULLS) {
-        if (m->vec->attrs & RAY_ATTR_NULLMAP_EXT) {
+        if (m->vec->attrs & RAY_ATTR_HAS_INDEX) {
+            ray_index_t* ix = ray_index_payload(m->vec->index);
+            if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
+                ray_t* ext;
+                memcpy(&ext, &ix->saved_nullmap[0], sizeof(ext));
+                m->null_bits = (uint8_t*)ray_data(ext) + (m->offset / 8);
+            } else if (m->offset < 128) {
+                m->null_bits = ix->saved_nullmap + (m->offset / 8);
+            }
+        } else if (m->vec->attrs & RAY_ATTR_NULLMAP_EXT) {
             /* External bitmap: point to correct byte offset */
             ray_t* ext = m->vec->ext_nullmap;
             m->null_bits = (uint8_t*)ray_data(ext) + (m->offset / 8);

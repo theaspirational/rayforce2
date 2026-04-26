@@ -44,6 +44,7 @@
 #include "table/sym.h"
 #include "table/table.h"
 #include "vec/str.h"
+#include "vec/vec.h"
 #include <string.h>
 #include <math.h>
 #include <stdio.h>

@@ -30,6 +30,7 @@
 #include "ops/ops.h"
 #include "ops/temporal.h"
 #include "ops/datalog.h"
+#include "ops/idxop.h"
 #include "table/sym.h"
 #include "core/profile.h"
 #include "table/sym.h"
@@ -2276,6 +2277,15 @@ static void ray_register_builtins(void) {
     register_binary("hnsw-save",   RAY_FN_RESTRICTED, ray_hnsw_save_fn);
     register_unary ("hnsw-load",   RAY_FN_RESTRICTED, ray_hnsw_load_fn);
     register_unary ("hnsw-info",   RAY_FN_NONE, ray_hnsw_info_fn);
+
+    /* Per-vector accelerator indices (see src/ops/idxop.h) */
+    register_unary (".idx.zone",   RAY_FN_NONE, ray_idx_zone_fn);
+    register_unary (".idx.hash",   RAY_FN_NONE, ray_idx_hash_fn);
+    register_unary (".idx.sort",   RAY_FN_NONE, ray_idx_sort_fn);
+    register_unary (".idx.bloom",  RAY_FN_NONE, ray_idx_bloom_fn);
+    register_unary (".idx.drop",   RAY_FN_NONE, ray_idx_drop_fn);
+    register_unary (".idx.has?",   RAY_FN_NONE, ray_idx_has_fn);
+    register_unary (".idx.info",   RAY_FN_NONE, ray_idx_info_fn);
 }
 
 /* ══════════════════════════════════════════

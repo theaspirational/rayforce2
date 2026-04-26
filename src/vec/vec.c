@@ -27,7 +27,99 @@
 #include "table/sym.h"
 #include "vec/embedding.h"
 #include "vec/str.h"
+#include "ops/idxop.h"
 #include <string.h>
+
+/* Public bitmap accessor — handles slice / ext / inline / HAS_INDEX
+ * uniformly.  See vec.h for the contract. */
+const uint8_t* ray_vec_nullmap_bytes(const ray_t* v,
+                                     int64_t* bit_offset_out,
+                                     int64_t* len_bits_out) {
+    if (bit_offset_out) *bit_offset_out = 0;
+    if (len_bits_out)   *len_bits_out   = 0;
+    if (!v) return NULL;
+
+    /* Slice: HAS_NULLS / HAS_INDEX live on the parent — redirect first,
+     * THEN test for nulls.  Reading v->attrs & HAS_NULLS here would
+     * incorrectly drop a sliced view of a nullable column. */
+    const ray_t* target = v;
+    int64_t off = 0;
+    if (v->attrs & RAY_ATTR_SLICE) {
+        target = v->slice_parent;
+        off = v->slice_offset;
+        if (!target) return NULL;
+    }
+    if (!(target->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
+
+    if (bit_offset_out) *bit_offset_out = off;
+
+    if (target->attrs & RAY_ATTR_HAS_INDEX) {
+        const ray_index_t* ix = ray_index_payload(target->index);
+        if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
+            ray_t* ext;
+            memcpy(&ext, &ix->saved_nullmap[0], sizeof(ext));
+            if (len_bits_out) *len_bits_out = ext->len * 8;
+            return (const uint8_t*)ray_data(ext);
+        }
+        if (len_bits_out) *len_bits_out = 128;
+        return ix->saved_nullmap;
+    }
+    if (target->attrs & RAY_ATTR_NULLMAP_EXT) {
+        if (len_bits_out) *len_bits_out = target->ext_nullmap->len * 8;
+        return (const uint8_t*)ray_data(target->ext_nullmap);
+    }
+    /* Inline path: RAY_STR's bytes 0-15 hold str_pool/str_ext_null, not
+     * bits — so RAY_STR with HAS_NULLS must always have NULLMAP_EXT. */
+    if (target->type == RAY_STR) return NULL;
+    if (len_bits_out) *len_bits_out = 128;
+    return target->nullmap;
+}
+
+/* Internal compatibility wrapper for the older two-out-param form used
+ * inside vec.c.  Returns the inline pointer (16-byte buffer) when nulls
+ * live inline, or NULL when they live in *ext_out. */
+static inline const uint8_t* vec_inline_nullmap(const ray_t* v, ray_t** ext_nullmap_ref) {
+    *ext_nullmap_ref = NULL;
+    if (v->attrs & RAY_ATTR_HAS_INDEX) {
+        const ray_index_t* ix = ray_index_payload(v->index);
+        if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
+            ray_t* ext;
+            memcpy(&ext, &ix->saved_nullmap[0], sizeof(ext));
+            *ext_nullmap_ref = ext;
+            return NULL;
+        }
+        return ix->saved_nullmap;
+    }
+    if (v->attrs & RAY_ATTR_NULLMAP_EXT) {
+        *ext_nullmap_ref = v->ext_nullmap;
+        return NULL;
+    }
+    return v->nullmap;
+}
+
+/* True if v has any nulls.  HAS_NULLS is preserved on the parent across
+ * index attach/detach (see attach_finalize), so this is the same one-bit
+ * test in both indexed and non-indexed cases. */
+static inline bool vec_any_nulls(const ray_t* v) {
+    return (v->attrs & RAY_ATTR_HAS_NULLS) != 0;
+}
+
+/* In-place drop of attached index — caller must hold a unique ref (rc==1).
+ * Used by mutation paths to invalidate the (now stale) index before writing.
+ * HAS_NULLS was preserved through the attachment so it needs no restoration;
+ * only NULLMAP_EXT (cleared at attach time) is reinstated from saved_attrs. */
+static inline void vec_drop_index_inplace(ray_t* v) {
+    if (!(v->attrs & RAY_ATTR_HAS_INDEX)) return;
+    ray_t* idx = v->index;
+    ray_index_t* ix = ray_index_payload(idx);
+    memcpy(v->nullmap, ix->saved_nullmap, 16);
+    memset(ix->saved_nullmap, 0, 16);
+    uint8_t saved = ix->saved_attrs;
+    ix->saved_attrs = 0;
+    v->attrs &= (uint8_t)~RAY_ATTR_HAS_INDEX;
+    if (saved & RAY_ATTR_NULLMAP_EXT) v->attrs |= RAY_ATTR_NULLMAP_EXT;
+    ray_release(idx);
+}
 
 /* --------------------------------------------------------------------------
  * Capacity helpers
@@ -116,6 +208,9 @@ ray_t* ray_vec_append(ray_t* vec, const void* elem) {
     vec = ray_cow(vec);
     if (!vec || RAY_IS_ERR(vec)) return vec;
 
+    /* Append changes len + writes data; any attached index is now stale. */
+    vec_drop_index_inplace(vec);
+
     uint8_t esz = ray_sym_elem_size(vec->type, vec->attrs);
     int64_t cap = vec_capacity(vec);
 
@@ -165,6 +260,9 @@ ray_t* ray_vec_set(ray_t* vec, int64_t idx, const void* elem) {
     /* COW: if shared, copy first */
     vec = ray_cow(vec);
     if (!vec || RAY_IS_ERR(vec)) return vec;
+
+    /* Writing a slot value invalidates any attached accelerator index. */
+    vec_drop_index_inplace(vec);
 
     uint8_t esz = ray_sym_elem_size(vec->type, vec->attrs);
     char* dst = (char*)ray_data(vec) + idx * esz;
@@ -412,6 +510,10 @@ ray_t* ray_vec_insert_at(ray_t* vec, int64_t idx, const void* elem) {
     ray_t* original = vec;
     vec = ray_cow(vec);
     if (!vec || RAY_IS_ERR(vec)) return vec;
+
+    /* In-place insert mutates len + data + nullmap; any attached
+     * accelerator index is now stale. */
+    vec_drop_index_inplace(vec);
 
     uint8_t esz = ray_sym_elem_size(vec->type, vec->attrs);
     int64_t cap = vec_capacity(vec);
@@ -726,6 +828,11 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
     if (!vec || RAY_IS_ERR(vec)) return RAY_ERR_TYPE;
     if (vec->attrs & RAY_ATTR_SLICE) return RAY_ERR_TYPE; /* cannot set null on slice — COW first */
     if (idx < 0 || idx >= vec->len) return RAY_ERR_RANGE;
+
+    /* Mutation invalidates any attached accelerator index — drop it inline.
+     * Caller must already hold a unique ref (set-null on a shared vec is a
+     * bug regardless of indexing). */
+    vec_drop_index_inplace(vec);
 
     /* Mark HAS_NULLS if setting a null (defer for RAY_STR until ext alloc succeeds) */
     if (is_null && vec->type != RAY_STR) vec->attrs |= RAY_ATTR_HAS_NULLS;
@@ -1164,22 +1271,27 @@ bool ray_vec_is_null(ray_t* vec, int64_t idx) {
         return ray_vec_is_null(parent, pidx);
     }
 
-    if (!(vec->attrs & RAY_ATTR_HAS_NULLS)) return false;
+    if (!vec_any_nulls(vec)) return false;
 
-    if (vec->attrs & RAY_ATTR_NULLMAP_EXT) {
-        ray_t* ext = vec->ext_nullmap;
+    ray_t* ext = NULL;
+    const uint8_t* inline_bits = vec_inline_nullmap(vec, &ext);
+    if (ext) {
         int64_t byte_idx = idx / 8;
         if (byte_idx >= ext->len) return false;
-        uint8_t* bits = (uint8_t*)ray_data(ext);
+        const uint8_t* bits = (const uint8_t*)ray_data(ext);
         return (bits[byte_idx] >> (idx % 8)) & 1;
     }
 
-    /* Inline nullmap — not available for RAY_STR (bytes 0-15 hold str_pool) */
+    /* Inline nullmap path.  RAY_STR's inline 16 bytes hold str_pool/str_ext_null
+     * (or, when an index is attached, were the same and are now in the index
+     * snapshot).  Either way, RAY_STR uses ext nullmap exclusively for its
+     * null bits, which is handled above; if the inline path is taken for
+     * RAY_STR, no nulls are present. */
     if (vec->type == RAY_STR) return false;
     if (idx >= 128) return false;
     int byte_idx = (int)(idx / 8);
     int bit_idx = (int)(idx % 8);
-    return (vec->nullmap[byte_idx] >> bit_idx) & 1;
+    return (inline_bits[byte_idx] >> bit_idx) & 1;
 }
 
 /* --------------------------------------------------------------------------

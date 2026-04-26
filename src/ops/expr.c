@@ -1032,13 +1032,14 @@ static const uint8_t* nullmap_bits(ray_t* v, int64_t* bit_offset, int64_t len) {
         off = v->slice_offset;
     }
     if (!(target->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
-    *bit_offset = off;
-    if (target->attrs & RAY_ATTR_NULLMAP_EXT)
-        return (const uint8_t*)ray_data(target->ext_nullmap);
-    if (target->type == RAY_STR) return NULL;
-    /* Inline nullmap is 16 bytes (128 bits) — reject if range exceeds it */
-    if (off + len > 128) return NULL;
-    return target->nullmap;
+    int64_t resolved_off = 0, len_bits = 0;
+    const uint8_t* bits = ray_vec_nullmap_bytes(target, &resolved_off, &len_bits);
+    if (!bits) return NULL;
+    *bit_offset = off + resolved_off;
+    /* Caller assumes inline buffer means 128-bit coverage; reject ranges
+     * that would overrun it just like the original guard. */
+    if (len_bits == 128 && off + len > 128) return NULL;
+    return bits;
 }
 
 /* Writable null bitmap pointer for freshly allocated (non-slice) dst vector.

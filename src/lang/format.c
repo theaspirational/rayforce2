@@ -159,6 +159,7 @@ const char* ray_type_name(int8_t type) {
     case RAY_TABLE:     return "TABLE";
     case RAY_DICT:      return "DICT";
     case RAY_LIST:      return "LIST";
+    case RAY_INDEX:     return "INDEX";
     default:            return "?";
     }
 }

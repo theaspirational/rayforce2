@@ -237,15 +237,11 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     int8_t in_type = input->type;
     int64_t len = input->len;
 
-    /* Resolve null bitmap once before dispatching */
+    /* Resolve null bitmap once before dispatching.  ray_vec_nullmap_bytes
+     * handles slice / ext / inline / HAS_INDEX uniformly so this works on
+     * vectors that carry an attached accelerator index. */
     bool has_nulls = (input->attrs & RAY_ATTR_HAS_NULLS) != 0;
-    const uint8_t* null_bm = NULL;
-    if (has_nulls) {
-        if (input->attrs & RAY_ATTR_NULLMAP_EXT)
-            null_bm = (const uint8_t*)ray_data(input->ext_nullmap);
-        else
-            null_bm = input->nullmap;
-    }
+    const uint8_t* null_bm = ray_vec_nullmap_bytes(input, NULL, NULL);
 
     /* O(1) short-circuit: first/last on numeric columns don't need a
      * full reduction pass.  Non-numeric types (STR, GUID) fall through

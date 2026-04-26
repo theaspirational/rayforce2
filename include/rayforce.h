@@ -73,6 +73,7 @@ const char* ray_version_string(void);
 #define RAY_STR       13
 
 /* Compound types */
+#define RAY_INDEX     97   /* Accelerator index attached to a vector (see ops/idxop.h) */
 #define RAY_TABLE     98
 #define RAY_DICT      99
 
@@ -112,12 +113,16 @@ typedef enum {
 typedef union ray_t {
     /* Allocated: object header */
     struct {
-        /* Bytes 0-15: nullable bitmask / slice / ext nullmap */
+        /* Bytes 0-15: nullable bitmask / slice / ext nullmap / index */
         union {
             uint8_t  nullmap[16];
             struct { union ray_t* slice_parent; int64_t slice_offset; };
             struct { union ray_t* ext_nullmap;  union ray_t* sym_dict; };
             struct { union ray_t* str_ext_null; union ray_t* str_pool; };
+            /* RAY_ATTR_HAS_INDEX (vectors): ray_t* of type RAY_INDEX
+             * carrying both the accelerator payload and the saved nullmap
+             * bytes.  _idx_pad is reserved (must be NULL).  See ops/idxop.h. */
+            struct { union ray_t* index;        union ray_t* _idx_pad; };
         };
         /* Bytes 16-31: metadata + value */
         uint8_t  mmod;       /* 0=heap, 1=file-mmap */

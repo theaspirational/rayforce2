@@ -28,6 +28,7 @@
 #include "table/sym.h"
 #include "lang/eval.h"
 #include "store/hnsw.h"
+#include "ops/idxop.h"
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -407,6 +408,26 @@ static void ray_release_owned_refs(ray_t* v) {
         return;
     }
 
+    /* RAY_INDEX block: release per-kind payload children + saved-nullmap
+     * pointers.  Must run before the LIST/TABLE compound checks below
+     * (which would mistreat the data[] payload as child pointers). */
+    if (v->type == RAY_INDEX) {
+        ray_index_t* ix = ray_index_payload(v);
+        ray_index_release_payload(ix);
+        ray_index_release_saved(ix);
+        return;
+    }
+
+    /* Vector with attached index: nullmap[0..7] holds an owning ref to
+     * the index ray_t.  The index owns the displaced ext_nullmap/str_pool/
+     * sym_dict, so we must NOT also try to release those off the parent —
+     * they aren't there anymore.  Skip the NULLMAP_EXT and STR_pool branches. */
+    if (v->attrs & RAY_ATTR_HAS_INDEX) {
+        if (v->index && !RAY_IS_ERR(v->index))
+            ray_release(v->index);
+        return;
+    }
+
     if ((v->attrs & RAY_ATTR_NULLMAP_EXT) &&
         v->ext_nullmap && !RAY_IS_ERR(v->ext_nullmap))
         ray_release(v->ext_nullmap);
@@ -492,6 +513,19 @@ bool ray_retain_owned_refs(ray_t* v) {
         return true;
     }
 
+    if (v->type == RAY_INDEX) {
+        ray_index_t* ix = ray_index_payload(v);
+        ray_index_retain_payload(ix);
+        ray_index_retain_saved(ix);
+        return true;
+    }
+
+    if (v->attrs & RAY_ATTR_HAS_INDEX) {
+        if (v->index && !RAY_IS_ERR(v->index))
+            ray_retain(v->index);
+        return true;
+    }
+
     if ((v->attrs & RAY_ATTR_NULLMAP_EXT) &&
         v->ext_nullmap && !RAY_IS_ERR(v->ext_nullmap))
         ray_retain(v->ext_nullmap);
@@ -564,6 +598,26 @@ static void ray_detach_owned_refs(ray_t* v) {
         v->slice_parent = NULL;
         v->slice_offset = 0;
         v->attrs &= (uint8_t)~RAY_ATTR_SLICE;
+        return;
+    }
+
+    if (v->type == RAY_INDEX) {
+        ray_index_t* ix = ray_index_payload(v);
+        switch ((ray_idx_kind_t)ix->kind) {
+        case RAY_IDX_HASH:  ix->u.hash.table = ix->u.hash.chain = NULL; break;
+        case RAY_IDX_SORT:  ix->u.sort.perm = NULL; break;
+        case RAY_IDX_BLOOM: ix->u.bloom.bits = NULL; break;
+        default: break;
+        }
+        memset(ix->saved_nullmap, 0, 16);
+        ix->saved_attrs = 0;
+        return;
+    }
+
+    if (v->attrs & RAY_ATTR_HAS_INDEX) {
+        v->index    = NULL;
+        v->_idx_pad = NULL;
+        v->attrs   &= (uint8_t)~RAY_ATTR_HAS_INDEX;
         return;
     }
 
