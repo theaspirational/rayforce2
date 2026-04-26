@@ -509,7 +509,7 @@ ray_repl_t* ray_repl_create(ray_poll_t* poll) {
             ray_term_install_signals(repl->term);
         /* Wire the Unicode progress bar for long-running queries —
          * only on a tty so piped / scripted runs stay clean. Default
-         * show-after is 500 ms (duckdb uses 2 s, but rayforce's
+         * show-after is 500 ms (rayforce's
          * interactive feel wants the bar on sub-second queries too).
          * Override via RAY_PROGRESS_MIN_MS env var. */
         if (isatty(STDERR_FILENO)) {
@@ -667,7 +667,7 @@ static bool handle_command(ray_repl_t* repl, const char* str, size_t len) {
         cmd_match(cmd, clen, "timeit", 6, &arg, &arg_len)) {
         /* ":t N"  (N != 0) -> enable profiler
          * ":t 0"           -> disable profiler
-         * ":t"             -> toggle (convenience, no rayforce1 equivalent) */
+         * ":t"             -> toggle (convenience) */
         if (arg && arg_len > 0) {
             /* Parse a small integer prefix from arg. Reject anything
              * else so ":t foo" doesn't silently turn profiling off. */

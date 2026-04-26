@@ -49,7 +49,7 @@
  * we choose the encoding so each metric sorts ascending:
  *   COSINE → 1 - cos(a, b)     range [0, 2]
  *   L2     → sqrt(sum(sq diff)) range [0, ∞)
- *   IP     → -dot(a, b)         range (-∞, ∞)   (pgvector <#> convention) */
+ *   IP     → -dot(a, b)         range (-∞, ∞)   (negated so lower=closer) */
 typedef enum {
     RAY_HNSW_COSINE = 0,
     RAY_HNSW_L2     = 1,
@@ -105,7 +105,7 @@ int64_t ray_hnsw_search(const ray_hnsw_t* idx,
 /* Predicate callback used by the filtered iterative-scan variant below.
  * Return true to accept `node_id` into the result set, false to reject.
  * Rejected nodes still participate in candidate-graph exploration so
- * connectivity through them is preserved — this is the pgvector 0.8
+ * connectivity through them is preserved — this is the standard
  * "iterative scan" shape. */
 typedef bool (*ray_hnsw_accept_fn)(int64_t node_id, void* ctx);
 

@@ -73,7 +73,7 @@ static uint8_t infer_mc_type(char** part_dirs, int64_t part_count) {
     return RAY_MC_SYM;
 }
 
-/* Parse "YYYY.MM.DD" → days since 2000-01-01 (Postgres epoch).
+/* Parse "YYYY.MM.DD" → days since 2000-01-01 (Rayforce epoch).
  * Uses inverse of Hinnant's civil_from_days algorithm (same as exec.c). */
 static int32_t parse_date_dir(const char* name) {
     int64_t y = (name[0]-'0')*1000 + (name[1]-'0')*100 +

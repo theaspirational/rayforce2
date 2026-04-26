@@ -1827,7 +1827,7 @@ static test_result_t test_eval_select_by_nonagg_sort_take(void) {
 
 /* ---- Test: grouped take clamps, not wraps ----
  * Regression: switching to ray_take_fn for group-by take briefly
- * brought kdb+-style wrap/pad semantics — `take: 5` with 2 groups
+ * brought wrap/pad semantics — `take: 5` with 2 groups
  * produced 5 rows (A,B,A,B,A).  Group-by must clamp to min(n, nrows). */
 static test_result_t test_eval_select_by_take_clamps(void) {
     /* agg-only: 2 groups, take: 5 → should clamp to 2 */

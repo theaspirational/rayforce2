@@ -1619,7 +1619,7 @@ static test_result_t test_exec_asof_join(void) {
     /* Should have left cols + bid (time/sym deduplicated) */
     TEST_ASSERT_EQ_I(ray_table_ncols(result), 4);  /* time, sym, price, bid */
 
-    /* Verify bid values — DuckDB semantics: best right.time <= left.time per partition.
+    /* Verify bid values — best right.time <= left.time per partition.
      * Output preserves original left-table row order. */
     ray_t* bid_col = ray_table_get_col(result, n_bid);
     TEST_ASSERT_NOT_NULL(bid_col);

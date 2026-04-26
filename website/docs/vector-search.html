@@ -84,7 +84,7 @@
 
       <!-- ============================================================ -->
       <h2 id="metrics">Direct Distance &amp; Similarity</h2>
-      <p>Four direct builtins, following pgvector naming. All accept either <em>two vectors</em> (returning a scalar) or <em>a LIST-of-vectors plus a query vector</em> (returning a vector of per-row results).</p>
+      <p>Four direct builtins. All accept either <em>two vectors</em> (returning a scalar) or <em>a LIST-of-vectors plus a query vector</em> (returning a vector of per-row results).</p>
       <table>
         <thead><tr><th>Function</th><th>Returns</th><th>Range</th></tr></thead>
         <tbody>
@@ -165,7 +165,7 @@
       <ul>
         <li><code>'cosine</code> — <code>1 − cos(a, b)</code>, lower = closer (default)</li>
         <li><code>'l2</code> — euclidean distance, lower = closer</li>
-        <li><code>'ip</code> — negated inner product, lower = closer (matches pgvector's <code>&lt;#&gt;</code>)</li>
+        <li><code>'ip</code> — negated inner product, lower = closer</li>
       </ul>
 
       <!-- ============================================================ -->
@@ -175,7 +175,7 @@
         <tbody>
           <tr><td><code>cos-dist</code></td><td>2</td><td><code>(cos-dist a b)</code> — cosine distance; vec×vec → atom, LIST×vec → vector</td></tr>
           <tr><td><code>l2-dist</code></td><td>2</td><td><code>(l2-dist a b)</code> — euclidean distance</td></tr>
-          <tr><td><code>inner-prod</code></td><td>2</td><td><code>(inner-prod a b)</code> — positive dot product (pgvector <code>inner_product()</code>)</td></tr>
+          <tr><td><code>inner-prod</code></td><td>2</td><td><code>(inner-prod a b)</code> — positive dot product</td></tr>
           <tr><td><code>norm</code></td><td>1</td><td><code>(norm x)</code> — L2 norm; scalar if vec, per-row vector if LIST</td></tr>
           <tr><td><code>knn</code></td><td>3–4</td><td><code>(knn col query k [metric])</code> — brute-force top-K</td></tr>
           <tr><td><code>hnsw-build</code></td><td>1–4</td><td><code>(hnsw-build col [metric] [M] [ef_c])</code> — build index</td></tr>
@@ -190,7 +190,7 @@
       <!-- ============================================================ -->
       <h2 id="notes">Design Notes</h2>
       <ul>
-        <li><strong>Distance convention.</strong> All metrics encode as "lower = closer" for consistent sort ordering (matches pgvector <code>&lt;=&gt;</code> / <code>&lt;-&gt;</code> / <code>&lt;#&gt;</code>). Direct math builtins (<code>cos-sim</code>-style semantics) aren't provided separately — compute <code>(- 1.0 (cos-dist a b))</code> if needed.</li>
+        <li><strong>Distance convention.</strong> All metrics encode as "lower = closer" for consistent sort ordering. Direct math builtins (<code>cos-sim</code>-style semantics) aren't provided separately — compute <code>(- 1.0 (cos-dist a b))</code> if needed.</li>
         <li><strong>Handle lifecycle.</strong> HNSW handles are rc-managed through Rayforce's ownership semantics: a deep clone is produced on <code>ray_cow</code>, ownership transfers via detach on realloc, and the underlying index is freed when the last reference drops. <code>(hnsw-free h)</code> is idempotent and not required for correctness.</li>
         <li><strong>Iterative scan bounds.</strong> Filter-aware ANN pushes the predicate into the beam but remains locality-bounded by HNSW's graph reachability from the query's entry point. For pathologically selective filters on clustered data, results may be fewer than K; multi-entry restart is future work.</li>
         <li><strong>Allocation-failure contract.</strong> All HNSW search entry points return a distinct sentinel (<code>-1</code>) on allocation failure — every caller surfaces this as <code>ray_error("oom", …)</code> rather than a silently-empty result.</li>

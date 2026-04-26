@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     const char* auth_pw = NULL;
     bool auth_restricted = false;
 
-    /* Parse args. Flag set matches rayforce1:
+    /* Parse args. Supported flags:
      *   -f FILE          run script file
      *   -p PORT          IPC listen port
      *   -c N             worker-pool size (0 = auto: ncpu - 1)

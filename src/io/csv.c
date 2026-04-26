@@ -1571,7 +1571,7 @@ static void csv_write_date(csv_writer_t* w, int32_t v) {
 
 static void csv_write_time(csv_writer_t* w, int32_t ms) {
     /* RAY_TIME is a signed ms-of-day. Negative values represent
-     * negative durations (kdb+/rayforce1 convention); render them
+     * negative durations (Rayforce convention); render them
      * with a leading "-" and the absolute magnitude rather than
      * wrapping modulo one day, which would lose the sign. */
     int32_t sign = ms < 0 ? -1 : 1;

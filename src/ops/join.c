@@ -1552,7 +1552,7 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
 }
 
 /* ============================================================================
- * OP_WINDOW_JOIN: ASOF join (DuckDB-style sort-merge)
+ * OP_WINDOW_JOIN: ASOF join (sort-merge)
  * For each left row, find the most recent right row where right.time <= left.time,
  * optionally partitioned by equality keys. O(N+M) after sorting.
  * ============================================================================ */
@@ -1627,7 +1627,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     /* Precompute per-row "any key is null" bitsets.  Null-keyed rows must
      * not match — left rows fall through to the left-outer null fill,
      * right rows are skipped entirely during the merge walk.  SQL-style
-     * NULLs-never-match semantics (matches DuckDB asof-join on NULL keys). */
+     * NULLs-never-match semantics. */
     ray_t* lt_null_hdr = NULL, *rt_null_hdr = NULL;
     uint8_t* lt_null = left_n > 0
         ? (uint8_t*)scratch_alloc(&lt_null_hdr, (size_t)left_n)

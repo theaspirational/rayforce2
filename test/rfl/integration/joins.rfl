@@ -45,7 +45,7 @@
 ;; window-join with multiple aggregations — both columns must be present
 (set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))(set quotes (table [Sym Time Bid Ask] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [99 100 101] [110 111 112])))(set intervals (map-left + [-2000 2000] (at trades 'Time)))(set r (window-join [Sym Time] intervals trades quotes {lo: (min Bid) hi: (max Ask)}))(at r 'lo) -- [99 101]
 (set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))(set quotes (table [Sym Time Bid Ask] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [99 100 101] [110 111 112])))(set intervals (map-left + [-2000 2000] (at trades 'Time)))(set r (window-join [Sym Time] intervals trades quotes {lo: (min Bid) hi: (max Ask)}))(at r 'hi) -- [111 112]
-;; window-join rayforce1 canonical example (docs/queries-joins.html)
+;; window-join canonical example (docs/queries-joins.html)
 ;;   trades at 12:00:01, 12:00:04, 12:00:06 ± 1s windows
 ;;   quotes at 12:00:00..12:00:09 sizes [928 528 648 914 918 626 577 817 620 698]
 ;;     trade @ 01 window [00,02] -> sizes [928 528 648], min=528, max=928
@@ -73,7 +73,7 @@
 ;;   trade @ 05 window [04, 06] -> matches at 04 (1)
 (set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))(set quotes (table [Sym Time Tag] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [foo bar baz])))(set intervals (map-left + [-1000 1000] (at trades 'Time)))(at (window-join [Sym Time] intervals trades quotes {n: (count Tag)}) 'n) -- [2 1]
 ;; window-join COUNT must include window matches whose source value is null
-;; (kdb+/group.c semantics: (count Col) == COUNT(*), not COUNT(non-null Col)).
+;; ((count Col) == COUNT(*), not COUNT(non-null Col)).
 ;;   trade @ 01 window [00, 02]: Bid rows at 00(99) and 02(NULL) -> count=2, min=99
 ;;   trade @ 05 window [04, 06]: Bid row at 04(101)              -> count=1, min=101
 (set trades (table [Sym Time Price] (list [a a] [10:00:01.000 10:00:05.000] [100 200])))(set quotes (table [Sym Time Bid] (list [a a a] [10:00:00.000 10:00:02.000 10:00:04.000] [99 0Nl 101])))(set intervals (map-left + [-1000 1000] (at trades 'Time)))(at (window-join [Sym Time] intervals trades quotes {c: (count Bid)}) 'c) -- [2 1]

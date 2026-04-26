@@ -224,7 +224,7 @@
 (<span class="hl-fn">asof-join</span> [<span class="hl-sym">Sym</span> <span class="hl-sym">Ts</span>] trades quotes)</code></pre>
 
       <h3>Null-key semantics</h3>
-      <p>As-of-join follows the SQL/DuckDB convention that <strong>NULL keys never match</strong>:</p>
+      <p>As-of-join treats <strong>NULL keys as never matching</strong>:</p>
       <ul>
         <li>A left row with a null in any equality key or in the time column is kept in the output (left-outer behaviour) but the right-side columns are explicitly null.</li>
         <li>A right row with a null in any equality key or time column is skipped entirely during the merge walk — it cannot become the best match for any left row.</li>

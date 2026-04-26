@@ -34,11 +34,11 @@
  * Distance dispatch — each metric maps to a scalar where lower = closer,
  * as required by the HNSW beam search.
  *
- *   COSINE  → 1 - cos(a, b)          (pgvector <=>)
- *   L2      → sqrt(Σ (a_i - b_i)^2)  (pgvector <->)
- *   IP      → -dot(a, b)             (pgvector <#>, negated so lower=closer)
+ *   COSINE  → 1 - cos(a, b)          (range [0, 2])
+ *   L2      → sqrt(Σ (a_i - b_i)^2)  (Euclidean)
+ *   IP      → -dot(a, b)             (negated so lower=closer)
  *
- * Note on L2: we keep the sqrt to match pgvector's `<->` exactly, even
+ * Note on L2: we keep the sqrt (true Euclidean), even
  * though omitting it preserves ordering.  The sqrt cost is dominated by
  * the inner loop on modern cores, and returning true distances avoids
  * surprising callers who compare against thresholds.
