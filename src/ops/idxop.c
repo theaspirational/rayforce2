@@ -561,15 +561,21 @@ ray_t* ray_index_drop(ray_t** vp) {
     ray_t* idx = v->index;
     ray_index_t* ix = ray_index_payload(idx);
 
-    /* Restore the parent's nullmap bytes verbatim.  The pointers therein
-     * regain their parent-ownership status: the parent now owns ext_nullmap /
-     * str_pool / sym_dict / str_ext_null again. */
-    memcpy(v->nullmap, ix->saved_nullmap, 16);
-    /* Clear the snapshot in the index so its release path won't double-free
-     * the pointers we just transferred back. */
-    memset(ix->saved_nullmap, 0, 16);
+    /* Shared-index case: another vec may share this RAY_INDEX block via
+     * ray_alloc_copy (rc>1).  Don't clobber the snapshot in that case —
+     * the other holder still reads it.  Copy our own retained refs to
+     * the saved-pointer slots so the bytes we move into v->nullmap are
+     * owned by v.  See vec_drop_index_inplace for the same pattern. */
     uint8_t saved = ix->saved_attrs;
-    ix->saved_attrs = 0;
+    bool shared = ray_atomic_load(&idx->rc) > 1;
+    if (shared) {
+        ray_index_retain_saved(ix);
+    }
+    memcpy(v->nullmap, ix->saved_nullmap, 16);
+    if (!shared) {
+        memset(ix->saved_nullmap, 0, 16);
+        ix->saved_attrs = 0;
+    }
 
     /* Restore parent attrs.  HAS_NULLS was preserved through the attachment
      * so we don't need to OR it back in; only NULLMAP_EXT (which we cleared

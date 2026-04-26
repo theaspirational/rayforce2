@@ -104,18 +104,40 @@ static inline bool vec_any_nulls(const ray_t* v) {
     return (v->attrs & RAY_ATTR_HAS_NULLS) != 0;
 }
 
-/* In-place drop of attached index — caller must hold a unique ref (rc==1).
- * Used by mutation paths to invalidate the (now stale) index before writing.
- * HAS_NULLS was preserved through the attachment so it needs no restoration;
- * only NULLMAP_EXT (cleared at attach time) is reinstated from saved_attrs. */
+/* In-place drop of attached index — caller must hold a unique ref (rc==1)
+ * on `v` itself.  Used by mutation paths to invalidate the (now stale)
+ * index before writing.  HAS_NULLS was preserved through the attachment
+ * so it needs no restoration; only NULLMAP_EXT (cleared at attach time)
+ * is reinstated from saved_attrs.
+ *
+ * Shared-index case: `v` may share its index ray_t with another vec
+ * (e.g. after ray_cow followed by ray_retain_owned_refs, both copies
+ * point at the same RAY_INDEX with rc==2).  We must NOT clobber the
+ * saved-nullmap bytes inside a shared index — the other holder still
+ * reads them.  Detect rc>1 and copy the saved pointers via
+ * ray_index_retain_saved instead of moving them out. */
 static inline void vec_drop_index_inplace(ray_t* v) {
     if (!(v->attrs & RAY_ATTR_HAS_INDEX)) return;
     ray_t* idx = v->index;
     ray_index_t* ix = ray_index_payload(idx);
-    memcpy(v->nullmap, ix->saved_nullmap, 16);
-    memset(ix->saved_nullmap, 0, 16);
     uint8_t saved = ix->saved_attrs;
-    ix->saved_attrs = 0;
+    bool shared = ray_atomic_load(&idx->rc) > 1;
+
+    if (shared) {
+        /* Take our own retained references to the saved-pointer slots
+         * (ext_nullmap / str_pool / sym_dict etc.) so the bytes we copy
+         * into v->nullmap are validly owned by v.  Leave the index's
+         * snapshot intact for the other holder. */
+        ray_index_retain_saved(ix);
+    }
+    memcpy(v->nullmap, ix->saved_nullmap, 16);
+    if (!shared) {
+        /* Sole owner: about to release idx, so neutralize its snapshot
+         * to prevent ray_index_release_saved from double-releasing the
+         * pointers we just transferred to v. */
+        memset(ix->saved_nullmap, 0, 16);
+        ix->saved_attrs = 0;
+    }
     v->attrs &= (uint8_t)~RAY_ATTR_HAS_INDEX;
     if (saved & RAY_ATTR_NULLMAP_EXT) v->attrs |= RAY_ATTR_NULLMAP_EXT;
     ray_release(idx);

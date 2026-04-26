@@ -21,13 +21,19 @@
  *   SOFTWARE.
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "test.h"
 #include <rayforce.h>
 #include "mem/heap.h"
+#include "mem/cow.h"
 #include "vec/vec.h"
 #include "table/sym.h"
 #include "ops/idxop.h"
+#include "store/col.h"
 #include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 /* ─── Helpers ──────────────────────────────────────────────────────── */
 
@@ -398,6 +404,112 @@ static test_result_t test_index_bloom_attach_drop(void) {
     PASS();
 }
 
+/* ─── Shared-COW: drop on one holder must not break the other ────── */
+
+static test_result_t test_index_drop_under_shared_cow(void) {
+    ray_heap_init();
+    int64_t xs[] = { 100, 200, 300, 400, 500 };
+    ray_t* a = make_i64_vec(xs, 5);
+    TEST_ASSERT_EQ_I(ray_vec_set_null_checked(a, 1, true), RAY_OK);
+    TEST_ASSERT_EQ_I(ray_vec_set_null_checked(a, 3, true), RAY_OK);
+
+    /* Attach a zone index. */
+    ray_t* x = a;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_index_attach_zone(&x)));
+    TEST_ASSERT_TRUE(x->attrs & RAY_ATTR_HAS_INDEX);
+
+    /* Force a COW share: retain x and ray_alloc_copy via ray_cow.
+     * After this, both a' and b point at the same RAY_INDEX block (rc=2). */
+    ray_retain(x);
+    ray_retain(x);   /* simulate two outstanding references */
+    ray_t* b = ray_cow(x);
+    TEST_ASSERT_TRUE(b != x);
+    TEST_ASSERT_TRUE(b->attrs & RAY_ATTR_HAS_INDEX);
+    TEST_ASSERT_TRUE(b->index == x->index);
+    /* Index ray_t now has rc>=2 (held by both x and b). */
+    TEST_ASSERT_TRUE(ray_atomic_load(&x->index->rc) >= 2);
+
+    /* Drop the index from x.  This must not corrupt b's view. */
+    ray_t* x2 = x;
+    ray_index_drop(&x2);
+    TEST_ASSERT_FALSE(x2->attrs & RAY_ATTR_HAS_INDEX);
+    TEST_ASSERT_TRUE(b->attrs & RAY_ATTR_HAS_INDEX);
+
+    /* b must still report the original null state correctly. */
+    TEST_ASSERT_FALSE(ray_vec_is_null(b, 0));
+    TEST_ASSERT_TRUE (ray_vec_is_null(b, 1));
+    TEST_ASSERT_FALSE(ray_vec_is_null(b, 2));
+    TEST_ASSERT_TRUE (ray_vec_is_null(b, 3));
+    TEST_ASSERT_FALSE(ray_vec_is_null(b, 4));
+
+    /* And x2 (with index dropped) must also report correctly. */
+    TEST_ASSERT_FALSE(ray_vec_is_null(x2, 0));
+    TEST_ASSERT_TRUE (ray_vec_is_null(x2, 1));
+    TEST_ASSERT_FALSE(ray_vec_is_null(x2, 2));
+    TEST_ASSERT_TRUE (ray_vec_is_null(x2, 3));
+
+    ray_release(x2);
+    ray_release(b);
+    ray_heap_destroy();
+    PASS();
+}
+
+/* ─── Persistence round-trip on indexed vec ───────────────────────── */
+
+static test_result_t test_index_persistence_roundtrip(void) {
+    ray_heap_init();
+    /* 200 elements forces ext_nullmap. */
+    int64_t n = 200;
+    ray_t* v = ray_vec_new(RAY_I64, n);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t x = i * 10;
+        v = ray_vec_append(v, &x);
+    }
+    TEST_ASSERT_EQ_I(ray_vec_set_null_checked(v, 7, true), RAY_OK);
+    TEST_ASSERT_EQ_I(ray_vec_set_null_checked(v, 150, true), RAY_OK);
+    TEST_ASSERT_TRUE(v->attrs & RAY_ATTR_NULLMAP_EXT);
+
+    ray_t* w = v;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_index_attach_zone(&w)));
+    TEST_ASSERT_TRUE(w->attrs & RAY_ATTR_HAS_INDEX);
+
+    /* Save through col.c — must NOT write the index pointer to disk. */
+    char path[] = "/tmp/idx_persist_test_XXXXXX";
+    int fd = mkstemp(path);
+    TEST_ASSERT_TRUE(fd >= 0);
+    close(fd);
+    ray_err_t err = ray_col_save(w, path);
+    TEST_ASSERT_EQ_I(err, RAY_OK);
+
+    /* Load back and verify shape + null bits. */
+    ray_t* loaded = ray_col_load(path);
+    unlink(path);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_EQ_I(loaded->type, RAY_I64);
+    TEST_ASSERT_EQ_I(loaded->len, n);
+    /* HAS_INDEX must NOT survive serialization. */
+    TEST_ASSERT_FALSE(loaded->attrs & RAY_ATTR_HAS_INDEX);
+    TEST_ASSERT_TRUE(loaded->attrs & RAY_ATTR_HAS_NULLS);
+
+    /* Null bits must round-trip. */
+    TEST_ASSERT_FALSE(ray_vec_is_null(loaded, 0));
+    TEST_ASSERT_TRUE (ray_vec_is_null(loaded, 7));
+    TEST_ASSERT_FALSE(ray_vec_is_null(loaded, 100));
+    TEST_ASSERT_TRUE (ray_vec_is_null(loaded, 150));
+    TEST_ASSERT_FALSE(ray_vec_is_null(loaded, 199));
+
+    /* Data must round-trip. */
+    int64_t* d = (int64_t*)ray_data(loaded);
+    TEST_ASSERT_EQ_I(d[0], 0);
+    TEST_ASSERT_EQ_I(d[10], 100);
+    TEST_ASSERT_EQ_I(d[199], 1990);
+
+    ray_release(loaded);
+    ray_release(w);
+    ray_heap_destroy();
+    PASS();
+}
+
 /* ─── Slice handling in ray_vec_nullmap_bytes ─────────────────────── */
 
 static test_result_t test_index_nullmap_helper_slice(void) {
@@ -547,5 +659,7 @@ const test_entry_t index_entries[] = {
     { "index/insert_at_drops_index",         test_index_insert_at_drops_index,         NULL, NULL },
     { "index/null_readers_through_helper",   test_index_null_readers_through_helper,   NULL, NULL },
     { "index/nullmap_helper_slice",          test_index_nullmap_helper_slice,          NULL, NULL },
+    { "index/drop_under_shared_cow",         test_index_drop_under_shared_cow,         NULL, NULL },
+    { "index/persistence_roundtrip",         test_index_persistence_roundtrip,         NULL, NULL },
     { NULL, NULL, NULL, NULL },
 };

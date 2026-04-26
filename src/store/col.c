@@ -26,6 +26,7 @@
 #include "mem/heap.h"
 #include "store/fileio.h"
 #include "table/sym.h"
+#include "ops/idxop.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdatomic.h>
@@ -470,6 +471,29 @@ ray_err_t ray_col_save(ray_t* vec, const char* path) {
          * This serves as O(1) fast-reject metadata on load. */
         header.rc = (vec->type == RAY_SYM) ? ray_sym_count() : 0;
 
+        /* HAS_INDEX rebase: an attached accelerator index displaces the
+         * 16-byte nullmap union with an index pointer.  Persist the
+         * pre-attach state instead — strip HAS_INDEX, restore the saved
+         * NULLMAP_EXT bit, and copy the saved bitmap bytes back into the
+         * on-disk header.  ext_for_append captures the saved ext-nullmap
+         * pointer so the bitmap append at end-of-write reads from the
+         * right place. */
+        ray_t* ext_for_append = (vec->attrs & RAY_ATTR_NULLMAP_EXT)
+                                ? vec->ext_nullmap : NULL;
+        if (vec->attrs & RAY_ATTR_HAS_INDEX) {
+            ray_index_t* ix = ray_index_payload(vec->index);
+            header.attrs &= ~RAY_ATTR_HAS_INDEX;
+            if (ix->saved_attrs & RAY_ATTR_NULLMAP_EXT) {
+                header.attrs |= RAY_ATTR_NULLMAP_EXT;
+                memcpy(&ext_for_append, &ix->saved_nullmap[0],
+                       sizeof(ext_for_append));
+            } else {
+                header.attrs &= ~RAY_ATTR_NULLMAP_EXT;
+                ext_for_append = NULL;
+            }
+            memcpy(header.nullmap, ix->saved_nullmap, 16);
+        }
+
         /* Clear slice field; preserve ext_nullmap flag for bitmap append */
         header.attrs &= ~RAY_ATTR_SLICE;
         if (!(header.attrs & RAY_ATTR_HAS_NULLS)) {
@@ -515,11 +539,14 @@ ray_err_t ray_col_save(ray_t* vec, const char* path) {
             if (written != data_size) { fclose(f); remove(tmp_path); return RAY_ERR_IO; }
         }
 
-        /* Append external nullmap bitmap after data */
+        /* Append external nullmap bitmap after data.  Use header.attrs
+         * (rebased above for HAS_INDEX) and ext_for_append (the
+         * effective ext_nullmap pointer, possibly extracted from the
+         * index's saved snapshot). */
         if ((vec->attrs & RAY_ATTR_HAS_NULLS) &&
-            (vec->attrs & RAY_ATTR_NULLMAP_EXT) && vec->ext_nullmap) {
+            (header.attrs & RAY_ATTR_NULLMAP_EXT) && ext_for_append) {
             size_t bitmap_len = ((size_t)vec->len + 7) / 8;
-            written = fwrite(ray_data(vec->ext_nullmap), 1, bitmap_len, f);
+            written = fwrite(ray_data(ext_for_append), 1, bitmap_len, f);
             if (written != bitmap_len) { fclose(f); remove(tmp_path); return RAY_ERR_IO; }
         }
 

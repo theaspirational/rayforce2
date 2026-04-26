@@ -27,6 +27,7 @@
 #include "core/types.h"
 #include "mem/heap.h"
 #include "vec/str.h"
+#include "vec/vec.h"
 #include "table/sym.h"
 #include "lang/env.h"
 #include <string.h>
@@ -74,25 +75,26 @@ static int64_t null_bitmap_size(ray_t* v) {
     return (v->len + 7) / 8;
 }
 
-/* Write null bitmap bytes into buf. Returns bytes written. */
+/* Write null bitmap bytes into buf. Returns bytes written.
+ * Uses ray_vec_nullmap_bytes so HAS_INDEX, slice, ext, and inline storage
+ * forms all serialize the correct bits.  bit_offset is non-zero only for
+ * slices, which (per pre-existing serde behaviour) are saved as if they
+ * had no nulls — null_bitmap_size returns 0 since the slice's own attrs
+ * lack HAS_NULLS — so we never reach this with off>0. */
 static int64_t ser_null_bitmap(uint8_t* buf, ray_t* v) {
     int64_t bsz = null_bitmap_size(v);
     if (bsz <= 0) return 0;
 
-    if (v->attrs & RAY_ATTR_NULLMAP_EXT) {
-        if (v->ext_nullmap)
-            memcpy(buf, ray_data(v->ext_nullmap), (size_t)bsz);
-        else
-            memset(buf, 0, (size_t)bsz);
-    } else {
-        /* Inline nullmap: first 16 bytes of ray_t.nullmap (non-STR types) */
-        if (bsz <= 16)
-            memcpy(buf, v->nullmap, (size_t)bsz);
-        else {
-            memcpy(buf, v->nullmap, 16);
-            memset(buf + 16, 0, (size_t)(bsz - 16));
-        }
+    int64_t bit_off = 0, len_bits = 0;
+    const uint8_t* bits = ray_vec_nullmap_bytes(v, &bit_off, &len_bits);
+    if (!bits || bit_off != 0) {
+        memset(buf, 0, (size_t)bsz);
+        return bsz;
     }
+    int64_t avail_bytes = (len_bits + 7) / 8;
+    int64_t copy = bsz < avail_bytes ? bsz : avail_bytes;
+    memcpy(buf, bits, (size_t)copy);
+    if (copy < bsz) memset(buf + copy, 0, (size_t)(bsz - copy));
     return bsz;
 }
 
