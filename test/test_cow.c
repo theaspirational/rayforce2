@@ -183,17 +183,21 @@ static test_result_t test_block_copy_retains_children(void) {
     tbl = ray_table_add_col(tbl, name, vec);
     ray_release(vec);
 
-    /* Get column ref count before copy */
-    ray_t* col_before = ray_table_get_col_idx(tbl, 0);
-    uint32_t rc_before = col_before->rc;
+    /* Tables now hold a 2-pointer block [schema, cols_list]; retaining the
+     * table retains both slots.  Probe the cols list's rc rather than an
+     * individual column's, since cols inside the list are owned by the list
+     * (the table block doesn't reach through to bump them on copy). */
+    ray_t** slots = (ray_t**)ray_data(tbl);
+    ray_t* cols_list = slots[1];
+    uint32_t rc_before = cols_list->rc;
 
     /* Copy the table block */
     ray_t* copy = ray_block_copy(tbl);
     TEST_ASSERT_NOT_NULL(copy);
     TEST_ASSERT_FALSE(RAY_IS_ERR(copy));
 
-    /* Column ref count should have increased by 1 */
-    uint32_t rc_after = col_before->rc;
+    /* cols-list ref count should have increased by 1 */
+    uint32_t rc_after = cols_list->rc;
     TEST_ASSERT_EQ_U(rc_after, rc_before + 1);
 
     ray_release(copy);

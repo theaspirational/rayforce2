@@ -431,17 +431,10 @@ static void ray_release_owned_refs(ray_t* v) {
         return;
     }
 
-    if (v->type == RAY_TABLE) {
-        if (v->len < 0) return;
+    if (v->type == RAY_TABLE || v->type == RAY_DICT) {
         ray_t** slots = (ray_t**)ray_data(v);
-        ray_t* schema = slots[0];
-        if (schema && !RAY_IS_ERR(schema)) ray_release(schema);
-
-        ray_t** cols = slots + 1;
-        for (int64_t i = 0; i < v->len; i++) {
-            ray_t* col = cols[i];
-            if (col && !RAY_IS_ERR(col)) ray_release(col);
-        }
+        if (slots[0] && !RAY_IS_ERR(slots[0])) ray_release(slots[0]);
+        if (slots[1] && !RAY_IS_ERR(slots[1])) ray_release(slots[1]);
         return;
     }
 
@@ -523,16 +516,10 @@ bool ray_retain_owned_refs(ray_t* v) {
         return true;
     }
 
-    if (v->type == RAY_TABLE) {
+    if (v->type == RAY_TABLE || v->type == RAY_DICT) {
         ray_t** slots = (ray_t**)ray_data(v);
-        ray_t* schema = slots[0];
-        if (schema && !RAY_IS_ERR(schema)) ray_retain(schema);
-
-        ray_t** cols = slots + 1;
-        for (int64_t i = 0; i < v->len; i++) {
-            ray_t* col = cols[i];
-            if (col && !RAY_IS_ERR(col)) ray_retain(col);
-        }
+        if (slots[0] && !RAY_IS_ERR(slots[0])) ray_retain(slots[0]);
+        if (slots[1] && !RAY_IS_ERR(slots[1])) ray_retain(slots[1]);
         return true;
     }
 
@@ -604,9 +591,10 @@ static void ray_detach_owned_refs(ray_t* v) {
         return;
     }
 
-    if (v->type == RAY_TABLE) {
+    if (v->type == RAY_TABLE || v->type == RAY_DICT) {
         ray_t** slots = (ray_t**)ray_data(v);
         slots[0] = NULL;
+        slots[1] = NULL;
         v->len = 0;
         return;
     }
@@ -732,7 +720,7 @@ void ray_free(ray_t* v) {
 
     /* File-mapped: munmap */
     if (v->mmod == 1) {
-        if (v->type == RAY_TABLE || v->type == RAY_LIST) return;
+        if (v->type == RAY_TABLE || v->type == RAY_DICT || v->type == RAY_LIST) return;
         if (v->type > 0 && v->type < RAY_TYPE_COUNT) {
             uint8_t esz = ray_sym_elem_size(v->type, v->attrs);
             size_t data_size = 32 + (size_t)v->len * esz;
@@ -809,9 +797,8 @@ ray_t* ray_alloc_copy(ray_t* v) {
     size_t data_size;
     if (ray_is_atom(v)) {
         data_size = 0;
-    } else if (v->type == RAY_TABLE) {
-        if (v->len < 0) return ray_error("oom", NULL);
-        data_size = (size_t)(ray_len(v) + 1) * sizeof(ray_t*);
+    } else if (v->type == RAY_TABLE || v->type == RAY_DICT) {
+        data_size = 2 * sizeof(ray_t*);
     } else if (RAY_IS_PARTED(v->type) || v->type == RAY_MAPCOMMON) {
         int64_t n_ptrs = v->len;
         if (v->type == RAY_MAPCOMMON) n_ptrs = 2;
@@ -876,9 +863,8 @@ ray_t* ray_scratch_realloc(ray_t* v, size_t new_data_size) {
         else if (v->type == RAY_LIST) {
             if (v->len < 0) { old_data = 0; }
             else old_data = (size_t)ray_len(v) * sizeof(ray_t*);
-        } else if (v->type == RAY_TABLE) {
-            if (v->len < 0) { old_data = 0; }
-            else old_data = (size_t)(ray_len(v) + 1) * sizeof(ray_t*);
+        } else if (v->type == RAY_TABLE || v->type == RAY_DICT) {
+            old_data = 2 * sizeof(ray_t*);
         } else if (RAY_IS_PARTED(v->type) || v->type == RAY_MAPCOMMON) {
             int64_t n_ptrs = v->len;
             if (v->type == RAY_MAPCOMMON) n_ptrs = 2;

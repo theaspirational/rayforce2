@@ -119,7 +119,7 @@ ray_t* exec_euclidean_dist(ray_graph_t* g, ray_op_t* op, ray_t* emb_vec) {
  *
  * Dispatches on ext->vector.metric (default COSINE — 0-initialized struct).
  * Returns RAY_TABLE with _rowid (I64) and _dist (F64), sorted ascending so
- * lower = closer across all metrics (pgvector convention).
+ * lower = closer across all metrics.
  *
  * Distance encoding:
  *   COSINE → 1 - cosine_similarity
@@ -400,7 +400,7 @@ static float* list_flatten_floats(ray_t* list, int32_t dim, int64_t* out_n) {
     return buf;
 }
 
-/* pgvector-style metric kinds:
+/* Metric kinds:
  *   COS_DIST    → 1 - cos(a, b)        (lower = closer, range [0, 2])
  *   INNER_PROD  → raw dot(a, b)         (sign varies — not a distance)
  *   L2_DIST     → sqrt(Σ (a - b)^2)     (lower = closer)
@@ -524,7 +524,7 @@ ray_t* ray_norm_fn(ray_t* x) {
 }
 
 /* Parse a metric symbol.  Accepted: 'cosine, 'l2, 'ip.  Matches the three
- * distance flavors exposed by pgvector (<=>, <->, <#>). */
+ * distance flavors. */
 static int parse_metric_sym(ray_t* s, ray_hnsw_metric_t* out) {
     if (!s || s->type != -RAY_SYM) return 0;
     int64_t id = s->i64;
@@ -599,7 +599,7 @@ ray_t* ray_knn_fn(ray_t** args, int64_t n) {
                 d = row_score(MET_L2_DIST, row, q, q_norm, dim);
                 break;
             case RAY_HNSW_IP:
-                /* Negate inner product so lower = closer (pgvector <#>). */
+                /* Negate inner product so lower = closer. */
                 d = -row_score(MET_INNER_PROD, row, q, q_norm, dim);
                 break;
             case RAY_HNSW_COSINE:
@@ -847,39 +847,24 @@ ray_t* ray_hnsw_info_fn(ray_t* h) {
         default: break;
     }
 
-    ray_t* d = ray_list_new(12);
-    if (!d || RAY_IS_ERR(d)) return ray_error("oom", NULL);
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 6);
+    if (RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = ray_list_new(6);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
 
-    ray_t* k1 = ray_sym(sym_intern_safe("nrows", 5));
-    ray_t* v1 = make_i64(idx->n_nodes);
-    d = ray_list_append(d, k1); ray_release(k1);
-    d = ray_list_append(d, v1); ray_release(v1);
-
-    ray_t* k2 = ray_sym(sym_intern_safe("dim", 3));
-    ray_t* v2 = make_i64((int64_t)idx->dim);
-    d = ray_list_append(d, k2); ray_release(k2);
-    d = ray_list_append(d, v2); ray_release(v2);
-
-    ray_t* k3 = ray_sym(sym_intern_safe("metric", 6));
-    ray_t* v3 = ray_sym(sym_intern_safe(mname, strlen(mname)));
-    d = ray_list_append(d, k3); ray_release(k3);
-    d = ray_list_append(d, v3); ray_release(v3);
-
-    ray_t* k4 = ray_sym(sym_intern_safe("nlayers", 7));
-    ray_t* v4 = make_i64((int64_t)idx->n_layers);
-    d = ray_list_append(d, k4); ray_release(k4);
-    d = ray_list_append(d, v4); ray_release(v4);
-
-    ray_t* k5 = ray_sym(sym_intern_safe("M", 1));
-    ray_t* v5 = make_i64((int64_t)idx->M);
-    d = ray_list_append(d, k5); ray_release(k5);
-    d = ray_list_append(d, v5); ray_release(v5);
-
-    ray_t* k6 = ray_sym(sym_intern_safe("efc", 3));
-    ray_t* v6 = make_i64((int64_t)idx->ef_construction);
-    d = ray_list_append(d, k6); ray_release(k6);
-    d = ray_list_append(d, v6); ray_release(v6);
-
-    d->attrs |= RAY_ATTR_DICT;
-    return d;
+    struct { const char* name; size_t nlen; ray_t* val; } rows[] = {
+        { "nrows",   5, make_i64(idx->n_nodes)               },
+        { "dim",     3, make_i64((int64_t)idx->dim)          },
+        { "metric",  6, ray_sym(sym_intern_safe(mname, strlen(mname))) },
+        { "nlayers", 7, make_i64((int64_t)idx->n_layers)     },
+        { "M",       1, make_i64((int64_t)idx->M)            },
+        { "efc",     3, make_i64((int64_t)idx->ef_construction) },
+    };
+    for (size_t i = 0; i < sizeof(rows)/sizeof(rows[0]); i++) {
+        int64_t s = sym_intern_safe(rows[i].name, rows[i].nlen);
+        keys = ray_vec_append(keys, &s);
+        vals = ray_list_append(vals, rows[i].val);
+        ray_release(rows[i].val);
+    }
+    return ray_dict_new(keys, vals);
 }

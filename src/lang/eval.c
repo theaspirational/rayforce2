@@ -287,7 +287,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     int e0_bool = (e0->type == -RAY_BOOL);
 
     /* When LEFT is scalar broadcast to RIGHT vector, the output type follows
-     * the RIGHT vector's element type (q/kdb+ semantics) for integer types,
+     * the RIGHT vector's element type for integer types,
      * unless float or temporal promotion is involved. */
     if (!e0_null && !e0_bool && !left_coll && right_coll && ray_is_vec(right) && out_type != RAY_F64) {
         int8_t vec_type = right->type;
@@ -302,7 +302,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
             out_type = vec_type; /* no-op, just keep it */
     }
     /* When LEFT is vector and RIGHT is scalar, output follows WIDER integer
-     * type between left vector and right scalar (q/kdb+ semantics) */
+     * type between left vector and right scalar */
     if (!e0_null && !e0_bool && left_coll && !right_coll && ray_is_vec(left) && out_type != RAY_F64 &&
         ray_is_atom(right)) {
         int8_t vt = left->type, st = -(right->type);
@@ -1050,19 +1050,13 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
     return tbl;
 }
 
-/* (key table) — return column names as a list of symbols */
+/* (key dict/table) — return keys vector */
 ray_t* ray_key_fn(ray_t* x) {
-    /* Dict: extract keys as SYM vector */
-    if (x->type == RAY_LIST && (x->attrs & RAY_ATTR_DICT)) {
-        int64_t n2 = x->len / 2;
-        ray_t* vec = ray_vec_new(RAY_SYM, n2);
-        if (RAY_IS_ERR(vec)) return vec;
-        vec->len = n2;
-        int64_t* out = (int64_t*)ray_data(vec);
-        ray_t** items = (ray_t**)ray_data(x);
-        for (int64_t i = 0; i < n2; i++)
-            out[i] = items[i * 2]->i64;
-        return vec;
+    if (x->type == RAY_DICT) {
+        ray_t* keys = ray_dict_keys(x);
+        if (!keys) return ray_error("type", NULL);
+        ray_retain(keys);
+        return keys;
     }
     if (x->type != RAY_TABLE) return ray_error("type", NULL);
     int64_t ncols = ray_table_ncols(x);
@@ -1079,35 +1073,22 @@ ray_t* ray_key_fn(ray_t* x) {
 ray_t* ray_value_fn(ray_t* x) {
     /* Table: return list of column vectors */
     if (x->type == RAY_TABLE) {
-        int64_t ncols = x->len;
-        ray_t* result = ray_alloc(ncols * sizeof(ray_t*));
-        if (!result) return ray_error("oom", NULL);
-        result->type = RAY_LIST;
-        result->len = ncols;
-        /* Columns start after the schema pointer */
-        ray_t** cols = (ray_t**)((char*)ray_data(x) + sizeof(ray_t*));
-        ray_t** dst = (ray_t**)ray_data(result);
+        /* Table cols slot is a RAY_LIST already — return a fresh copy. */
+        int64_t ncols = ray_table_ncols(x);
+        ray_t* result = ray_list_new(ncols);
+        if (!result || RAY_IS_ERR(result)) return result ? result : ray_error("oom", NULL);
         for (int64_t i = 0; i < ncols; i++) {
-            ray_retain(cols[i]);
-            dst[i] = cols[i];
+            ray_t* c = ray_table_get_col_idx(x, i);
+            result = ray_list_append(result, c);
+            if (RAY_IS_ERR(result)) return result;
         }
         return result;
     }
-    if (x->type != RAY_LIST || !(x->attrs & RAY_ATTR_DICT))
-        return ray_error("type", NULL);
-    int64_t n = ray_len(x);
-    int64_t nvals = n / 2;
-    ray_t* result = ray_alloc(nvals * sizeof(ray_t*));
-    if (!result) return ray_error("oom", NULL);
-    result->type = RAY_LIST;
-    result->len = nvals;
-    ray_t** src = (ray_t**)ray_data(x);
-    ray_t** dst = (ray_t**)ray_data(result);
-    for (int64_t i = 0; i < nvals; i++) {
-        dst[i] = src[i * 2 + 1];
-        ray_retain(dst[i]);
-    }
-    return result;
+    if (x->type != RAY_DICT) return ray_error("type", NULL);
+    ray_t* vals = ray_dict_vals(x);
+    if (!vals) return ray_error("type", NULL);
+    ray_retain(vals);
+    return vals;
 }
 
 
@@ -1937,8 +1918,9 @@ vm_error_cleanup: {
 /* Bind `obj` under `name` in the global env.  For reserved-namespace
  * names like `.sys.gc`:
  *
- *   - `.sys` itself is a RAY_LIST dict in the env.  Typing `.sys`
- *     at the REPL returns the whole dict for introspection.
+ *   - `.sys` itself is a RAY_DICT in the env (keys SYM vec + vals
+ *     LIST).  Typing `.sys` at the REPL returns the whole dict for
+ *     introspection.
  *   - `.sys.gc` is ALSO bound flat in the env, pointing at the same
  *     function object.  This keeps direct lookup O(1), surfaces the
  *     full name to `ray_env_lookup_prefix` (so tab completion and
@@ -1963,14 +1945,16 @@ static void reg_bind(const char* name, ray_t* obj) {
         if (root) {
             ray_retain(root);
         } else {
-            root = ray_list_new(0);
+            ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 4);
+            ray_t* vals = ray_list_new(4);
+            assert(keys && !RAY_IS_ERR(keys) && vals && !RAY_IS_ERR(vals));
+            root = ray_dict_new(keys, vals);
             assert(root && !RAY_IS_ERR(root));
-            root->attrs |= RAY_ATTR_DICT;
         }
         ray_t* leaf_key = ray_sym(leaf_sym);
-        root = ray_list_append(root, leaf_key);
-        root = ray_list_append(root, obj);
+        root = ray_dict_upsert(root, leaf_key, obj);
         ray_release(leaf_key);
+        assert(root && !RAY_IS_ERR(root));
         assert(ray_env_bind(root_sym, root) == RAY_OK);
         ray_release(root);
 
@@ -2280,7 +2264,7 @@ static void ray_register_builtins(void) {
     register_binary("dl-query",    RAY_FN_NONE, ray_dl_query_fn);
     register_binary("dl-provenance", RAY_FN_NONE, ray_dl_provenance_fn);
 
-    /* Vector similarity / embeddings / HNSW — pgvector-style names */
+    /* Vector similarity / embeddings / HNSW */
     register_binary("cos-dist",    RAY_FN_NONE, ray_cos_dist_fn);
     register_binary("inner-prod",  RAY_FN_NONE, ray_inner_prod_fn);
     register_binary("l2-dist",     RAY_FN_NONE, ray_l2_dist_fn);
@@ -2365,18 +2349,13 @@ ray_t* ray_eval(ray_t* obj) {
         ret = obj; goto out;
     }
 
-    /* Non-list vectors: return themselves */
+    /* Non-list vectors (incl. RAY_DICT/RAY_TABLE): return themselves —
+     * dict literals are self-evaluating; values stay unevaluated.  Use
+     * the (dict ...) builtin for evaluated construction. */
     if (obj->type != RAY_LIST) { ray_retain(obj); ret = obj; goto out; }
 
     /* Empty list */
     if (ray_len(obj) == 0) { ray_retain(obj); ret = obj; goto out; }
-
-    /* Dict literal: self-evaluating (values stay unevaluated).
-     * Use the (dict ...) builtin for evaluated construction. */
-    if (obj->attrs & RAY_ATTR_DICT) {
-        ray_retain(obj);
-        ret = obj; goto out;
-    }
 
     /* List: evaluate first element, dispatch by type */
     ray_t** elems = (ray_t**)ray_data(obj);

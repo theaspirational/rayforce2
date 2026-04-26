@@ -23,7 +23,7 @@
 
 #include "lang/env.h"
 #include "table/sym.h"
-#include "ops/dict.h"
+#include "table/dict.h"
 #include "ops/temporal.h"
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -151,8 +151,9 @@ ray_t* ray_env_get(int64_t sym_id) {
     if (!ray_sym_is_dotted(sym_id)) return NULL;
 
     /* Dotted walk: head resolves via scope+global, rest are sym-keyed
-     * container probes — dicts walk via pair array, tables via schema
-     * lookup, anything else is surfaced as "undefined" (NULL).  Missing
+     * container probes — dicts probe the keys SYM vec and read the
+     * matching slot from the vals LIST, tables look up by schema sym
+     * id, anything else is surfaced as "undefined" (NULL).  Missing
      * intermediate keys also return NULL so the evaluator's name-error
      * reporting stays consistent with plain names.  Returning env-owned
      * pointers (never fresh allocations) keeps the caller's retain/release
@@ -163,7 +164,7 @@ ray_t* ray_env_get(int64_t sym_id) {
 
     ray_t* v = env_lookup_flat(segs[0]);
     for (int i = 1; v && i < n; i++) {
-        v = container_probe_by_sym(v, segs[i]);
+        v = ray_container_probe_sym(v, segs[i]);
     }
     return v;
 }
@@ -196,7 +197,7 @@ ray_t* ray_env_resolve(int64_t sym_id) {
     bool   fresh = false;
 
     for (int i = 1; v && i < n; i++) {
-        ray_t* next = container_probe_by_sym(v, segs[i]);
+        ray_t* next = ray_container_probe_sym(v, segs[i]);
         if (next) {
             if (fresh) ray_release(v);
             v = next;
@@ -344,18 +345,16 @@ static ray_err_t env_set_dotted(int64_t sym_id, ray_t* val,
      * non-dict intermediate is an error. */
     ray_t* parents[256];
     parents[0] = base_lookup(segs[0]);
-    if (parents[0] && !(parents[0]->type == RAY_LIST &&
-                        (parents[0]->attrs & RAY_ATTR_DICT)))
+    if (parents[0] && parents[0]->type != RAY_DICT)
         return RAY_ERR_TYPE;
 
     /* parents[i] is the dict at path prefix segs[0..i].  If an intermediate
-     * key is missing, parents[i+1..n-2] are NULL and dict_upsert will create
-     * fresh dicts on the way back up. */
+     * key is missing, parents[i+1..n-2] are NULL and ray_dict_upsert will
+     * create fresh dicts on the way back up. */
     for (int i = 1; i < n - 1; i++) {
         if (!parents[i - 1]) { parents[i] = NULL; continue; }
-        ray_t* child = dict_probe_by_sym(parents[i - 1], segs[i]);
-        if (child && !(child->type == RAY_LIST &&
-                       (child->attrs & RAY_ATTR_DICT)))
+        ray_t* child = ray_dict_probe_sym_borrowed(parents[i - 1], segs[i]);
+        if (child && child->type != RAY_DICT)
             return RAY_ERR_TYPE;
         parents[i] = child;
     }
@@ -377,9 +376,11 @@ static ray_err_t env_set_dotted(int64_t sym_id, ray_t* val,
     if (deleting) {
         ray_t* leaf_parent = parents[n - 2];
         if (!leaf_parent) return RAY_OK;
-        if (!dict_probe_by_sym(leaf_parent, segs[n - 1])) return RAY_OK;
+        if (!ray_dict_probe_sym_borrowed(leaf_parent, segs[n - 1])) return RAY_OK;
         ray_retain(leaf_parent);
-        cur = dict_remove(leaf_parent, segs[n - 1]);
+        ray_t* k = ray_sym(segs[n - 1]);
+        cur = ray_dict_remove(leaf_parent, k);
+        ray_release(k);
         if (!cur || RAY_IS_ERR(cur)) return RAY_ERR_OOM;
         start_i = n - 2;   /* rebuild from the parent of the deleted key up */
     } else {
@@ -388,27 +389,40 @@ static ray_err_t env_set_dotted(int64_t sym_id, ray_t* val,
         start_i = n - 1;
     }
 
-    /* Build new chain bottom-up.  dict_upsert consumes its `dict` arg, so
-     * we retain parents before passing.  On failure we release cur and
-     * bail — parents are env-owned borrowed refs. */
+    /* Build new chain bottom-up.  ray_dict_upsert consumes its `dict` arg,
+     * so we retain parents before passing.  Missing-parent levels are
+     * created from a fresh empty dict.  On failure we release cur and bail
+     * — parents are env-owned borrowed refs. */
     for (int i = start_i; i >= 1; i--) {
         ray_t* parent = parents[i - 1];
 
-        if (deleting && cur && cur->type == RAY_LIST
-            && (cur->attrs & RAY_ATTR_DICT) && cur->len == 0) {
+        if (deleting && cur && cur->type == RAY_DICT && ray_dict_len(cur) == 0) {
             /* Cascade: the rebuilt child became empty, so remove the key
              * at this level rather than storing {}.  If parent is absent
              * too, nothing more to do. */
             ray_release(cur);
             if (!parent) { cur = NULL; break; }
             ray_retain(parent);
-            cur = dict_remove(parent, segs[i]);
+            ray_t* k = ray_sym(segs[i]);
+            cur = ray_dict_remove(parent, k);
+            ray_release(k);
             if (!cur || RAY_IS_ERR(cur)) return RAY_ERR_OOM;
             continue;
         }
 
-        if (parent) ray_retain(parent);
-        ray_t* next = dict_upsert(parent, segs[i], cur);
+        ray_t* dict_in;
+        if (parent) {
+            ray_retain(parent);
+            dict_in = parent;
+        } else {
+            ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 1);
+            ray_t* vals = ray_list_new(1);
+            dict_in = ray_dict_new(keys, vals);
+            if (!dict_in || RAY_IS_ERR(dict_in)) { ray_release(cur); return RAY_ERR_OOM; }
+        }
+        ray_t* k = ray_sym(segs[i]);
+        ray_t* next = ray_dict_upsert(dict_in, k, cur);
+        ray_release(k);
         ray_release(cur);
         if (!next || RAY_IS_ERR(next)) return RAY_ERR_OOM;
         cur = next;
@@ -418,8 +432,7 @@ static ray_err_t env_set_dotted(int64_t sym_id, ray_t* val,
      * past a missing parent), rebind the head as NULL so the stale empty
      * namespace disappears from introspection and from future lookups. */
     ray_t* to_bind = cur;
-    if (deleting && cur && cur->type == RAY_LIST
-        && (cur->attrs & RAY_ATTR_DICT) && cur->len == 0) {
+    if (deleting && cur && cur->type == RAY_DICT && ray_dict_len(cur) == 0) {
         to_bind = NULL;
     }
     ray_err_t err = bind_fn(segs[0], to_bind);

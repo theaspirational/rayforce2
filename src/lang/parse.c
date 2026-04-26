@@ -25,6 +25,7 @@
 #include "lang/nfo.h"
 #include "lang/env.h"
 #include "core/numparse.h"
+#include "table/sym.h"   /* RAY_SYM_W64 */
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
@@ -640,77 +641,98 @@ boxed_list:
     return ray_error("domain", NULL);
 }
 
-/* ── Dict literal: {key: val key: val ...} ── */
+/* ── Dict literal: {key: val key: val ...} ──
+ *
+ * Builds a RAY_DICT block holding [keys, vals].
+ * Keys are emitted as a RAY_SYM vector when every key is a bareword sym
+ * literal, as a RAY_STR vector when every key is a quoted string literal,
+ * or as a heterogeneous RAY_LIST otherwise.  Values stay unevaluated in
+ * a RAY_LIST so dict literals remain self-evaluating (the (dict ...)
+ * builtin evaluates them on demand).
+ */
 static ray_t* parse_dict(ray_parser_t *p) {
     advance(p, 1); /* skip { */
-    ray_t* list = ray_list_new(8);
-    if (RAY_IS_ERR(list)) return list;
-    list->attrs |= RAY_ATTR_DICT;
 
-    ray_t* key;
+    /* Build keys+vals as a generic RAY_LIST of atoms first; then narrow
+     * keys to a typed vector if homogeneous.  16 entries cover every
+     * realistic dict literal — heterogeneous spillover stays as LIST. */
+    ray_t* key_list = ray_list_new(8);
+    if (RAY_IS_ERR(key_list)) return key_list;
+    ray_t* vals = ray_list_new(8);
+    if (RAY_IS_ERR(vals)) { ray_release(key_list); return vals; }
+
+    bool all_sym = true;
+    bool all_str = true;
+
     skip_ws_and_comments(p);
     while (*p->pos && *p->pos != '}') {
-        /* Parse key: name or string literal */
+        ray_t* key_atom = NULL;
         if (*p->pos == '"') {
-            /* String key: parse as string, then intern as symbol */
             const char *sk_before = p->pos;
-            ray_t* str_key = parse_string(p);
+            key_atom = parse_string(p);
             fixup_pos(p, sk_before);
-            if (RAY_IS_ERR(str_key)) { ray_release(list); return str_key; }
-            /* Use the string value as the dict key directly */
-            key = str_key;
-            /* Expect colon */
-            skip_ws_and_comments(p);
-            if (*p->pos != ':') { ray_release(key); ray_release(list); return ray_error("parse", NULL); }
-            advance(p, 1); /* skip : */
-            skip_ws_and_comments(p);
-            /* Parse value */
-            ray_t* val = parse_expr(p);
-            if (RAY_IS_ERR(val)) { ray_release(key); ray_release(list); return val; }
-            list = ray_list_append(list, key);
-            ray_release(key);
-            if (RAY_IS_ERR(list)) { ray_release(val); return list; }
-            list = ray_list_append(list, val);
-            ray_release(val);
-            if (RAY_IS_ERR(list)) return list;
-            skip_ws_and_comments(p);
-            continue;
+            if (RAY_IS_ERR(key_atom)) { ray_release(key_list); ray_release(vals); return key_atom; }
+            all_sym = false;
+        } else {
+            const char *kstart = p->pos;
+            while (PA(*p->pos) == PA_ALPHA || PA(*p->pos) == PA_DIGIT
+                   || *p->pos == '_' || *p->pos == '-')
+                p->pos++;
+            p->col += (int32_t)(p->pos - kstart);
+            size_t klen = (size_t)(p->pos - kstart);
+            if (klen == 0) { ray_release(key_list); ray_release(vals); return ray_error("parse", NULL); }
+            int64_t kid = ray_sym_intern(kstart, klen);
+            key_atom = ray_sym(kid);
+            if (RAY_IS_ERR(key_atom)) { ray_release(key_list); ray_release(vals); return key_atom; }
+            all_str = false;
         }
-        const char *kstart = p->pos;
-        while (PA(*p->pos) == PA_ALPHA || PA(*p->pos) == PA_DIGIT
-               || *p->pos == '_' || *p->pos == '-')
-            p->pos++;
-        p->col += (int32_t)(p->pos - kstart); /* key names don't span lines */
-        size_t klen = (size_t)(p->pos - kstart);
-        if (klen == 0) { ray_release(list); return ray_error("parse", NULL); }
 
-        int64_t kid = ray_sym_intern(kstart, klen);
-        key = ray_sym(kid);
-        if (RAY_IS_ERR(key)) { ray_release(list); return key; }
-
-        /* Expect colon */
         skip_ws_and_comments(p);
-        if (*p->pos != ':') { ray_release(key); ray_release(list); return ray_error("parse", NULL); }
-        advance(p, 1); /* skip : */
+        if (*p->pos != ':') { ray_release(key_atom); ray_release(key_list); ray_release(vals); return ray_error("parse", NULL); }
+        advance(p, 1);
         skip_ws_and_comments(p);
 
-        /* Parse value expression */
         ray_t* val = parse_expr(p);
-        if (RAY_IS_ERR(val)) { ray_release(key); ray_release(list); return val; }
+        if (RAY_IS_ERR(val)) { ray_release(key_atom); ray_release(key_list); ray_release(vals); return val; }
 
-        /* Append key then value */
-        list = ray_list_append(list, key);
-        ray_release(key);
-        if (RAY_IS_ERR(list)) { ray_release(val); return list; }
-        list = ray_list_append(list, val);
+        key_list = ray_list_append(key_list, key_atom);
+        ray_release(key_atom);
+        if (RAY_IS_ERR(key_list)) { ray_release(vals); ray_release(val); return key_list; }
+
+        vals = ray_list_append(vals, val);
         ray_release(val);
-        if (RAY_IS_ERR(list)) return list;
+        if (RAY_IS_ERR(vals)) { ray_release(key_list); return vals; }
 
         skip_ws_and_comments(p);
     }
-    if (*p->pos != '}') { ray_release(list); return ray_error("parse", NULL); }
+    if (*p->pos != '}') { ray_release(key_list); ray_release(vals); return ray_error("parse", NULL); }
     advance(p, 1); /* skip } */
-    return list;
+
+    /* Narrow keys to a typed vector when homogeneous. */
+    int64_t n_pairs = key_list->len;
+    ray_t** key_atoms = (ray_t**)ray_data(key_list);
+    ray_t* keys;
+    if (n_pairs > 0 && all_sym) {
+        keys = ray_sym_vec_new(RAY_SYM_W64, n_pairs);
+        if (RAY_IS_ERR(keys)) { ray_release(key_list); ray_release(vals); return keys; }
+        for (int64_t i = 0; i < n_pairs; i++) {
+            int64_t id = key_atoms[i]->i64;
+            keys = ray_vec_append(keys, &id);
+            if (RAY_IS_ERR(keys)) { ray_release(key_list); ray_release(vals); return keys; }
+        }
+        ray_release(key_list);
+    } else if (n_pairs > 0 && all_str) {
+        keys = ray_vec_new(RAY_STR, n_pairs);
+        if (RAY_IS_ERR(keys)) { ray_release(key_list); ray_release(vals); return keys; }
+        for (int64_t i = 0; i < n_pairs; i++) {
+            keys = ray_str_vec_append(keys, ray_str_ptr(key_atoms[i]), ray_str_len(key_atoms[i]));
+            if (RAY_IS_ERR(keys)) { ray_release(key_list); ray_release(vals); return keys; }
+        }
+        ray_release(key_list);
+    } else {
+        keys = key_list;  /* heterogeneous or empty — use the LIST as-is */
+    }
+    return ray_dict_new(keys, vals);
 }
 
 /* ── List (s-expression): (fn arg1 arg2 ...) ── */

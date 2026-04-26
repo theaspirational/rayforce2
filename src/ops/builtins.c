@@ -1404,27 +1404,23 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
     /* Cast to DICT */
     if (cast_match(tname, tlen, "DICT")) {
         ray_release(s);
-        if (val->type == RAY_LIST && (val->attrs & RAY_ATTR_DICT)) { ray_retain(val); return val; }
+        if (val->type == RAY_DICT) { ray_retain(val); return val; }
         /* Table -> Dict */
         if (val->type == RAY_TABLE) {
             int64_t ncols = ray_table_ncols(val);
-            ray_t* dict = ray_list_new(ncols * 2);
-            if (RAY_IS_ERR(dict)) return dict;
-            dict->attrs |= RAY_ATTR_DICT;
+            ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, ncols);
+            if (RAY_IS_ERR(keys)) return keys;
+            ray_t* vals = ray_list_new(ncols);
+            if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
             for (int64_t c = 0; c < ncols; c++) {
                 int64_t col_name = ray_table_col_name(val, c);
                 ray_t* col_val = ray_table_get_col_idx(val, c);
-                ray_t* key = ray_sym(col_name);
-                if (RAY_IS_ERR(key)) { ray_release(dict); return key; }
-                dict = ray_list_append(dict, key);
-                ray_release(key);
-                if (RAY_IS_ERR(dict)) return dict;
-                ray_retain(col_val);
-                dict = ray_list_append(dict, col_val);
-                ray_release(col_val);
-                if (RAY_IS_ERR(dict)) return dict;
+                keys = ray_vec_append(keys, &col_name);
+                if (RAY_IS_ERR(keys)) { ray_release(vals); return keys; }
+                vals = ray_list_append(vals, col_val);
+                if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
             }
-            return dict;
+            return ray_dict_new(keys, vals);
         }
         return ray_error("type", NULL);
     }
@@ -1433,15 +1429,18 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         ray_release(s);
         if (val->type == RAY_TABLE) { ray_retain(val); return val; }
         /* Dict -> Table */
-        if (val->type == RAY_LIST && (val->attrs & RAY_ATTR_DICT)) {
-            int64_t dict_n = ray_len(val);
-            int32_t ncols = (int32_t)(dict_n / 2);
-            ray_t** items = (ray_t**)ray_data(val);
+        if (val->type == RAY_DICT) {
+            ray_t* dkeys = ray_dict_keys(val);
+            ray_t* dvals = ray_dict_vals(val);
+            int64_t ncols = dkeys ? dkeys->len : 0;
+            if (!dkeys || dkeys->type != RAY_SYM || !dvals || dvals->type != RAY_LIST)
+                return ray_error("type", NULL);
+            ray_t** col_ptrs = (ray_t**)ray_data(dvals);
             ray_t* tbl = ray_table_new(ncols);
             if (RAY_IS_ERR(tbl)) return tbl;
-            for (int32_t c = 0; c < ncols; c++) {
-                int64_t col_name = items[c * 2]->i64;
-                ray_t* col_val = items[c * 2 + 1];
+            for (int64_t c = 0; c < ncols; c++) {
+                int64_t col_name = ray_read_sym(ray_data(dkeys), c, RAY_SYM, dkeys->attrs);
+                ray_t* col_val = col_ptrs[c];
                 ray_retain(col_val);
                 tbl = ray_table_add_col(tbl, col_name, col_val);
                 ray_release(col_val);
@@ -1460,10 +1459,6 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
 
 ray_t* ray_type_fn(ray_t* val) {
     if (!val || RAY_IS_NULL(val)) return ray_sym(ray_sym_intern("null", 4));
-    if (val->type == RAY_LIST && (val->attrs & RAY_ATTR_DICT)) {
-        int64_t id = ray_sym_intern("DICT", 4);
-        return ray_sym(id);
-    }
     const char* name = ray_type_name(val->type);
     int64_t id = ray_sym_intern(name, strlen(name));
     return ray_sym(id);
@@ -1687,24 +1682,21 @@ as_list:;
     return lst;
 }
 
-/* (dict keys vals) -> dict */
+/* (dict keys vals) -> dict.  Wraps two parallel containers as a [keys,
+ * vals] block.  When vals is shorter than keys, the tail is filled with
+ * typed null I64.  Both inputs are copied (refs retained) — caller keeps
+ * ownership of the originals. */
 ray_t* ray_dict_fn(ray_t* keys, ray_t* vals) {
-    if (!ray_is_vec(keys) || (keys->type != RAY_SYM && keys->len > 0))
-        return ray_error("type", NULL);
+    if (!ray_is_vec(keys)) return ray_error("type", NULL);
     int64_t n = keys->len;
-    ray_t* dict = ray_list_new((int32_t)(n * 2));
-    if (RAY_IS_ERR(dict)) return dict;
-    dict->attrs |= RAY_ATTR_DICT;
 
-    int64_t* syms = (int64_t*)ray_data(keys);
+    /* Hold a fresh ref to keys so ownership is transferred into the dict. */
+    ray_retain(keys);
+
+    /* Materialize vals as RAY_LIST of length n. */
+    ray_t* vlist = ray_list_new(n);
+    if (RAY_IS_ERR(vlist)) { ray_release(keys); return vlist; }
     for (int64_t i = 0; i < n; i++) {
-        ray_t* k = ray_sym(syms[i]);
-        if (RAY_IS_ERR(k)) { ray_release(dict); return k; }
-        dict = ray_list_append(dict, k);
-        ray_release(k);
-        if (RAY_IS_ERR(dict)) return dict;
-
-        /* Get value: from list or vector */
         ray_t* v;
         int alloc = 0;
         if (vals->type == RAY_LIST) {
@@ -1715,16 +1707,16 @@ ray_t* ray_dict_fn(ray_t* keys, ray_t* vals) {
             v = vals;
         }
         if (v && !RAY_IS_ERR(v)) {
-            dict = ray_list_append(dict, v);
+            vlist = ray_list_append(vlist, v);
             if (alloc) ray_release(v);
         } else {
             ray_t* null_val = ray_typed_null(-RAY_I64);
-            dict = ray_list_append(dict, null_val);
+            vlist = ray_list_append(vlist, null_val);
             ray_release(null_val);
         }
-        if (RAY_IS_ERR(dict)) return dict;
+        if (RAY_IS_ERR(vlist)) { ray_release(keys); return vlist; }
     }
-    return dict;
+    return ray_dict_new(keys, vlist);
 }
 
 /* (nil? x) -> true if x is null */
@@ -1891,9 +1883,11 @@ ray_t* ray_group_fn(ray_t* x) {
         return ray_error("type", NULL);
     int64_t n = x->len;
     if (n == 0) {
-        ray_t* d = ray_list_new(0);
-        if (!RAY_IS_ERR(d)) d->attrs |= RAY_ATTR_DICT;
-        return d;
+        ray_t* keys = ray_list_new(0);
+        if (RAY_IS_ERR(keys)) return keys;
+        ray_t* vals = ray_list_new(0);
+        if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
+        return ray_dict_new(keys, vals);
     }
 
     /* Collect unique values; the scalar and RAY_GUID paths grow these
@@ -1939,22 +1933,22 @@ ray_t* ray_group_fn(ray_t* x) {
             }
             idx_vecs[gi] = ray_vec_append(idx_vecs[gi], &i);
         }
-        /* Build dict */
-        ray_t* dict = ray_list_new((int32_t)(ngroups * 2));
-        if (RAY_IS_ERR(dict)) { ray_free(kblock); goto gfail; }
-        dict->attrs |= RAY_ATTR_DICT;
+        /* Build dict: keys as RAY_LIST (heterogeneous atoms), vals as
+         * RAY_LIST of I64 idx vectors. */
+        ray_t* keys_lst = ray_list_new(ngroups);
+        if (RAY_IS_ERR(keys_lst)) { ray_free(kblock); goto gfail; }
+        ray_t* vals_lst = ray_list_new(ngroups);
+        if (RAY_IS_ERR(vals_lst)) { ray_release(keys_lst); ray_free(kblock); goto gfail; }
         for (int64_t g = 0; g < ngroups; g++) {
-            ray_retain(gkeys[g]);
-            dict = ray_list_append(dict, gkeys[g]);
-            ray_release(gkeys[g]);
-            if (RAY_IS_ERR(dict)) { ray_free(kblock); goto gfail; }
-            dict = ray_list_append(dict, idx_vecs[g]);
+            keys_lst = ray_list_append(keys_lst, gkeys[g]);
+            if (RAY_IS_ERR(keys_lst)) { ray_release(vals_lst); ray_free(kblock); goto gfail; }
+            vals_lst = ray_list_append(vals_lst, idx_vecs[g]);
             ray_release(idx_vecs[g]);
             idx_vecs[g] = NULL;
-            if (RAY_IS_ERR(dict)) { ray_free(kblock); goto gfail; }
+            if (RAY_IS_ERR(vals_lst)) { ray_release(keys_lst); ray_free(kblock); goto gfail; }
         }
         ray_free(val_block); ray_free(ivblock); ray_free(kblock);
-        return dict;
+        return ray_dict_new(keys_lst, vals_lst);
     }
 
     /* RAY_GUID: 16-byte fixed-width grouping via open-address hash set
@@ -2026,22 +2020,22 @@ ray_t* ray_group_fn(ray_t* x) {
             idx_vecs[gi] = ray_vec_append(idx_vecs[gi], &i);
         }
         group_ht_free(&ht);
-        ray_t* dict = ray_list_new((int32_t)(ngroups * 2));
-        if (RAY_IS_ERR(dict)) goto gfail;
-        dict->attrs |= RAY_ATTR_DICT;
+        /* Keys: dense GUID vector built from collected gvals; vals: LIST of idx vecs. */
+        ray_t* keys_vec = ray_vec_new(RAY_GUID, ngroups);
+        if (RAY_IS_ERR(keys_vec)) goto gfail;
+        for (int64_t g = 0; g < ngroups; g++)
+            keys_vec = ray_vec_append(keys_vec, base + gvals[g] * 16);
+        if (RAY_IS_ERR(keys_vec)) goto gfail;
+        ray_t* vals_lst = ray_list_new(ngroups);
+        if (RAY_IS_ERR(vals_lst)) { ray_release(keys_vec); goto gfail; }
         for (int64_t g = 0; g < ngroups; g++) {
-            ray_t* k = ray_guid(base + gvals[g] * 16);
-            if (RAY_IS_ERR(k)) { ray_release(dict); goto gfail; }
-            dict = ray_list_append(dict, k);
-            ray_release(k);
-            if (RAY_IS_ERR(dict)) goto gfail;
-            dict = ray_list_append(dict, idx_vecs[g]);
+            vals_lst = ray_list_append(vals_lst, idx_vecs[g]);
             ray_release(idx_vecs[g]);
             idx_vecs[g] = NULL;
-            if (RAY_IS_ERR(dict)) goto gfail;
+            if (RAY_IS_ERR(vals_lst)) { ray_release(keys_vec); goto gfail; }
         }
         ray_free(val_block); ray_free(ivblock);
-        return dict;
+        return ray_dict_new(keys_vec, vals_lst);
     }
 
     /* RAY_STR: string-based grouping using ray_str_vec_get */
@@ -2079,9 +2073,9 @@ ray_t* ray_group_fn(ray_t* x) {
             idx_vecs[gi] = ray_vec_append(idx_vecs[gi], &i);
         }
 
-        /* Build dict */
-        ray_t* dict = ray_list_new((int32_t)(ngroups * 2));
-        if (RAY_IS_ERR(dict)) {
+        /* Build dict: keys as RAY_STR vec from str_keys, vals as LIST of idx vecs. */
+        ray_t* keys_vec = ray_vec_new(RAY_STR, ngroups);
+        if (RAY_IS_ERR(keys_vec)) {
             for (int64_t g = 0; g < ngroups; g++) {
                 ray_release(str_keys[g]);
                 ray_release(idx_vecs[g]);
@@ -2089,18 +2083,22 @@ ray_t* ray_group_fn(ray_t* x) {
             ray_free(val_block); ray_free(ivblock); ray_free(skblock);
             return ray_error("domain", NULL);
         }
-        dict->attrs |= RAY_ATTR_DICT;
         for (int64_t g = 0; g < ngroups; g++) {
-            dict = ray_list_append(dict, str_keys[g]);
+            keys_vec = ray_str_vec_append(keys_vec, ray_str_ptr(str_keys[g]), ray_str_len(str_keys[g]));
             ray_release(str_keys[g]);
-            if (RAY_IS_ERR(dict)) { ray_free(skblock); goto gfail; }
-            dict = ray_list_append(dict, idx_vecs[g]);
+        }
+        ray_t* vals_lst = ray_list_new(ngroups);
+        if (RAY_IS_ERR(vals_lst)) {
+            ray_release(keys_vec); ray_free(skblock); goto gfail;
+        }
+        for (int64_t g = 0; g < ngroups; g++) {
+            vals_lst = ray_list_append(vals_lst, idx_vecs[g]);
             ray_release(idx_vecs[g]);
             idx_vecs[g] = NULL;
-            if (RAY_IS_ERR(dict)) { ray_free(skblock); goto gfail; }
+            if (RAY_IS_ERR(vals_lst)) { ray_release(keys_vec); ray_free(skblock); goto gfail; }
         }
         ray_free(val_block); ray_free(ivblock); ray_free(skblock);
-        return dict;
+        return ray_dict_new(keys_vec, vals_lst);
     }
 
     /* Scalar fast path: every primitive-typed vector packs its group
@@ -2114,15 +2112,77 @@ ray_t* ray_group_fn(ray_t* x) {
         return ray_error("oom", NULL);
     }
     ght_i64_ctx_t sctx = { .gvals = gvals };
+    /* Null routing: null inputs share the same storage value as a legitimate
+     * zero/sentinel (e.g. NULL_I64's atom stores i64=0, NULL_I32 stores
+     * i32=0).  Without a separate null bucket the hash table would conflate
+     * `0Nl` with a real `0`, silently merging two semantically distinct
+     * groups.  Track a single `null_gi` and route every null row there;
+     * non-null rows continue to use the value-keyed hash table. */
+    int64_t null_gi = -1;
     for (int64_t i = 0; i < n; i++) {
+        if (ray_vec_is_null(x, i)) {
+            if (null_gi < 0) {
+                if (ngroups >= max_groups) {
+                    if (!group_grow(&val_block, &ivblock, &gvals, &idx_vecs,
+                                    ngroups, &max_groups)) {
+                        for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                        group_ht_free(&ht);
+                        ray_free(val_block); ray_free(ivblock);
+                        return ray_error("oom", NULL);
+                    }
+                    sctx.gvals = gvals;
+                }
+                null_gi = ngroups++;
+                gvals[null_gi] = 0;          /* placeholder; key value set later */
+                idx_vecs[null_gi] = ray_vec_new(RAY_I64, 0);
+            }
+            idx_vecs[null_gi] = ray_vec_append(idx_vecs[null_gi], &i);
+            continue;
+        }
         int64_t v;
         if (x->type == RAY_SYM || x->type == RAY_I64 || x->type == RAY_TIMESTAMP)
             v = ((int64_t*)ray_data(x))[i];
         else if (x->type == RAY_I32 || x->type == RAY_DATE || x->type == RAY_TIME)
             v = ((int32_t*)ray_data(x))[i];
-        else if (x->type == RAY_BOOL)
-            v = ((bool*)ray_data(x))[i] ? 1 : 0;
-        else
+        else if (x->type == RAY_I16)
+            v = ((int16_t*)ray_data(x))[i];
+        else if (x->type == RAY_BOOL || x->type == RAY_U8)
+            v = ((uint8_t*)ray_data(x))[i];
+        else if (x->type == RAY_F64 || x->type == RAY_F32) {
+            /* Hash by IEEE-754 bit pattern, not row index — the previous
+             * `v = i` fallback put every float row in its own group and
+             * the keys_vec build path then reinterpreted those row
+             * indices as floats.  Two adjustments keep the bit-pattern
+             * approach consistent with atom_eq's IEEE semantics
+             * (`a->f64 == b->f64`):
+             *   - +0.0 and -0.0 hash equal: canonicalise -0.0 to 0.0.
+             *   - Each NaN is its own group (NaN != NaN under IEEE).
+             *     Route NaN rows through the dedicated nan-group path
+             *     below so the hash table never matches them. */
+            double f = (x->type == RAY_F64)
+                ? ((double*)ray_data(x))[i]
+                : (double)((float*)ray_data(x))[i];
+            if (f != f) {
+                /* NaN — own bucket per row, just like the null routing. */
+                if (ngroups >= max_groups) {
+                    if (!group_grow(&val_block, &ivblock, &gvals, &idx_vecs,
+                                    ngroups, &max_groups)) {
+                        for (int64_t g = 0; g < ngroups; g++) ray_release(idx_vecs[g]);
+                        group_ht_free(&ht);
+                        ray_free(val_block); ray_free(ivblock);
+                        return ray_error("oom", NULL);
+                    }
+                    sctx.gvals = gvals;
+                }
+                int64_t gi_nan = ngroups++;
+                memcpy(&gvals[gi_nan], &f, sizeof(f));
+                idx_vecs[gi_nan] = ray_vec_new(RAY_I64, 0);
+                idx_vecs[gi_nan] = ray_vec_append(idx_vecs[gi_nan], &i);
+                continue;
+            }
+            if (f == 0.0) f = 0.0;   /* canonicalise -0.0 → +0.0 */
+            memcpy(&v, &f, sizeof(v));
+        } else
             v = i;
 
         uint64_t h = hash_i64(v);
@@ -2165,28 +2225,74 @@ ray_t* ray_group_fn(ray_t* x) {
     }
     group_ht_free(&ht);
 
-    /* Build dict */
-    ray_t* dict = ray_list_new((int32_t)(ngroups * 2));
-    if (RAY_IS_ERR(dict)) goto gfail;
-    dict->attrs |= RAY_ATTR_DICT;
+    /* Build dict: keys vec mirrors x's element type; vals LIST of idx vecs. */
+    int8_t key_type = x->type;
+    ray_t* keys_vec;
+    if (key_type == RAY_SYM) keys_vec = ray_sym_vec_new(RAY_SYM_W64, ngroups);
+    else                     keys_vec = ray_vec_new(key_type, ngroups);
+    if (RAY_IS_ERR(keys_vec)) goto gfail;
 
     for (int64_t g = 0; g < ngroups; g++) {
-        ray_t* k;
-        if (x->type == RAY_SYM) k = ray_sym(gvals[g]);
-        else if (x->type == RAY_BOOL) k = ray_bool(gvals[g] != 0);
-        else k = ray_i64(gvals[g]);
-        if (RAY_IS_ERR(k)) { ray_release(dict); goto gfail; }
-        dict = ray_list_append(dict, k);
-        ray_release(k);
-        if (RAY_IS_ERR(dict)) goto gfail;
-        dict = ray_list_append(dict, idx_vecs[g]);
+        switch (key_type) {
+            case RAY_SYM:
+            case RAY_I64:
+            case RAY_TIMESTAMP: {
+                int64_t v = gvals[g];
+                keys_vec = ray_vec_append(keys_vec, &v); break;
+            }
+            case RAY_I32:
+            case RAY_DATE:
+            case RAY_TIME: {
+                int32_t v = (int32_t)gvals[g];
+                keys_vec = ray_vec_append(keys_vec, &v); break;
+            }
+            case RAY_I16: { int16_t v = (int16_t)gvals[g]; keys_vec = ray_vec_append(keys_vec, &v); break; }
+            case RAY_BOOL:
+            case RAY_U8:  { uint8_t v = (uint8_t)gvals[g]; keys_vec = ray_vec_append(keys_vec, &v); break; }
+            case RAY_F64: {
+                /* gvals[g] holds the IEEE-754 bit pattern packed by the
+                 * row-loop above; reinterpret rather than int->double
+                 * cast (which would produce 0.0/1.0/2.0… instead of the
+                 * actual float values). */
+                double v;
+                memcpy(&v, &gvals[g], sizeof(v));
+                keys_vec = ray_vec_append(keys_vec, &v);
+                break;
+            }
+            case RAY_F32: {
+                double f;
+                memcpy(&f, &gvals[g], sizeof(f));
+                float  v = (float)f;
+                keys_vec = ray_vec_append(keys_vec, &v);
+                break;
+            }
+            default:      keys_vec = ray_vec_append(keys_vec, &gvals[g]); break;
+        }
+        if (RAY_IS_ERR(keys_vec)) goto gfail;
+        /* If the source column had a null at any row in this group, mark
+         * the group's key as null so dict rendering / lookup can recover
+         * the null semantics (the integer-value key alone collides with a
+         * legitimate zero/sentinel value).  All rows in a value-equality
+         * group share the same null-or-not status, so a single probe of
+         * the first row index suffices. */
+        if (idx_vecs[g] && idx_vecs[g]->len > 0) {
+            int64_t first_row = ((int64_t*)ray_data(idx_vecs[g]))[0];
+            if (ray_vec_is_null(x, first_row))
+                ray_vec_set_null(keys_vec, g, true);
+        }
+    }
+
+    ray_t* vals_lst = ray_list_new(ngroups);
+    if (RAY_IS_ERR(vals_lst)) { ray_release(keys_vec); goto gfail; }
+    for (int64_t g = 0; g < ngroups; g++) {
+        vals_lst = ray_list_append(vals_lst, idx_vecs[g]);
         ray_release(idx_vecs[g]);
         idx_vecs[g] = NULL;
-        if (RAY_IS_ERR(dict)) goto gfail;
+        if (RAY_IS_ERR(vals_lst)) { ray_release(keys_vec); goto gfail; }
     }
     ray_free(val_block);
     ray_free(ivblock);
-    return dict;
+    return ray_dict_new(keys_vec, vals_lst);
 
 gfail:
     for (int64_t g = 0; g < ngroups; g++)
@@ -2254,7 +2360,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         return result;
     }
     /* Boxed list concat */
-    if (a->type == RAY_LIST && b->type == RAY_LIST && !(a->attrs & RAY_ATTR_DICT) && !(b->attrs & RAY_ATTR_DICT)) {
+    if (a->type == RAY_LIST && b->type == RAY_LIST) {
         int64_t na = a->len, nb = b->len;
         ray_t* result = ray_alloc((na + nb) * sizeof(ray_t*));
         if (!result) return ray_error("oom", NULL);
@@ -2386,53 +2492,52 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         }
         return result;
     }
-    /* Dict concat: merge */
-    if (a->type == RAY_LIST && (a->attrs & RAY_ATTR_DICT) &&
-        b->type == RAY_LIST && (b->attrs & RAY_ATTR_DICT)) {
-        ray_t* result = ray_list_new(0);
-        if (RAY_IS_ERR(result)) return result;
-        result->attrs |= RAY_ATTR_DICT;
-        /* Copy all from a */
-        ray_t** aitems = (ray_t**)ray_data(a);
-        for (int64_t i = 0; i < a->len; i++) {
-            ray_retain(aitems[i]);
-            result = ray_list_append(result, aitems[i]);
-            ray_release(aitems[i]);
-            if (RAY_IS_ERR(result)) return result;
-        }
-        /* Merge from b: overwrite existing keys, add new ones */
-        ray_t** bitems = (ray_t**)ray_data(b);
-        for (int64_t i = 0; i < b->len; i += 2) {
-            /* Find key in result */
-            ray_t** ritems = (ray_t**)ray_data(result);
-            bool found = false;
-            for (int64_t j = 0; j < result->len; j += 2) {
-                if (ritems[j]->i64 == bitems[i]->i64) {
-                    /* Replace value */
-                    ray_release(ritems[j + 1]);
-                    ray_retain(bitems[i + 1]);
-                    ritems[j + 1] = bitems[i + 1];
-                    found = true;
-                    break;
-                }
+    /* Dict concat: merge — keys/vals from b overwrite a's. */
+    if (a->type == RAY_DICT && b->type == RAY_DICT) {
+        ray_retain(a);
+        ray_t* out = a;
+        ray_t* bk = ray_dict_keys(b);
+        ray_t* bv = ray_dict_vals(b);
+        if (!bk || !bv) return out;
+        int64_t bn = bk->len;
+        for (int64_t i = 0; i < bn; i++) {
+            /* Synthesize a key atom view from bk and the value pointer from bv. */
+            ray_t k_storage; memset(&k_storage, 0, sizeof(k_storage));
+            ray_t* k = NULL;
+            if (bk->type == RAY_LIST) {
+                k = ((ray_t**)ray_data(bk))[i];
+            } else if (bk->type == RAY_SYM) {
+                k_storage.type = -RAY_SYM;
+                k_storage.i64  = ray_read_sym(ray_data(bk), i, RAY_SYM, bk->attrs);
+                k = &k_storage;
+            } else if (bk->type == RAY_I64 || bk->type == RAY_TIMESTAMP) {
+                k_storage.type = -bk->type;
+                k_storage.i64  = ((int64_t*)ray_data(bk))[i];
+                k = &k_storage;
+            } else {
+                /* Heterogeneous element types fall back to boxing via collection_elem. */
+                int alloc = 0;
+                k = collection_elem(bk, i, &alloc);
+                ray_t* v;
+                if (bv->type == RAY_LIST) v = ((ray_t**)ray_data(bv))[i];
+                else { int va = 0; v = collection_elem(bv, i, &va); (void)va; }
+                out = ray_dict_upsert(out, k, v);
+                if (alloc) ray_release(k);
+                if (!out || RAY_IS_ERR(out)) return out;
+                continue;
             }
-            if (!found) {
-                ray_retain(bitems[i]);
-                result = ray_list_append(result, bitems[i]);
-                ray_release(bitems[i]);
-                if (RAY_IS_ERR(result)) return result;
-                ray_retain(bitems[i + 1]);
-                result = ray_list_append(result, bitems[i + 1]);
-                ray_release(bitems[i + 1]);
-                if (RAY_IS_ERR(result)) return result;
-            }
+            ray_t* v;
+            if (bv->type == RAY_LIST) v = ((ray_t**)ray_data(bv))[i];
+            else { int va = 0; v = collection_elem(bv, i, &va); (void)va; }
+            out = ray_dict_upsert(out, k, v);
+            if (!out || RAY_IS_ERR(out)) return out;
         }
-        return result;
+        return out;
     }
     /* Table concat: append rows */
     if (a->type == RAY_TABLE && b->type == RAY_TABLE) {
-        int64_t ncols_a = a->len;
-        int64_t ncols_b = b->len;
+        int64_t ncols_a = ray_table_ncols(a);
+        int64_t ncols_b = ray_table_ncols(b);
         /* Match columns of a in b by name */
         ray_t* result = ray_table_new((int32_t)ncols_a);
         if (RAY_IS_ERR(result)) return result;
@@ -2468,7 +2573,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         return result;
     }
     /* Atom + boxed list -> prepend atom to list */
-    if (ray_is_atom(a) && b->type == RAY_LIST && !(b->attrs & RAY_ATTR_DICT)) {
+    if (ray_is_atom(a) && b->type == RAY_LIST && b->type != RAY_DICT) {
         int64_t nb = b->len;
         ray_t* result = ray_alloc((1 + nb) * sizeof(ray_t*));
         if (!result) return ray_error("oom", NULL);
@@ -2482,7 +2587,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         return result;
     }
     /* Boxed list + atom -> append atom to list */
-    if (a->type == RAY_LIST && !(a->attrs & RAY_ATTR_DICT) && ray_is_atom(b)) {
+    if (a->type == RAY_LIST && a->type != RAY_DICT && ray_is_atom(b)) {
         int64_t na = a->len;
         ray_t* result = ray_alloc((na + 1) * sizeof(ray_t*));
         if (!result) return ray_error("oom", NULL);

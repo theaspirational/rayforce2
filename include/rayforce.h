@@ -231,7 +231,7 @@ typedef struct {
 typedef void (*ray_progress_cb)(const ray_progress_t* snapshot, void* user);
 
 /* Register a progress callback. Set cb=NULL to disable. min_ms is the
- * duckdb-style show-after threshold: queries finishing under it fire
+ * show-after threshold: queries finishing under it fire
  * zero callbacks. tick_interval_ms throttles updates once active. */
 void ray_progress_set_callback(ray_progress_cb cb, void* user,
                                 uint64_t min_ms, uint64_t tick_interval_ms);
@@ -265,6 +265,7 @@ ray_t* ray_u8(uint8_t val);
 ray_t* ray_i16(int16_t val);
 ray_t* ray_i32(int32_t val);
 ray_t* ray_i64(int64_t val);
+ray_t* ray_f32(float val);
 ray_t* ray_f64(double val);
 ray_t* ray_str(const char* s, size_t len);
 ray_t* ray_sym(int64_t id);
@@ -352,6 +353,33 @@ void        ray_table_set_col_name(ray_t* tbl, int64_t idx, int64_t name_id);
 int64_t     ray_table_ncols(ray_t* tbl);
 int64_t     ray_table_nrows(ray_t* tbl);
 ray_t*       ray_table_schema(ray_t* tbl);
+
+/* ===== Dict API =====
+ *
+ * A dict is a 2-pointer block (type=RAY_DICT, len=2) holding [keys, vals].
+ * Pair count is keys->len.
+ *
+ * keys:  Either a typed vector (RAY_SYM / RAY_I64 / RAY_F64 / RAY_STR /
+ *        RAY_GUID / RAY_DATE / RAY_TIME / RAY_TIMESTAMP / RAY_I32 /
+ *        RAY_I16 / RAY_BOOL / RAY_U8 / RAY_F32) when every key shares
+ *        one atom type, or a RAY_LIST of boxed atoms when keys are
+ *        heterogeneous.  Typed-vec lookup honors the keys' null bitmap
+ *        so a null key never collides with a legitimate zero/sentinel.
+ * vals:  Either a typed vector when every value shares one atom type,
+ *        or a RAY_LIST otherwise (the form parsed from {…} literals,
+ *        which keep value expressions unevaluated until probed).
+ *
+ * Layout matches RAY_TABLE; only the type tag and the contract on
+ * `vals` (a RAY_LIST of column vectors for tables) differ.
+ */
+
+ray_t*  ray_dict_new(ray_t* keys, ray_t* vals);          /* consumes both */
+ray_t*  ray_dict_keys(ray_t* d);                         /* borrowed */
+ray_t*  ray_dict_vals(ray_t* d);                         /* borrowed */
+int64_t ray_dict_len(ray_t* d);                          /* keys->len */
+ray_t*  ray_dict_get(ray_t* d, ray_t* key_atom);         /* owned, NULL if missing */
+ray_t*  ray_dict_upsert(ray_t* d, ray_t* key_atom, ray_t* val); /* COW; consumes d */
+ray_t*  ray_dict_remove(ray_t* d, ray_t* key_atom);             /* COW; consumes d */
 
 #ifdef __cplusplus
 }

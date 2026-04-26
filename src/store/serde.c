@@ -201,21 +201,15 @@ int64_t ray_serde_size(ray_t* obj) {
             size += ray_serde_size(elems[i]);
         return size;
     }
-    case RAY_TABLE:
-    case RAY_DICT: {
-        /* Serialized as: type + attrs + keys(recursive) + values(recursive) */
+    case RAY_TABLE: {
+        /* type + attrs + schema(recursive) + cols(recursive RAY_LIST) */
         ray_t** slots = (ray_t**)ray_data(obj);
-        /* For TABLE: slots[0]=schema, slots[1..n]=columns → wrap as keys+values */
-        /* Serialize as dict: keys = schema (I64 vec of sym IDs), values = list of columns */
-        int64_t size = 1 + 1;
-        int64_t ncols = obj->len;
-        ray_t* schema = slots[0]; /* schema = I64 vector of name IDs */
-        size += ray_serde_size(schema);
-        /* values: list of ncols column vectors */
-        size += 1 + 1 + 8; /* LIST header */
-        for (int64_t i = 0; i < ncols; i++)
-            size += ray_serde_size(slots[1 + i]);
-        return size;
+        return 1 + 1 + ray_serde_size(slots[0]) + ray_serde_size(slots[1]);
+    }
+    case RAY_DICT: {
+        /* type + attrs + keys(recursive) + vals(recursive) */
+        ray_t** slots = (ray_t**)ray_data(obj);
+        return 1 + 1 + ray_serde_size(slots[0]) + ray_serde_size(slots[1]);
     }
     case RAY_LAMBDA: {
         ray_t** slots = (ray_t**)ray_data(obj);
@@ -425,21 +419,12 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
     }
 
     case RAY_TABLE: {
+        /* Layout: type + attrs + schema(recursive) + cols(recursive RAY_LIST) */
         buf[0] = obj->attrs;
         buf++;
         ray_t** slots = (ray_t**)ray_data(obj);
-        int64_t ncols = obj->len;
-        /* Serialize schema (I64 vector of sym IDs) */
-        c = ray_ser_raw(buf, slots[0]);
-        /* Serialize columns as a LIST */
-        uint8_t* lbuf = buf + c;
-        lbuf[0] = RAY_LIST;
-        lbuf[1] = 0; /* attrs */
-        memcpy(lbuf + 2, &ncols, 8);
-        int64_t lc = 0;
-        for (int64_t i = 0; i < ncols; i++)
-            lc += ray_ser_raw(lbuf + 10 + lc, slots[1 + i]);
-        c += 1 + 1 + 8 + lc;
+        c = ray_ser_raw(buf, slots[0]);          /* schema (RAY_I64 vector) */
+        c += ray_ser_raw(buf + c, slots[1]);     /* cols (RAY_LIST) */
         return 1 + 1 + c;
     }
 

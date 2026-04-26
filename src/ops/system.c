@@ -210,41 +210,35 @@ ray_t* ray_meta_fn(ray_t* x) {
     int64_t type_sym = ray_sym_intern("type", 4);
     int64_t type_id  = ray_sym_intern(tname, strlen(tname));
 
-    if (ray_is_atom(x)) {
-        /* Atom: return {type: <typename>} */
-        ray_t* dict = ray_list_new(2);
-        if (RAY_IS_ERR(dict)) return dict;
-        dict->attrs |= RAY_ATTR_DICT;
-        ray_t* k = ray_sym(type_sym);
-        dict = ray_list_append(dict, k); ray_release(k);
-        ray_t* tv = ray_sym(type_id);
-        dict = ray_list_append(dict, tv); ray_release(tv);
-        return dict;
+    /* Build keys SYM vec + vals LIST. */
+    int64_t cap = ray_is_atom(x) ? 1 : 2;
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, cap);
+    if (RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = ray_list_new(cap);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
+
+    keys = ray_vec_append(keys, &type_sym);
+    if (RAY_IS_ERR(keys)) { ray_release(vals); return keys; }
+    ray_t* tv = ray_sym(type_id);
+    vals = ray_list_append(vals, tv);
+    ray_release(tv);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
+
+    if (!ray_is_atom(x)) {
+        int64_t len_sym = ray_sym_intern("len", 3);
+        keys = ray_vec_append(keys, &len_sym);
+        if (RAY_IS_ERR(keys)) { ray_release(vals); return keys; }
+        int64_t row_count;
+        if (x->type == RAY_DICT)       row_count = ray_dict_len(x);
+        else if (x->type == RAY_TABLE) row_count = ray_table_ncols(x);
+        else                            row_count = x->len;
+        ray_t* lv = make_i64(row_count);
+        vals = ray_list_append(vals, lv);
+        ray_release(lv);
+        if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
     }
 
-    /* Vector/table/list: return {type: <typename>, len: <n>} */
-    ray_t* dict = ray_list_new(4);
-    if (RAY_IS_ERR(dict)) return dict;
-    dict->attrs |= RAY_ATTR_DICT;
-
-    ray_t* k1 = ray_sym(type_sym);
-    dict = ray_list_append(dict, k1); ray_release(k1);
-    if (x->type == RAY_LIST && (x->attrs & RAY_ATTR_DICT)) {
-        int64_t did = ray_sym_intern("DICT", 4);
-        ray_t* tv = ray_sym(did);
-        dict = ray_list_append(dict, tv); ray_release(tv);
-    } else {
-        ray_t* tv = ray_sym(type_id);
-        dict = ray_list_append(dict, tv); ray_release(tv);
-    }
-
-    int64_t len_sym = ray_sym_intern("len", 3);
-    ray_t* k2 = ray_sym(len_sym);
-    dict = ray_list_append(dict, k2); ray_release(k2);
-    ray_t* lv = make_i64(x->len);
-    dict = ray_list_append(dict, lv); ray_release(lv);
-
-    return dict;
+    return ray_dict_new(keys, vals);
 }
 
 /* (.sys.gc) -- no-op garbage collection trigger, return 0.  Variadic
@@ -342,28 +336,10 @@ ray_t* ray_get_fn(ray_t* dict, ray_t* key) {
 
 /* (remove dict key) -- remove key from dict, return new dict */
 ray_t* ray_remove_fn(ray_t* dict, ray_t* key) {
-    if (dict->type != RAY_LIST || !(dict->attrs & RAY_ATTR_DICT))
+    if (!dict || dict->type != RAY_DICT)
         return ray_error("type", "remove expects a dict");
-    if (key->type != -RAY_SYM)
-        return ray_error("type", "remove key must be a symbol");
-
-    ray_t** items = (ray_t**)ray_data(dict);
-    int64_t n = dict->len;
-    ray_t* result = ray_list_new(0);
-    if (RAY_IS_ERR(result)) return result;
-    result->attrs |= RAY_ATTR_DICT;
-
-    for (int64_t i = 0; i < n; i += 2) {
-        if (items[i]->type == -RAY_SYM && items[i]->i64 == key->i64)
-            continue; /* skip this key-value pair */
-        result = ray_list_append(result, items[i]);
-        if (RAY_IS_ERR(result)) return result;
-        if (i + 1 < n) {
-            result = ray_list_append(result, items[i + 1]);
-            if (RAY_IS_ERR(result)) return result;
-        }
-    }
-    return result;
+    ray_retain(dict);
+    return ray_dict_remove(dict, key);
 }
 
 /* (timer) -- return high-res timestamp in nanoseconds for benchmarking */
@@ -378,54 +354,50 @@ ray_t* ray_timer_fn(ray_t* x) {
 ray_t* ray_env_fn(ray_t* x) {
     (void)x;
     int64_t sym_ids[1024];
-    ray_t* vals[1024];
-    int32_t count = ray_env_list(sym_ids, vals, 1024);
+    ray_t* vals_buf[1024];
+    int32_t count = ray_env_list(sym_ids, vals_buf, 1024);
 
-    ray_t* dict = ray_list_new(0);
-    if (RAY_IS_ERR(dict)) return dict;
-    dict->attrs |= RAY_ATTR_DICT;
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, count);
+    if (RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = ray_list_new(count);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
 
     for (int32_t i = 0; i < count; i++) {
-        ray_t* k = ray_sym(sym_ids[i]);
-        if (RAY_IS_ERR(k)) { ray_release(dict); return k; }
-        dict = ray_list_append(dict, k);
-        ray_release(k);
-        if (RAY_IS_ERR(dict)) return dict;
-        ray_retain(vals[i]);
-        dict = ray_list_append(dict, vals[i]);
-        if (RAY_IS_ERR(dict)) { ray_release(vals[i]); return dict; }
+        keys = ray_vec_append(keys, &sym_ids[i]);
+        if (RAY_IS_ERR(keys)) { ray_release(vals); return keys; }
+        vals = ray_list_append(vals, vals_buf[i]);
+        if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
     }
-    return dict;
+    return ray_dict_new(keys, vals);
 }
 
 /* (.sys.build) -- return dict with internal build information */
 ray_t* ray_internals_fn(ray_t** args, int64_t n) {
     (void)args; (void)n;
-    ray_t* dict = ray_list_new(4);
-    if (RAY_IS_ERR(dict)) return dict;
-    dict->attrs |= RAY_ATTR_DICT;
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 2);
+    if (RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = ray_list_new(2);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
 
     int64_t ver_sym = ray_sym_intern("version", 7);
-    ray_t* k1 = ray_sym(ver_sym);
-    dict = ray_list_append(dict, k1); ray_release(k1);
+    keys = ray_vec_append(keys, &ver_sym);
 #ifdef RAYFORCE_VERSION
     ray_t* v1 = ray_str(RAYFORCE_VERSION, strlen(RAYFORCE_VERSION));
 #else
     ray_t* v1 = ray_str("unknown", 7);
 #endif
-    dict = ray_list_append(dict, v1); ray_release(v1);
+    vals = ray_list_append(vals, v1); ray_release(v1);
 
     int64_t date_sym = ray_sym_intern("build-date", 10);
-    ray_t* k2 = ray_sym(date_sym);
-    dict = ray_list_append(dict, k2); ray_release(k2);
+    keys = ray_vec_append(keys, &date_sym);
 #ifdef RAYFORCE_BUILD_DATE
     ray_t* v2 = ray_str(RAYFORCE_BUILD_DATE, strlen(RAYFORCE_BUILD_DATE));
 #else
     ray_t* v2 = ray_str("unknown", 7);
 #endif
-    dict = ray_list_append(dict, v2); ray_release(v2);
+    vals = ray_list_append(vals, v2); ray_release(v2);
 
-    return dict;
+    return ray_dict_new(keys, vals);
 }
 
 /* (.sys.mem) -- return dict with memory allocator statistics */
@@ -434,74 +406,60 @@ ray_t* ray_memstat_fn(ray_t** args, int64_t n) {
     ray_mem_stats_t st;
     ray_mem_stats(&st);
 
-    ray_t* dict = ray_list_new(10);
-    if (RAY_IS_ERR(dict)) return dict;
-    dict->attrs |= RAY_ATTR_DICT;
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 5);
+    if (RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = ray_list_new(5);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
 
-    /* alloc-count */
-    int64_t s1 = ray_sym_intern("alloc-count", 11);
-    ray_t* k1 = ray_sym(s1); dict = ray_list_append(dict, k1); ray_release(k1);
-    ray_t* v1 = make_i64((int64_t)st.alloc_count);
-    dict = ray_list_append(dict, v1); ray_release(v1);
+    struct { const char* name; size_t nlen; int64_t v; } rows[] = {
+        { "alloc-count",     11, (int64_t)st.alloc_count     },
+        { "bytes-allocated", 15, (int64_t)st.bytes_allocated },
+        { "peak-bytes",      10, (int64_t)st.peak_bytes      },
+        { "slab-hits",        9, (int64_t)st.slab_hits       },
+        { "sys-current",     11, (int64_t)st.sys_current     },
+    };
+    for (size_t i = 0; i < sizeof(rows)/sizeof(rows[0]); i++) {
+        int64_t s = ray_sym_intern(rows[i].name, rows[i].nlen);
+        keys = ray_vec_append(keys, &s);
+        ray_t* v = make_i64(rows[i].v);
+        vals = ray_list_append(vals, v); ray_release(v);
+    }
 
-    /* bytes-allocated */
-    int64_t s2 = ray_sym_intern("bytes-allocated", 15);
-    ray_t* k2 = ray_sym(s2); dict = ray_list_append(dict, k2); ray_release(k2);
-    ray_t* v2 = make_i64((int64_t)st.bytes_allocated);
-    dict = ray_list_append(dict, v2); ray_release(v2);
-
-    /* peak-bytes */
-    int64_t s3 = ray_sym_intern("peak-bytes", 10);
-    ray_t* k3 = ray_sym(s3); dict = ray_list_append(dict, k3); ray_release(k3);
-    ray_t* v3 = make_i64((int64_t)st.peak_bytes);
-    dict = ray_list_append(dict, v3); ray_release(v3);
-
-    /* slab-hits */
-    int64_t s4 = ray_sym_intern("slab-hits", 9);
-    ray_t* k4 = ray_sym(s4); dict = ray_list_append(dict, k4); ray_release(k4);
-    ray_t* v4 = make_i64((int64_t)st.slab_hits);
-    dict = ray_list_append(dict, v4); ray_release(v4);
-
-    /* sys-current */
-    int64_t s5 = ray_sym_intern("sys-current", 11);
-    ray_t* k5 = ray_sym(s5); dict = ray_list_append(dict, k5); ray_release(k5);
-    ray_t* v5 = make_i64((int64_t)st.sys_current);
-    dict = ray_list_append(dict, v5); ray_release(v5);
-
-    return dict;
+    return ray_dict_new(keys, vals);
 }
 
 ray_t* ray_sysinfo_fn(ray_t** args, int64_t n) {
     (void)args; (void)n;
-    ray_t* dict = ray_list_new(6);
-    if (RAY_IS_ERR(dict)) return dict;
-    dict->attrs |= RAY_ATTR_DICT;
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 3);
+    if (RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = ray_list_new(3);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
 
 #if !defined(RAY_OS_WINDOWS)
     int64_t s1 = ray_sym_intern("cores", 5);
-    ray_t* k1 = ray_sym(s1); dict = ray_list_append(dict, k1); ray_release(k1);
+    keys = ray_vec_append(keys, &s1);
     ray_t* v1 = make_i64(sysconf(_SC_NPROCESSORS_ONLN));
-    dict = ray_list_append(dict, v1); ray_release(v1);
+    vals = ray_list_append(vals, v1); ray_release(v1);
 
     int64_t s2 = ray_sym_intern("page-size", 9);
-    ray_t* k2 = ray_sym(s2); dict = ray_list_append(dict, k2); ray_release(k2);
+    keys = ray_vec_append(keys, &s2);
     ray_t* v2 = make_i64(sysconf(_SC_PAGESIZE));
-    dict = ray_list_append(dict, v2); ray_release(v2);
+    vals = ray_list_append(vals, v2); ray_release(v2);
 
     long pages = sysconf(_SC_PHYS_PAGES);
     long psize = sysconf(_SC_PAGESIZE);
     int64_t s3 = ray_sym_intern("total-mem", 9);
-    ray_t* k3 = ray_sym(s3); dict = ray_list_append(dict, k3); ray_release(k3);
+    keys = ray_vec_append(keys, &s3);
     ray_t* v3 = make_i64((int64_t)pages * (int64_t)psize);
-    dict = ray_list_append(dict, v3); ray_release(v3);
+    vals = ray_list_append(vals, v3); ray_release(v3);
 #else
     int64_t s1 = ray_sym_intern("cores", 5);
-    ray_t* k1 = ray_sym(s1); dict = ray_list_append(dict, k1); ray_release(k1);
+    keys = ray_vec_append(keys, &s1);
     ray_t* v1 = make_i64(1);
-    dict = ray_list_append(dict, v1); ray_release(v1);
+    vals = ray_list_append(vals, v1); ray_release(v1);
 #endif
 
-    return dict;
+    return ray_dict_new(keys, vals);
 }
 
 /* ══════════════════════════════════════════

@@ -3207,10 +3207,11 @@ ray_t* ray_pull_fn(ray_t** args, int64_t n) {
     const int64_t* e_data = (const int64_t*)ray_data(e_col);
     const int64_t* v_data = (const int64_t*)ray_data(v_col);
 
-    /* Build dict: alternating key (sym atom) / value (i64 atom) */
-    ray_t* dict = ray_list_new(0);
-    if (RAY_IS_ERR(dict)) return dict;
-    dict->attrs |= RAY_ATTR_DICT;
+    /* Build dict: keys SYM vec of attribute IDs, vals LIST of i64 atoms. */
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 8);
+    if (RAY_IS_ERR(keys)) return keys;
+    ray_t* vals = ray_list_new(8);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
 
     for (int64_t r = 0; r < nrows; r++) {
         if (e_data[r] != entity_id) continue;
@@ -3225,20 +3226,17 @@ ray_t* ray_pull_fn(ray_t** args, int64_t n) {
             if (!found) continue;
         }
 
-        ray_t* key = ray_sym(a_val);
-        if (RAY_IS_ERR(key)) { ray_release(dict); return key; }
-        dict = ray_list_append(dict, key);
-        ray_release(key);
-        if (RAY_IS_ERR(dict)) return dict;
+        keys = ray_vec_append(keys, &a_val);
+        if (RAY_IS_ERR(keys)) { ray_release(vals); return keys; }
 
         ray_t* val = ray_i64(v_data[r]);
-        if (RAY_IS_ERR(val)) { ray_release(dict); return val; }
-        dict = ray_list_append(dict, val);
+        if (RAY_IS_ERR(val)) { ray_release(keys); ray_release(vals); return val; }
+        vals = ray_list_append(vals, val);
         ray_release(val);
-        if (RAY_IS_ERR(dict)) return dict;
+        if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
     }
 
-    return dict;
+    return ray_dict_new(keys, vals);
 }
 
 /* ══════════════════════════════════════════

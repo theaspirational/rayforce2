@@ -269,7 +269,26 @@ MSFT 380.0   50</code></pre>
       </table>
 
       <h2 id="dictionaries">Dictionaries</h2>
-      <p>Dictionaries are key-value structures built on top of lists. A dict is a <code>RAY_LIST</code> with the <code>RAY_ATTR_DICT</code> (0x02) attribute flag set. Keys and values alternate as list elements.</p>
+      <p>Dictionaries share the same physical layout as tables — a 2-pointer block (<code>type = RAY_DICT</code>, <code>len = 2</code>) holding a <em>keys</em> container and a <em>vals</em> container.  Pair count is <code>keys-&gt;len</code>; the helpers <code>ray_dict_keys</code> / <code>ray_dict_vals</code> / <code>ray_dict_len</code> / <code>ray_dict_get</code> / <code>ray_dict_upsert</code> / <code>ray_dict_remove</code> wrap the layout.</p>
+
+      <p>Supported <em>keys</em> shapes:</p>
+      <ul>
+        <li>A typed vector — any of <code>RAY_SYM</code>, <code>RAY_BOOL</code>, <code>RAY_U8</code>, <code>RAY_I16</code>, <code>RAY_I32</code>, <code>RAY_I64</code>, <code>RAY_F32</code>, <code>RAY_F64</code>, <code>RAY_DATE</code>, <code>RAY_TIME</code>, <code>RAY_TIMESTAMP</code>, <code>RAY_STR</code>, <code>RAY_GUID</code>.  Lookup is value-equality; the keys' null bitmap is honored so <code>0Nl</code> doesn't collide with a real <code>0</code>.</li>
+        <li>A <code>RAY_LIST</code> of boxed atoms — used for heterogeneous keys (the only shape that can hold both <code>'sym</code> and <code>"str"</code> keys in the same dict).  Lookup falls back to <code>atom_eq</code>.</li>
+      </ul>
+
+      <p>Supported <em>vals</em> shapes:</p>
+      <ul>
+        <li>A typed vector when every value shares one atom type (the form <code>group</code> emits — its index columns happen to all be <code>RAY_I64</code> vectors held inside a <code>RAY_LIST</code>; see below).</li>
+        <li>A <code>RAY_LIST</code> when values are heterogeneous, are themselves containers (vectors / dicts / tables / functions), or need to stay unevaluated.  Dict literals always use this shape because the parser leaves expression values unevaluated until probed.</li>
+      </ul>
+
+      <p>The <code>{…}</code> literal is the convenient surface but is narrower than the API.  The parser only emits two key shapes:</p>
+      <ul>
+        <li>Bareword keys → <code>RAY_SYM</code> vec.  Identifier characters (letters, digits, <code>_</code>, <code>-</code>) are <em>all</em> interned as symbols — so <code>{1: "a"}</code> looks like an integer-keyed dict but actually stores the symbol named <code>"1"</code>, and <code>(at d 1)</code> with an <code>i64</code> atom will <em>miss</em>.</li>
+        <li>Quoted-string keys → <code>RAY_STR</code> vec.  A mix of bareword and quoted keys in the same literal falls back to a <code>RAY_LIST</code> of boxed atoms.</li>
+      </ul>
+      <p>To build a dict whose keys are real <code>RAY_I64</code> / <code>RAY_GUID</code> / temporal values — i.e. ones a numeric or temporal lookup atom will actually match — use <code>(dict keys vals)</code> with an explicitly typed keys vector or call <code>ray_dict_new</code> from C.</p>
 
       <pre><code><span class="hl-comment">; Dictionary literal (curly braces)</span>
 <span class="hl-comment">ray&gt;</span> {<span class="hl-sym">name:</span> <span class="hl-str">"Alice"</span> <span class="hl-sym">age:</span> <span class="hl-num">30</span> <span class="hl-sym">active:</span> <span class="hl-bool">true</span>}

@@ -197,21 +197,20 @@ ray_t* ray_filter_fn(ray_t* vec, ray_t* mask) {
 
     /* Table filter: apply mask to each column */
     if (vec->type == RAY_TABLE && ray_is_vec(mask) && mask->type == RAY_BOOL) {
-        int64_t ncols = vec->len;
+        int64_t ncols = ray_table_ncols(vec);
         int64_t nrows = ray_table_nrows(vec);
         if (nrows != mask->len) return ray_error("length", NULL);
-        ray_t* schema = ray_table_schema(vec);
-        ray_t* result = ray_table_new((int32_t)ncols);
+        ray_t* result = ray_table_new(ncols);
         if (RAY_IS_ERR(result)) return result;
-        if (schema) { ray_retain(schema); *(ray_t**)ray_data(result) = schema; }
-        ray_t** src_cols = (ray_t**)((char*)ray_data(vec) + sizeof(ray_t*));
-        ray_t** dst_cols = (ray_t**)((char*)ray_data(result) + sizeof(ray_t*));
         for (int64_t c = 0; c < ncols; c++) {
-            ray_t* filtered = ray_filter_fn(src_cols[c], mask);
+            int64_t cn = ray_table_col_name(vec, c);
+            ray_t* src_col = ray_table_get_col_idx(vec, c);
+            ray_t* filtered = ray_filter_fn(src_col, mask);
             if (RAY_IS_ERR(filtered)) { ray_release(result); return filtered; }
-            dst_cols[c] = filtered;
+            result = ray_table_add_col(result, cn, filtered);
+            ray_release(filtered);
+            if (RAY_IS_ERR(result)) return result;
         }
-        result->len = ncols;
         return result;
     }
 
@@ -940,35 +939,38 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
             return result;
         }
 
-        /* Dict range take */
-        if (vec->type == RAY_LIST && (vec->attrs & RAY_ATTR_DICT)) {
-            int64_t len = ray_len(vec) / 2; /* dict has key-value pairs */
+        /* Dict range take — slice both keys and vals in parallel. */
+        if (vec->type == RAY_DICT) {
+            ray_t* keys = ray_dict_keys(vec);
+            ray_t* vals = ray_dict_vals(vec);
+            int64_t len = keys ? keys->len : 0;
             if (start < 0) start = len + start;
             if (start < 0) start = 0;
-            if (start >= len) {
-                ray_t* result = ray_alloc(0);
-                result->type = RAY_LIST;
-                result->attrs = RAY_ATTR_DICT;
-                result->len = 0;
-                return result;
-            }
             int64_t end = start + amount;
             if (end > len) end = len;
+            if (end < start) end = start;
             int64_t count = end - start;
-            ray_t** elems = (ray_t**)ray_data(vec);
-            ray_t* result = ray_alloc(count * 2 * sizeof(ray_t*));
-            if (!result) return ray_error("oom", NULL);
-            result->type = RAY_LIST;
-            result->attrs = RAY_ATTR_DICT;
-            result->len = count * 2;
-            ray_t** out = (ray_t**)ray_data(result);
-            for (int64_t i = 0; i < count; i++) {
-                ray_retain(elems[(start + i) * 2]);
-                ray_retain(elems[(start + i) * 2 + 1]);
-                out[i * 2] = elems[(start + i) * 2];
-                out[i * 2 + 1] = elems[(start + i) * 2 + 1];
+
+            ray_t* nk = ray_vec_slice(keys, start, count);
+            if (!nk || RAY_IS_ERR(nk)) return nk ? nk : ray_error("oom", NULL);
+
+            ray_t* nv;
+            if (vals && vals->type == RAY_LIST) {
+                nv = ray_alloc(count * sizeof(ray_t*));
+                if (!nv) { ray_release(nk); return ray_error("oom", NULL); }
+                nv->type = RAY_LIST;
+                nv->len  = count;
+                ray_t** vsrc = (ray_t**)ray_data(vals);
+                ray_t** vdst = (ray_t**)ray_data(nv);
+                for (int64_t i = 0; i < count; i++) {
+                    vdst[i] = vsrc[start + i];
+                    if (vdst[i]) ray_retain(vdst[i]);
+                }
+            } else {
+                nv = ray_vec_slice(vals, start, count);
+                if (!nv || RAY_IS_ERR(nv)) { ray_release(nk); return nv ? nv : ray_error("oom", NULL); }
             }
-            return result;
+            return ray_dict_new(nk, nv);
         }
 
         /* Boxed list range take */
@@ -1058,6 +1060,18 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
         }
         return result;
     }
+    /* Dict take: apply take to keys and vals in parallel.  Wrapping for
+     * |n| > pair count works the same as for typed vectors. */
+    if (vec->type == RAY_DICT && is_numeric(n_obj)) {
+        ray_t* keys = ray_dict_keys(vec);
+        ray_t* vals = ray_dict_vals(vec);
+        if (!keys) return ray_error("type", NULL);
+        ray_t* nk = ray_take_fn(keys, n_obj);
+        if (RAY_IS_ERR(nk)) return nk;
+        ray_t* nv = vals ? ray_take_fn(vals, n_obj) : ray_list_new(0);
+        if (!nv || RAY_IS_ERR(nv)) { ray_release(nk); return nv ? nv : ray_error("oom", NULL); }
+        return ray_dict_new(nk, nv);
+    }
     /* Typed vector take with extension */
     if (ray_is_vec(vec) && is_numeric(n_obj)) {
         int64_t len = ray_len(vec);
@@ -1128,14 +1142,10 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
     ray_t** elems = (ray_t**)ray_data(vec);
 
     int64_t abs_n = n < 0 ? -n : n;
-    /* For dicts, n counts key-value pairs (each pair = 2 elements) */
-    int is_dict = (vec->attrs & RAY_ATTR_DICT) ? 1 : 0;
-    int64_t elem_count = is_dict ? abs_n * 2 : abs_n;
-    (void)is_dict; /* len is already in elements for dict storage */
+    int64_t elem_count = abs_n;
     ray_t* result = ray_alloc(elem_count * sizeof(ray_t*));
     if (!result) { if (_bx) ray_release(_bx); return ray_error("oom", NULL); }
     result->type = RAY_LIST;
-    if (is_dict) result->attrs |= RAY_ATTR_DICT;
     result->len = elem_count;
     ray_t** out = (ray_t**)ray_data(result);
     if (len == 0) {
@@ -1175,43 +1185,31 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
         int64_t row = as_i64(idx);
         int64_t nrows = ray_table_nrows(vec);
         if (row < 0 || row >= nrows) return ray_error("domain", NULL);
-        int64_t ncols = vec->len;
-        ray_t* schema = ray_table_schema(vec);
-        /* Columns are stored after the schema pointer in data region */
-        ray_t** cols = (ray_t**)((char*)ray_data(vec) + sizeof(ray_t*));
-        /* Build a dict: alternating key, value pairs */
-        ray_t* dict = ray_list_new(0);
-        if (RAY_IS_ERR(dict)) return dict;
-        dict->attrs |= RAY_ATTR_DICT;
+        int64_t ncols = ray_table_ncols(vec);
+        /* Build a dict: keys SYM vec + vals LIST */
+        ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, ncols);
+        if (RAY_IS_ERR(keys)) return keys;
+        ray_t* vals = ray_list_new(ncols);
+        if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
         for (int64_t c = 0; c < ncols; c++) {
-            /* Add key */
-            int64_t key_id = schema ? ((int64_t*)ray_data(schema))[c] : c;
-            ray_t* k = ray_sym(key_id);
-            if (RAY_IS_ERR(k)) { ray_release(dict); return k; }
-            dict = ray_list_append(dict, k);
-            ray_release(k);
-            if (RAY_IS_ERR(dict)) return dict;
-            /* Add value */
+            int64_t key_id = ray_table_col_name(vec, c);
+            keys = ray_vec_append(keys, &key_id);
+            if (RAY_IS_ERR(keys)) { ray_release(vals); return keys; }
+            ray_t* col = ray_table_get_col_idx(vec, c);
             int alloc = 0;
-            ray_t* val = collection_elem(cols[c], row, &alloc);
-            if (RAY_IS_ERR(val)) { ray_release(dict); return val; }
-            dict = ray_list_append(dict, val);
+            ray_t* val = collection_elem(col, row, &alloc);
+            if (RAY_IS_ERR(val)) { ray_release(keys); ray_release(vals); return val; }
+            vals = ray_list_append(vals, val);
             if (alloc) ray_release(val);
-            if (RAY_IS_ERR(dict)) return dict;
+            if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
         }
-        return dict;
+        return ray_dict_new(keys, vals);
     }
 
     /* Dict key access: (at dict key) → value or 0Nl if missing */
-    if (vec->type == RAY_LIST && (vec->attrs & RAY_ATTR_DICT) && idx->type == -RAY_SYM) {
-        ray_t** items = (ray_t**)ray_data(vec);
-        int64_t n2 = vec->len;
-        for (int64_t i = 0; i < n2; i += 2) {
-            if (items[i]->type == -RAY_SYM && items[i]->i64 == idx->i64) {
-                ray_retain(items[i + 1]);
-                return items[i + 1];
-            }
-        }
+    if (vec->type == RAY_DICT) {
+        ray_t* v = ray_dict_get(vec, idx);
+        if (v) return v;
         return ray_typed_null(-RAY_I64); /* 0Nl for missing key */
     }
 

@@ -79,6 +79,18 @@ ray_t* ray_f64(double val) {
     return v;
 }
 
+/* F32 atoms reuse the f64 union slot — fmt_obj's RAY_F32 branch already
+ * narrows back to float via `(float)obj->f64`.  Constructor mirrors
+ * ray_f64; only the type tag differs.  Provided so RAY_F32 vectors can
+ * box elements through the same atom-construction path used by I32/F64. */
+ray_t* ray_f32(float val) {
+    ray_t* v = ray_alloc(0);
+    if (RAY_IS_ERR(v)) return v;
+    v->type = -RAY_F32;
+    v->f64  = (double)val;
+    return v;
+}
+
 /* --------------------------------------------------------------------------
  * String atom: SSO for <= 7 bytes, long string via U8 vector for > 7
  * -------------------------------------------------------------------------- */

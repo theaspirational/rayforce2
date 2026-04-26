@@ -41,9 +41,6 @@
 /* AST name flag (distinguishes symbol literal from variable reference) */
 #define RAY_ATTR_NAME        0x20  /* ray_t SYM atom with this flag = name reference */
 
-/* Vector literal flag (distinguishes [x y z] data from (f x y) calls in RAY_LIST) */
-#define RAY_ATTR_DICT        0x02  /* RAY_LIST with this flag = dict {k: v ...} */
-
 /* Function type signatures */
 typedef ray_t* (*ray_unary_fn)(ray_t*);
 typedef ray_t* (*ray_binary_fn)(ray_t*, ray_t*);
@@ -267,9 +264,9 @@ ray_t* ray_write_csv_fn(ray_t** args, int64_t n);
 ray_t* ray_read_file_fn(ray_t* path_obj);
 ray_t* ray_write_file_fn(ray_t* path_obj, ray_t* content);
 
-/* Vector similarity / embeddings / HNSW — pgvector-style names.
+/* Vector similarity / embeddings / HNSW.
  * cos-dist and l2-dist return distance (lower = closer); inner-prod is
- * the raw mathematical dot product (matches pgvector's inner_product()). */
+ * the raw mathematical dot product. */
 ray_t* ray_cos_dist_fn(ray_t* a, ray_t* b);
 ray_t* ray_inner_prod_fn(ray_t* a, ray_t* b);
 ray_t* ray_l2_dist_fn(ray_t* a, ray_t* b);

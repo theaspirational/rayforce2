@@ -33,6 +33,7 @@
 #include "ops/hash.h"
 #include "ops/temporal.h"
 #include "table/sym.h"
+#include "table/dict.h"
 #include "mem/sys.h"
 
 #include <string.h>
@@ -42,18 +43,105 @@
  * Select query — DAG bridge
  * ══════════════════════════════════════════ */
 
-/* Helper: look up a key in a dict (RAY_LIST with ATTR_DICT).
+/* Helper: look up a key in a select-clause dict (RAY_DICT).
  * Returns the value expression (unevaluated), or NULL if not found. */
 static ray_t* dict_get(ray_t* dict, const char* key) {
-    if (!dict || dict->type != RAY_LIST) return NULL;
-    int64_t n = ray_len(dict);
-    ray_t** elems = (ray_t**)ray_data(dict);
+    if (!dict || dict->type != RAY_DICT) return NULL;
     int64_t key_id = ray_sym_intern(key, strlen(key));
-    for (int64_t i = 0; i + 1 < n; i += 2) {
-        if (elems[i]->type == -RAY_SYM && elems[i]->i64 == key_id)
-            return elems[i + 1];
+    return ray_dict_probe_sym_borrowed(dict, key_id);
+}
+
+/* Flatten a RAY_DICT (keys SYM vec + vals LIST) into a transient
+ * [k0,v0,k1,v1,...] array view so the existing dict-walking loops in
+ * ray_select_fn et al. can iterate without rewriting every site.
+ *
+ * Caller passes stack-local buffers sized at DICT_VIEW_MAX.  If the dict
+ * has more pairs than fits, sets `*out_n = -1` to flag overflow — every
+ * call site checks this and returns a "domain" error rather than letting
+ * the writes spill past the buffers.  The previous version of this helper
+ * had no such guard and silently corrupted the stack on user-controlled
+ * dicts with > 64 pairs.
+ *
+ * `key_atoms` must hold at least DICT_VIEW_MAX entries; `out_elems` at
+ * least 2 * DICT_VIEW_MAX.  Keys are synthesized as -RAY_SYM atoms in
+ * `key_atoms`; values are borrowed from the dict's vals list. */
+#define DICT_VIEW_MAX 256
+static void dict_pair_view(ray_t* d, ray_t* key_atoms, ray_t** out_elems, int64_t* out_n) {
+    *out_n = 0;
+    if (!d || d->type != RAY_DICT) return;
+    ray_t* keys = ray_dict_keys(d);
+    ray_t* vals = ray_dict_vals(d);
+    if (!keys || keys->type != RAY_SYM || !vals || vals->type != RAY_LIST) return;
+    int64_t n = keys->len;
+    if (n > DICT_VIEW_MAX) { *out_n = -1; return; }
+    void* kbase = ray_data(keys);
+    ray_t** vptrs = (ray_t**)ray_data(vals);
+    for (int64_t i = 0; i < n; i++) {
+        memset(&key_atoms[i], 0, sizeof(ray_t));
+        key_atoms[i].type = -RAY_SYM;
+        key_atoms[i].i64  = ray_read_sym(kbase, i, RAY_SYM, keys->attrs);
+        out_elems[i*2]   = &key_atoms[i];
+        out_elems[i*2+1] = vptrs[i];
     }
-    return NULL;
+    *out_n = 2 * n;
+}
+
+#define DICT_VIEW_DECL(name)                            \
+    ray_t   name##_keybuf[DICT_VIEW_MAX];               \
+    ray_t*  name[DICT_VIEW_MAX * 2];                    \
+    int64_t name##_n
+#define DICT_VIEW_OPEN(d, name)                          \
+    dict_pair_view((d), name##_keybuf, name, &name##_n)
+/* Returns true if the open exceeded DICT_VIEW_MAX — caller should
+ * `ray_release(tbl); return ray_error("domain", "clause too big");`. */
+#define DICT_VIEW_OVERFLOW(name) ((name##_n) < 0)
+
+/* Convert a RAY_DICT (keys, vals) into a transient interleaved
+ * [k0_atom, v0, k1_atom, v1, …] RAY_LIST.  Used by select's group-by
+ * aggregation paths which were written for the old in-place pair-array
+ * representation of grouping output.  Returns an owned RAY_LIST (rc=1).
+ * Atom keys are freshly boxed for typed-vector key columns (sym, i64,
+ * etc.); for RAY_LIST keys they are retained borrows. */
+static ray_t* groups_to_pair_list(ray_t* d) {
+    if (!d || d->type != RAY_DICT) return ray_error("type", NULL);
+    ray_t* keys = ray_dict_keys(d);
+    ray_t* vals = ray_dict_vals(d);
+    int64_t n = keys ? keys->len : 0;
+    ray_t* out = ray_list_new(n * 2);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    ray_t** vptrs = (vals && vals->type == RAY_LIST) ? (ray_t**)ray_data(vals) : NULL;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* k = NULL;
+        if (!keys) {
+            k = NULL;
+        } else if (keys->type == RAY_LIST) {
+            k = ((ray_t**)ray_data(keys))[i];
+            if (k) ray_retain(k);
+        } else {
+            void* base = ray_data(keys);
+            switch (keys->type) {
+                case RAY_SYM: k = ray_sym(ray_read_sym(base, i, RAY_SYM, keys->attrs)); break;
+                case RAY_I64:
+                case RAY_TIMESTAMP: k = ray_i64(((int64_t*)base)[i]); break;
+                case RAY_I32:
+                case RAY_DATE:
+                case RAY_TIME: k = ray_i32(((int32_t*)base)[i]); break;
+                case RAY_I16: k = ray_i16(((int16_t*)base)[i]); break;
+                case RAY_BOOL:
+                case RAY_U8:  k = ray_u8(((uint8_t*)base)[i]); break;
+                case RAY_F64: k = ray_f64(((double*)base)[i]); break;
+                case RAY_STR: { size_t sl = 0; const char* sp = ray_str_vec_get(keys, i, &sl);
+                                 k = ray_str(sp ? sp : "", sp ? sl : 0); break; }
+                case RAY_GUID: k = ray_guid(((uint8_t*)base) + i * 16); break;
+                default: k = NULL; break;
+            }
+        }
+        out = ray_list_append(out, k);
+        if (k) ray_release(k);
+        ray_t* v = vptrs ? vptrs[i] : NULL;
+        out = ray_list_append(out, v);
+    }
+    return out;
 }
 
 /* Map a Rayfall builtin name to a DAG binary op constructor */
@@ -207,7 +295,7 @@ static ray_t* apply_sort_take(ray_t* result, ray_t** dict_elems, int64_t dict_n,
     /* Take: avoid the DAG ray_head/ray_tail op — it can't handle
      * tables with LIST columns (from non-agg scatter).  Use
      * ray_take_fn, but convert the atom form into a `[start amount]`
-     * range so we get CLAMP semantics (kdb+-style group-by take),
+     * range so we get CLAMP semantics (group-by take),
      * not the wrap/pad behavior of atom-n take on a short table. */
     ray_t* take_range   = NULL;    /* [start amount] literal form */
     int    take_is_atom = 0;
@@ -429,7 +517,7 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
         return ray_const_vec(g, expr);
 
     /* List → function call: (fn arg1 arg2 ...) */
-    if (expr->type == RAY_LIST && !(expr->attrs & (RAY_ATTR_DICT))) {
+    if (expr->type == RAY_LIST) {
         int64_t n = ray_len(expr);
         if (n == 0) return NULL;
         ray_t** elems = (ray_t**)ray_data(expr);
@@ -443,7 +531,7 @@ static ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
          * a name reference), then pop.  Sub-expression sharing is
          * automatic: multiple uses of a formal all resolve to the
          * single compiled actual op. */
-        if (head->type == RAY_LIST && !(head->attrs & RAY_ATTR_DICT)) {
+        if (head->type == RAY_LIST) {
             int64_t hn = ray_len(head);
             if (hn != 3) return NULL;
             ray_t** hel = (ray_t**)ray_data(head);
@@ -804,7 +892,7 @@ static void expr_bind_table_names(ray_t* expr, ray_t* tbl) {
         }
         return;
     }
-    if (expr->type == RAY_LIST && !(expr->attrs & RAY_ATTR_DICT)) {
+    if (expr->type == RAY_LIST) {
         ray_t** elems = (ray_t**)ray_data(expr);
         int64_t n = ray_len(expr);
         for (int64_t i = 0; i < n; i++)
@@ -848,7 +936,7 @@ static int expr_refs_row_column(ray_t* expr, ray_t* tbl) {
         }
         return 0;
     }
-    if (expr->type == RAY_LIST && !(expr->attrs & RAY_ATTR_DICT)) {
+    if (expr->type == RAY_LIST) {
         /* If this call is itself an aggregation, its column refs
          * collapse to a scalar — don't recurse.  The whole subtree
          * is treated as a constant from the row-alignment POV. */
@@ -870,7 +958,7 @@ static int expr_refs_row_column(ray_t* expr, ray_t* tbl) {
 /* Check if an expression is an aggregation call (head is an agg function) */
 static int is_agg_expr(ray_t* expr) {
     if (!expr || expr->type != RAY_LIST) return 0;
-    if (expr->attrs & (RAY_ATTR_DICT)) return 0;
+    if (expr->type == RAY_DICT) return 0;
     int64_t n = ray_len(expr);
     if (n < 2) return 0;
     ray_t** elems = (ray_t**)ray_data(expr);
@@ -885,7 +973,7 @@ static int is_agg_expr(ray_t* expr) {
 ray_t* ray_select_fn(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", NULL);
     ray_t* dict = args[0];
-    if (!dict || dict->type != RAY_LIST || !(dict->attrs & RAY_ATTR_DICT))
+    if (!dict || dict->type != RAY_DICT)
         return ray_error("type", NULL);
 
     /* Evaluate 'from:' to get the source table */
@@ -900,9 +988,18 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
     ray_t* take_expr = dict_get(dict, "take");
     ray_t* nearest_expr = dict_get(dict, "nearest");
 
-    /* Collect output columns (keys that are not reserved) */
-    int64_t dict_n = ray_len(dict);
-    ray_t** dict_elems = (ray_t**)ray_data(dict);
+    /* Collect output columns (keys that are not reserved).  The dict's
+     * physical layout is [keys, vals] but the iteration loops below were
+     * written for the old interleaved [k0,v0,...] form — open a transient
+     * pair view so the existing code keeps working. */
+    DICT_VIEW_DECL(dv);
+    DICT_VIEW_OPEN(dict, dv);
+    if (DICT_VIEW_OVERFLOW(dv)) {
+        ray_release(tbl);
+        return ray_error("domain", "select clause has too many keys");
+    }
+    int64_t dict_n = dv_n;
+    ray_t** dict_elems = dv;
     int64_t from_id    = ray_sym_intern("from",    4);
     int64_t where_id   = ray_sym_intern("where",   5);
     int64_t by_id      = ray_sym_intern("by",      2);
@@ -958,18 +1055,20 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
      * plain RAY_SYM vector of the dict keys so the rest of
      * ray_select_fn sees a standard multi-key group-by. */
     ray_t* by_sym_vec_owned = NULL;
-    if (by_expr && by_expr->type == RAY_LIST && (by_expr->attrs & RAY_ATTR_DICT)) {
-        int64_t dlen = ray_len(by_expr);
-        if (dlen & 1) {
+    DICT_VIEW_DECL(byv);
+    if (by_expr && by_expr->type == RAY_DICT) {
+        DICT_VIEW_OPEN(by_expr, byv);
+        if (DICT_VIEW_OVERFLOW(byv)) {
             ray_release(tbl);
-            return ray_error("domain", "by-dict must have even length");
+            return ray_error("domain", "by-dict has too many keys");
         }
+        int64_t dlen = byv_n;
         int64_t nk = dlen / 2;
         if (nk == 0 || nk > 16) {
             ray_release(tbl);
             return ray_error("domain", "by-dict must have 1..16 keys");
         }
-        ray_t** d_elems = (ray_t**)ray_data(by_expr);
+        ray_t** d_elems = byv;
 
         ray_env_push_scope();
         int64_t in_ncols = ray_table_ncols(tbl);
@@ -1609,10 +1708,14 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 return apply_sort_take(res, dict_elems, dict_n, asc_id, desc_id, take_id);
             }
 
-            ray_t* groups = ray_group_fn(key_col);
+            ray_t* groups_dict = ray_group_fn(key_col);
+            if (RAY_IS_ERR(groups_dict)) { if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return groups_dict; }
+            /* Flatten the dict into the legacy [k0,v0,…] interleaved LIST
+             * representation that the rest of this branch was written for. */
+            ray_t* groups = groups_to_pair_list(groups_dict);
+            ray_release(groups_dict);
             if (RAY_IS_ERR(groups)) { if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl); return groups; }
 
-            /* groups is a dict: {key_val: [indices ...], ...} */
             int64_t gn = ray_len(groups);
             int64_t n_groups = gn / 2;
 
@@ -1704,7 +1807,7 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                 } else {
                     /* Non-aggregation expression: evaluate on full table,
                      * then gather per-group subsets into a LIST column
-                     * (kdb+ semantics: non-agg produces list-of-vectors). */
+                     * (non-agg produces list-of-vectors). */
                     if (ray_env_push_scope() != RAY_OK) {
                         for (int ai = 0; ai < n_agg_out; ai++) { if (agg_results[ai]) ray_release(agg_results[ai]); }
                         ray_release(groups); if (eval_tbl != tbl) ray_release(eval_tbl); ray_release(tbl);
@@ -2227,12 +2330,20 @@ ray_t* ray_select_fn(ray_t** args, int64_t n) {
                     ray_release(tbl);
                     return computed_key ? computed_key : ray_error("domain", NULL);
                 }
-                ray_t* groups2 = ray_group_fn(computed_key);
-                if (!groups2 || RAY_IS_ERR(groups2)) {
+                ray_t* groups2_dict = ray_group_fn(computed_key);
+                if (!groups2_dict || RAY_IS_ERR(groups2_dict)) {
                     ray_release(computed_key);
                     if (filtered_tbl != tbl) ray_release(filtered_tbl);
                     ray_release(tbl);
-                    return groups2 ? groups2 : ray_error("domain", NULL);
+                    return groups2_dict ? groups2_dict : ray_error("domain", NULL);
+                }
+                ray_t* groups2 = groups_to_pair_list(groups2_dict);
+                ray_release(groups2_dict);
+                if (RAY_IS_ERR(groups2)) {
+                    ray_release(computed_key);
+                    if (filtered_tbl != tbl) ray_release(filtered_tbl);
+                    ray_release(tbl);
+                    return groups2;
                 }
                 int64_t ng2 = ray_len(groups2) / 2;
                 if (ng2 == 0) { ray_release(groups2); ray_release(computed_key); if (filtered_tbl != tbl) ray_release(filtered_tbl); ray_release(tbl); return ray_table_new(0); }
@@ -3243,7 +3354,7 @@ static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
 ray_t* ray_update_fn(ray_t** args, int64_t n) {
     if (n < 1) return ray_error("domain", NULL);
     ray_t* dict = args[0];
-    if (!dict || dict->type != RAY_LIST || !(dict->attrs & RAY_ATTR_DICT))
+    if (!dict || dict->type != RAY_DICT)
         return ray_error("type", NULL);
 
     ray_t* from_expr = dict_get(dict, "from");
@@ -3267,8 +3378,14 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
 
     /* UPDATE WITH BY: group, compute aggregate, broadcast back */
     if (by_expr && !where_expr) {
-        int64_t dict_n = ray_len(dict);
-        ray_t** dict_elems = (ray_t**)ray_data(dict);
+        DICT_VIEW_DECL(updv);
+        DICT_VIEW_OPEN(dict, updv);
+        if (DICT_VIEW_OVERFLOW(updv)) {
+            ray_release(tbl);
+            return ray_error("domain", "update clause has too many keys");
+        }
+        int64_t dict_n = updv_n;
+        ray_t** dict_elems = updv;
         int64_t from_id  = ray_sym_intern("from",  4);
         int64_t where_id = ray_sym_intern("where", 5);
         int64_t by_id    = ray_sym_intern("by",    2);
@@ -3286,11 +3403,16 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
         if (!grp_col) { ray_release(tbl); return ray_error("domain", NULL); }
         int64_t nrows2 = ray_table_nrows(tbl);
 
-        /* Use ray_group_fn to get group indices: {key: [indices]} */
+        /* Use ray_group_fn to get group indices: {key: [indices]}.
+         * Flatten the resulting RAY_DICT into the legacy interleaved
+         * [k0,v0,…] LIST shape this branch was written against. */
         ray_t* groups = NULL;
         {
-            groups = ray_group_fn(grp_col);
-            if (!groups || RAY_IS_ERR(groups)) { ray_release(tbl); return groups ? groups : ray_error("oom", NULL); }
+            ray_t* gd = ray_group_fn(grp_col);
+            if (!gd || RAY_IS_ERR(gd)) { ray_release(tbl); return gd ? gd : ray_error("oom", NULL); }
+            groups = groups_to_pair_list(gd);
+            ray_release(gd);
+            if (RAY_IS_ERR(groups)) { ray_release(tbl); return groups; }
         }
 
         /* Start with a copy of the original table */
@@ -3437,8 +3559,14 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
 
         /* Build a new table with updated columns */
         int64_t ncols = ray_table_ncols(tbl);
-        int64_t dict_n = ray_len(dict);
-        ray_t** dict_elems = (ray_t**)ray_data(dict);
+        DICT_VIEW_DECL(updw);
+        DICT_VIEW_OPEN(dict, updw);
+        if (DICT_VIEW_OVERFLOW(updw)) {
+            ray_release(mask_vec); ray_release(tbl);
+            return ray_error("domain", "update clause has too many keys");
+        }
+        int64_t dict_n = updw_n;
+        ray_t** dict_elems = updw;
         int64_t from_id = ray_sym_intern("from", 4);
         int64_t where_id = ray_sym_intern("where", 5);
 
@@ -3688,8 +3816,14 @@ ray_t* ray_update_fn(ray_t** args, int64_t n) {
 
     /* No WHERE — update all rows */
     int64_t ncols = ray_table_ncols(tbl);
-    int64_t dict_n = ray_len(dict);
-    ray_t** dict_elems = (ray_t**)ray_data(dict);
+    DICT_VIEW_DECL(upda);
+    DICT_VIEW_OPEN(dict, upda);
+    if (DICT_VIEW_OVERFLOW(upda)) {
+        ray_release(tbl);
+        return ray_error("domain", "update clause has too many keys");
+    }
+    int64_t dict_n = upda_n;
+    ray_t** dict_elems = upda;
     int64_t from_id = ray_sym_intern("from", 4);
 
     ray_t* result = ray_table_new(ncols);
@@ -3951,7 +4085,7 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
             tbl = mat;
         }
 
-        bool is_target_list = (tbl->type == RAY_LIST && !(tbl->attrs & RAY_ATTR_DICT));
+        bool is_target_list = (tbl->type == RAY_LIST);
         bool is_target_vec  = ray_is_vec(tbl);
         if (!is_target_list && !is_target_vec) {
             ray_release(tbl);
@@ -4105,7 +4239,7 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
     int64_t ncols = ray_table_ncols(tbl);
     ray_t* row_orig = row; /* keep original eval result for cleanup */
 
-    if (!is_list(row) && row->type != RAY_TABLE) { ray_release(tbl); ray_release(row); return ray_error("type", NULL); }
+    if (!is_list(row) && row->type != RAY_TABLE && row->type != RAY_DICT) { ray_release(tbl); ray_release(row); return ray_error("type", NULL); }
 
     /* Table row: convert to list of column vectors */
     ray_t* tbl_row_list = NULL;
@@ -4135,39 +4269,46 @@ ray_t* ray_insert_fn(ray_t** args, int64_t n) {
 
     /* Dict row: extract values in table column order */
     ray_t* dict_vals = NULL;
-    if (row->attrs & RAY_ATTR_DICT) {
+    if (row->type == RAY_DICT) {
+        ray_t* dkeys = ray_dict_keys(row);
+        ray_t* dvals = ray_dict_vals(row);
+        if (!dkeys || dkeys->type != RAY_SYM || !dvals) {
+            ray_release(tbl); ray_release(row_orig);
+            return ray_error("type", NULL);
+        }
+        int64_t dict_len = dkeys->len;
+
         dict_vals = ray_alloc(ncols * sizeof(ray_t*));
         if (!dict_vals) { ray_release(tbl); ray_release(row_orig); return ray_error("oom", NULL); }
         dict_vals->type = RAY_LIST;
         dict_vals->len = ncols;
         ray_t** dv = (ray_t**)ray_data(dict_vals);
-        ray_t** dict_items = (ray_t**)ray_data(row);
-        int64_t dict_len = ray_len(row);
+
         for (int64_t c = 0; c < ncols; c++) {
             int64_t col_name = ray_table_col_name(tbl, c);
             dv[c] = NULL;
-            for (int64_t d = 0; d + 1 < dict_len; d += 2) {
-                if (dict_items[d]->type == -RAY_SYM && dict_items[d]->i64 == col_name) {
-                    dv[c] = dict_items[d + 1];
-                    ray_retain(dv[c]);
-                    break;
+            for (int64_t d = 0; d < dict_len; d++) {
+                int64_t dk = ray_read_sym(ray_data(dkeys), d, RAY_SYM, dkeys->attrs);
+                if (dk != col_name) continue;
+                if (dvals->type == RAY_LIST) {
+                    dv[c] = ((ray_t**)ray_data(dvals))[d];
+                    if (dv[c]) ray_retain(dv[c]);
+                } else {
+                    int alloc = 0;
+                    dv[c] = collection_elem(dvals, d, &alloc);
+                    if (!alloc && dv[c]) ray_retain(dv[c]);
                 }
+                break;
             }
-            /* dv[c] may be NULL for missing keys — will insert null
-             * (but only if ALL dict keys exist as table columns) */
         }
         /* Verify all dict keys exist as table columns */
-        for (int64_t d = 0; d + 1 < dict_len; d += 2) {
-            if (dict_items[d]->type != -RAY_SYM) continue;
-            int64_t dk = dict_items[d]->i64;
+        for (int64_t d = 0; d < dict_len; d++) {
+            int64_t dk = ray_read_sym(ray_data(dkeys), d, RAY_SYM, dkeys->attrs);
             int found_in_tbl = 0;
             for (int64_t c = 0; c < ncols; c++) {
                 if (ray_table_col_name(tbl, c) == dk) { found_in_tbl = 1; break; }
             }
             if (!found_in_tbl) {
-                /* Dict key doesn't correspond to any table column — a
-                 * schema-value mismatch, classified as "value" rather
-                 * than "domain" (which means out-of-range). */
                 for (int64_t c = 0; c < ncols; c++) if (dv[c]) ray_release(dv[c]);
                 dict_vals->len = 0;
                 ray_free(dict_vals);
@@ -4314,7 +4455,7 @@ ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
     if (!row || RAY_IS_ERR(row)) { ray_release(tbl); ray_release(key_sym); return row ? row : ray_error("type", NULL); }
 
     if (tbl->type != RAY_TABLE) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("type", NULL); }
-    if (!is_list(row) && row->type != RAY_TABLE) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("type", NULL); }
+    if (!is_list(row) && row->type != RAY_TABLE && row->type != RAY_DICT) { ray_release(tbl); ray_release(key_sym); ray_release(row); return ray_error("type", NULL); }
 
     int64_t ncols = ray_table_ncols(tbl);
 
@@ -4428,17 +4569,17 @@ ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
 
     /* Dict row: extract values in column order to create a plain list */
     ray_t* dict_row_list = NULL;
-    if (row->attrs & RAY_ATTR_DICT) {
-        ray_t** dict_items = (ray_t**)ray_data(row);
-        int64_t dict_len   = ray_len(row);
-        int64_t n_pairs    = dict_len / 2;
+    if (row->type == RAY_DICT) {
+        ray_t* dkeys = ray_dict_keys(row);
+        ray_t* dvals = ray_dict_vals(row);
+        if (!dkeys || dkeys->type != RAY_SYM || !dvals) {
+            ray_release(tbl); ray_release(key_sym); ray_release(row);
+            return ray_error("type", NULL);
+        }
+        int64_t n_pairs = dkeys->len;
 
-        /* Schema-strictness: same rule as the table-payload path —
-         * every column name must appear exactly once on each side.
-         * A presence-only check would let tbl=[a a b] + dict [a b] slip
-         * through (both target `a` slots wired to the same dict value),
-         * and dict [a a b] + tbl [a b] (second `a` key silently dropped).
-         * The uniqueness requirement rejects either ambiguity. */
+        /* Schema-strictness: every column name must appear exactly once
+         * on each side.  Mirrors the table-payload path. */
         if (n_pairs != ncols) {
             ray_release(tbl); ray_release(key_sym); ray_release(row);
             return ray_error("value", NULL);
@@ -4448,8 +4589,10 @@ ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
             int64_t tbl_matches = 0, dict_matches = 0;
             for (int64_t i = 0; i < ncols; i++)
                 if (ray_table_col_name(tbl, i) == cn) tbl_matches++;
-            for (int64_t d = 0; d + 1 < dict_len; d += 2)
-                if (dict_items[d]->type == -RAY_SYM && dict_items[d]->i64 == cn) dict_matches++;
+            for (int64_t d = 0; d < n_pairs; d++) {
+                int64_t dk = ray_read_sym(ray_data(dkeys), d, RAY_SYM, dkeys->attrs);
+                if (dk == cn) dict_matches++;
+            }
             if (tbl_matches != 1 || dict_matches != 1) {
                 ray_release(tbl); ray_release(key_sym); ray_release(row);
                 return ray_error("value", NULL);
@@ -4464,14 +4607,19 @@ ray_t* ray_upsert_fn(ray_t** args, int64_t n) {
         for (int64_t c = 0; c < ncols; c++) {
             int64_t col_name = ray_table_col_name(tbl, c);
             drl[c] = NULL;
-            for (int64_t d = 0; d + 1 < dict_len; d += 2) {
-                if (dict_items[d]->type == -RAY_SYM && dict_items[d]->i64 == col_name) {
-                    drl[c] = dict_items[d + 1];
-                    ray_retain(drl[c]);
-                    break;
+            for (int64_t d = 0; d < n_pairs; d++) {
+                int64_t dk = ray_read_sym(ray_data(dkeys), d, RAY_SYM, dkeys->attrs);
+                if (dk != col_name) continue;
+                if (dvals->type == RAY_LIST) {
+                    drl[c] = ((ray_t**)ray_data(dvals))[d];
+                    if (drl[c]) ray_retain(drl[c]);
+                } else {
+                    int alloc = 0;
+                    drl[c] = collection_elem(dvals, d, &alloc);
+                    if (!alloc && drl[c]) ray_retain(drl[c]);
                 }
+                break;
             }
-            /* drl[c] guaranteed non-NULL by the uniqueness check above. */
         }
         ray_release(row);
         row = dict_row_list;
@@ -5199,8 +5347,9 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
             if (!left_eq[e] || !right_eq[e]) return ray_error("domain", NULL);
         }
 
-        /* Parse every (name, (op src)) pair from the agg dict.
-         * Dicts are flat [k0 v0 k1 v1 ...] lists (see parse_dict).
+        /* Parse every (name, (op src)) pair from the agg dict.  The dict's
+         * physical layout is [keys (SYM vec), vals (LIST)] — read keys[i]
+         * via ray_read_sym and pair it with vals[i] from the LIST.
          * WJ_MAX_AGG is defined at file scope (for wj_scan_ctx_t). */
         int64_t  agg_names[WJ_MAX_AGG];
         uint16_t agg_ops[WJ_MAX_AGG];
@@ -5212,19 +5361,21 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
         int      agg_raw[WJ_MAX_AGG] = {0};  /* {name: Col} bare-column form — legacy placeholder */
         int64_t  n_agg = 0;
 
-        if (agg_dict && agg_dict->type == RAY_LIST && (agg_dict->attrs & RAY_ATTR_DICT)) {
-            ray_t** ad = (ray_t**)ray_data(agg_dict);
-            int64_t adn = ray_len(agg_dict);
-            for (int64_t di = 0; di + 1 < adn && n_agg < WJ_MAX_AGG; di += 2) {
-                ray_t* kname = ad[di];
-                ray_t* expr  = ad[di + 1];
-                if (kname->type != -RAY_SYM) continue;
+        if (agg_dict && agg_dict->type == RAY_DICT) {
+            ray_t* dkeys = ray_dict_keys(agg_dict);
+            ray_t* dvals = ray_dict_vals(agg_dict);
+            int64_t adn = (dkeys && dkeys->type == RAY_SYM) ? dkeys->len : 0;
+            ray_t** lvals = (dvals && dvals->type == RAY_LIST) ? (ray_t**)ray_data(dvals) : NULL;
+            for (int64_t di = 0; di < adn && n_agg < WJ_MAX_AGG; di++) {
+                int64_t kname_id = ray_read_sym(ray_data(dkeys), di, RAY_SYM, dkeys->attrs);
+                ray_t* expr = lvals ? lvals[di] : NULL;
+                if (!expr) continue;
                 /* (op col) aggregation form */
                 if (expr->type == RAY_LIST && expr->len >= 2) {
                     ray_t** ae = (ray_t**)ray_data(expr);
                     if (!(ae[0]->type == -RAY_SYM && (ae[0]->attrs & RAY_ATTR_NAME))) continue;
                     if (!(ae[1]->type == -RAY_SYM && (ae[1]->attrs & RAY_ATTR_NAME))) continue;
-                    agg_names[n_agg]   = kname->i64;
+                    agg_names[n_agg]   = kname_id;
                     agg_ops[n_agg]     = resolve_agg_opcode(ae[0]->i64);
                     agg_src_ids[n_agg] = ae[1]->i64;
                     agg_raw[n_agg]     = 0;
@@ -5233,7 +5384,7 @@ ray_t* ray_window_join_fn(ray_t** args, int64_t n) {
                 }
                 /* Bare column reference — legacy map-group form, emitted as null column */
                 if (expr->type == -RAY_SYM && (expr->attrs & RAY_ATTR_NAME)) {
-                    agg_names[n_agg]   = kname->i64;
+                    agg_names[n_agg]   = kname_id;
                     agg_ops[n_agg]     = OP_MIN;
                     agg_src_ids[n_agg] = expr->i64;
                     agg_raw[n_agg]     = 1;

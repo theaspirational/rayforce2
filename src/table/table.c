@@ -27,196 +27,177 @@
 #include <string.h>
 
 /* --------------------------------------------------------------------------
- * Data layout helpers
+ * Data layout — same shape as RAY_DICT.
  *
- * Data region of a TABLE block:
- *   [0]                          = ray_t* schema (I64 vector of name IDs)
- *   [sizeof(ray_t*)]              = ray_t* col_0
- *   [sizeof(ray_t*) * 2]          = ray_t* col_1
- *   ...
- *   [sizeof(ray_t*) * (ncols)]    = ray_t* col_{ncols-1}
+ * Block header (32 B):  type = RAY_TABLE, len = 2
+ *   slot[0] = ray_t* schema    — RAY_I64 vector of column name sym IDs
+ *   slot[1] = ray_t* cols      — RAY_LIST of column vectors
  *
- * tbl->len = current column count
+ * `tbl->len` is the slot count (always 2).  Use ray_table_ncols() to get
+ * the column count, ray_table_nrows() for the row count.
+ *
+ * The schema vector stays RAY_I64 (rather than RAY_SYM) because the rest
+ * of the codebase reads it as `int64_t* ids = ray_data(schema)` in
+ * dozens of hot loops; RAY_SYM's adaptive widths (W8/W16/W32/W64) would
+ * silently truncate those reads.  RAY_DICT is free to use any keys type;
+ * TABLE deliberately pins schema to I64 for that interop.
  * -------------------------------------------------------------------------- */
 
-static ray_t** tbl_schema_slot(ray_t* tbl) {
+#define TBL_DATA_SIZE  (2 * sizeof(ray_t*))
+
+static inline ray_t** tbl_slots(ray_t* tbl) {
     return (ray_t**)ray_data(tbl);
 }
 
-static ray_t** tbl_col_slots(ray_t* tbl) {
-    return (ray_t**)((char*)ray_data(tbl) + sizeof(ray_t*));
+static inline ray_t* tbl_schema(ray_t* tbl) {
+    return tbl_slots(tbl)[0];
+}
+
+static inline ray_t* tbl_cols(ray_t* tbl) {
+    return tbl_slots(tbl)[1];
 }
 
 /* --------------------------------------------------------------------------
- * ray_table_new
+ * ray_table_new — allocates an empty table with capacity for `ncols`.
+ *
+ * The schema vector and cols list are pre-sized to avoid early grows.
+ * Callers append columns via ray_table_add_col.
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_table_new(int64_t ncols) {
     if (ncols < 0) return ray_error("range", NULL);
-    if ((uint64_t)ncols > SIZE_MAX / sizeof(ray_t*) - 1)
-        return ray_error("oom", NULL);
-    /* Allocate: 1 schema pointer + ncols column pointers */
-    size_t data_size = (size_t)(1 + ncols) * sizeof(ray_t*);
 
-    ray_t* tbl = ray_alloc(data_size);
+    ray_t* tbl = ray_alloc(TBL_DATA_SIZE);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
-
-    tbl->type = RAY_TABLE;
-    tbl->len = 0;  /* no columns yet */
+    tbl->type  = RAY_TABLE;
     tbl->attrs = 0;
+    tbl->len   = 2;
     memset(tbl->nullmap, 0, 16);
+    memset(ray_data(tbl), 0, TBL_DATA_SIZE);
 
-    /* Zero the data region */
-    memset(ray_data(tbl), 0, data_size);
-
-    /* Create schema: I64 vector with capacity = ncols */
     ray_t* schema = ray_vec_new(RAY_I64, ncols);
     if (!schema || RAY_IS_ERR(schema)) {
         ray_free(tbl);
-        return schema;
+        return schema ? schema : ray_error("oom", NULL);
     }
-    *tbl_schema_slot(tbl) = schema;
-
+    ray_t* cols = ray_list_new(ncols);
+    if (!cols || RAY_IS_ERR(cols)) {
+        ray_release(schema);
+        ray_free(tbl);
+        return cols ? cols : ray_error("oom", NULL);
+    }
+    tbl_slots(tbl)[0] = schema;
+    tbl_slots(tbl)[1] = cols;
     return tbl;
 }
 
 /* --------------------------------------------------------------------------
- * ray_table_add_col
+ * ray_table_add_col — append `col_vec` under name `name_id`.
+ *
+ * Consumes one ref of the input table; on success returns an owned ref to
+ * the (possibly COW'd) result.  Retains `col_vec` internally so the caller
+ * keeps its own ref.
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_table_add_col(ray_t* tbl, int64_t name_id, ray_t* col_vec) {
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
     if (!col_vec || RAY_IS_ERR(col_vec)) return ray_error("type", NULL);
 
-    /* COW the tbl */
     tbl = ray_cow(tbl);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl;
 
-    int64_t idx = tbl->len;
+    ray_t** slots = tbl_slots(tbl);
+    ray_t* schema = slots[0];
+    ray_t* cols   = slots[1];
 
-    /* Check capacity: we need (1 + idx + 1) pointers in data region */
-    size_t block_size = (size_t)1 << tbl->order;
-    size_t data_space = block_size - 32;  /* 32B ray_t header */
-    int64_t max_cols = (int64_t)(data_space / sizeof(ray_t*)) - 1;  /* minus schema slot */
+    /* schema and cols may themselves be shared after cow — append helpers
+     * COW them as needed and return the (possibly new) owned ref. */
+    ray_t* new_schema = ray_vec_append(schema, &name_id);
+    if (!new_schema || RAY_IS_ERR(new_schema)) { ray_release(tbl); return new_schema ? new_schema : ray_error("oom", NULL); }
+    slots[0] = new_schema;
 
-    if (idx >= max_cols) {
-        /* Need to grow the tbl block */
-        size_t new_data_size = (size_t)(1 + (idx + 1) * 2) * sizeof(ray_t*);
-        ray_t* new_df = ray_scratch_realloc(tbl, new_data_size);
-        if (!new_df || RAY_IS_ERR(new_df)) return new_df;
-        tbl = new_df;
-    }
-
-    /* Append name_id to schema vector */
-    ray_t* schema = *tbl_schema_slot(tbl);
-    schema = ray_vec_append(schema, &name_id);
-    if (!schema || RAY_IS_ERR(schema)) return ray_error("oom", NULL);
-
-    /* vec_append returns the owned schema reference (possibly moved). */
-    *tbl_schema_slot(tbl) = schema;
-
-    /* Store column vector pointer and retain it */
-    ray_t** cols = tbl_col_slots(tbl);
-    cols[idx] = col_vec;
     ray_retain(col_vec);
-
-    tbl->len = idx + 1;
+    ray_t* new_cols = ray_list_append(cols, col_vec);
+    ray_release(col_vec);
+    if (!new_cols || RAY_IS_ERR(new_cols)) { ray_release(tbl); return new_cols ? new_cols : ray_error("oom", NULL); }
+    slots[1] = new_cols;
 
     return tbl;
 }
 
 /* --------------------------------------------------------------------------
- * ray_table_get_col
+ * ray_table_get_col — lookup column by sym id; borrowed pointer or NULL.
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_table_get_col(ray_t* tbl, int64_t name_id) {
     if (!tbl || RAY_IS_ERR(tbl)) return NULL;
-
-    ray_t* schema = *tbl_schema_slot(tbl);
-    if (!schema || RAY_IS_ERR(schema)) return NULL;
-
+    ray_t* schema = tbl_schema(tbl);
+    ray_t* cols   = tbl_cols(tbl);
+    if (!schema || !cols) return NULL;
     int64_t* ids = (int64_t*)ray_data(schema);
-    int64_t ncols = tbl->len;
-
-    for (int64_t i = 0; i < ncols; i++) {
-        if (ids[i] == name_id) {
-            ray_t** cols = tbl_col_slots(tbl);
-            return cols[i];
-        }
-    }
-
-    return NULL;  /* column not found */
+    int64_t ncols = schema->len;
+    ray_t** col_ptrs = (ray_t**)ray_data(cols);
+    for (int64_t i = 0; i < ncols; i++)
+        if (ids[i] == name_id) return col_ptrs[i];
+    return NULL;
 }
 
 /* --------------------------------------------------------------------------
- * ray_table_get_col_idx
+ * ray_table_get_col_idx — borrowed pointer at slot `idx`, or NULL.
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_table_get_col_idx(ray_t* tbl, int64_t idx) {
     if (!tbl || RAY_IS_ERR(tbl)) return NULL;
-    if (idx < 0 || idx >= tbl->len) return NULL;
-
-    ray_t** cols = tbl_col_slots(tbl);
-    return cols[idx];
+    ray_t* cols = tbl_cols(tbl);
+    if (!cols) return NULL;
+    if (idx < 0 || idx >= cols->len) return NULL;
+    return ((ray_t**)ray_data(cols))[idx];
 }
 
 /* --------------------------------------------------------------------------
- * ray_table_col_name
+ * ray_table_col_name — sym id at slot `idx`, -1 on out-of-range.
  * -------------------------------------------------------------------------- */
 
 int64_t ray_table_col_name(ray_t* tbl, int64_t idx) {
     if (!tbl || RAY_IS_ERR(tbl)) return -1;
-    if (idx < 0 || idx >= tbl->len) return -1;
-
-    ray_t* schema = *tbl_schema_slot(tbl);
-    if (!schema || RAY_IS_ERR(schema)) return -1;
-
-    int64_t* ids = (int64_t*)ray_data(schema);
-    return ids[idx];
+    ray_t* schema = tbl_schema(tbl);
+    if (!schema) return -1;
+    if (idx < 0 || idx >= schema->len) return -1;
+    return ((int64_t*)ray_data(schema))[idx];
 }
 
 /* --------------------------------------------------------------------------
- * ray_table_set_col_name
+ * ray_table_set_col_name — overwrite name at `idx`.  Caller must ensure
+ * exclusive ownership (rc==1) before calling.
  * -------------------------------------------------------------------------- */
 
 void ray_table_set_col_name(ray_t* tbl, int64_t idx, int64_t name_id) {
     if (!tbl || RAY_IS_ERR(tbl)) return;
-    if (idx < 0 || idx >= tbl->len) return;
-
-    /* NOTE: This function returns void so it cannot return a new COW'd pointer.
-     * Caller must ensure exclusive ownership (rc==1) before calling, e.g. via
-     * ray_cow(tbl) beforehand. Mutating a shared table here is undefined. */
-    ray_t* schema = *tbl_schema_slot(tbl);
+    ray_t** slots = tbl_slots(tbl);
+    ray_t* schema = slots[0];
     if (!schema || RAY_IS_ERR(schema)) return;
-
-    /* COW the schema vector to avoid mutating shared schema */
+    if (idx < 0 || idx >= schema->len) return;
     schema = ray_cow(schema);
     if (!schema || RAY_IS_ERR(schema)) return;
-    *tbl_schema_slot(tbl) = schema;
-
-    int64_t* ids = (int64_t*)ray_data(schema);
-    ids[idx] = name_id;
+    slots[0] = schema;
+    ((int64_t*)ray_data(schema))[idx] = name_id;
 }
 
 /* --------------------------------------------------------------------------
- * ray_table_ncols
+ * ray_table_ncols / ray_table_nrows / ray_table_schema
  * -------------------------------------------------------------------------- */
 
 int64_t ray_table_ncols(ray_t* tbl) {
     if (!tbl || RAY_IS_ERR(tbl)) return 0;
-    return tbl->len;
+    ray_t* schema = tbl_schema(tbl);
+    return schema ? schema->len : 0;
 }
-
-/* --------------------------------------------------------------------------
- * ray_table_nrows
- * -------------------------------------------------------------------------- */
 
 int64_t ray_table_nrows(ray_t* tbl) {
     if (!tbl || RAY_IS_ERR(tbl)) return 0;
-    if (tbl->len <= 0) return 0;
-
-    ray_t** cols = tbl_col_slots(tbl);
-    ray_t* first_col = cols[0];
+    ray_t* cols = tbl_cols(tbl);
+    if (!cols || cols->len <= 0) return 0;
+    ray_t* first_col = ((ray_t**)ray_data(cols))[0];
     if (!first_col || RAY_IS_ERR(first_col)) return 0;
 
     if (RAY_IS_PARTED(first_col->type) || first_col->type == RAY_MAPCOMMON)
@@ -224,10 +205,6 @@ int64_t ray_table_nrows(ray_t* tbl) {
 
     return first_col->len;
 }
-
-/* --------------------------------------------------------------------------
- * ray_parted_nrows
- * -------------------------------------------------------------------------- */
 
 int64_t ray_parted_nrows(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return 0;
@@ -254,11 +231,7 @@ int64_t ray_parted_nrows(ray_t* v) {
     return total;
 }
 
-/* --------------------------------------------------------------------------
- * ray_table_schema
- * -------------------------------------------------------------------------- */
-
 ray_t* ray_table_schema(ray_t* tbl) {
     if (!tbl || RAY_IS_ERR(tbl)) return NULL;
-    return *tbl_schema_slot(tbl);
+    return tbl_schema(tbl);
 }

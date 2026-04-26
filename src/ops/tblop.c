@@ -581,7 +581,6 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
             if (!new_list) { ray_release(idx); ray_release(val); ray_release(name_sym); return ray_error("oom", NULL); }
             new_list->type = RAY_LIST;
             new_list->len = vlen;
-            if (var->attrs & RAY_ATTR_DICT) new_list->attrs |= RAY_ATTR_DICT;
             ray_t** out = (ray_t**)ray_data(new_list);
             for (int64_t i = 0; i < vlen; i++) { ray_retain(elems[i]); out[i] = elems[i]; }
 
@@ -706,7 +705,6 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         if (!new_list) { ray_release(name_sym); return ray_error("oom", NULL); }
         new_list->type = RAY_LIST;
         new_list->len = new_len;
-        if (var->attrs & RAY_ATTR_DICT) new_list->attrs |= RAY_ATTR_DICT;
         ray_t** out = (ray_t**)ray_data(new_list);
         int64_t j = 0;
         for (int64_t i = 0; i < vlen; i++) {

@@ -124,6 +124,7 @@ ray_t* ray_sum_fn(ray_t* x) {
 ray_t* ray_count_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_COUNT);
     if (x->type == RAY_TABLE) return make_i64(ray_table_nrows(x));
+    if (x->type == RAY_DICT)  return make_i64(ray_dict_len(x));
     /* String atom: count = string length */
     if (ray_is_atom(x) && (-x->type) == RAY_STR)
         return make_i64((int64_t)ray_str_len(x));
@@ -134,9 +135,6 @@ ray_t* ray_count_fn(ray_t* x) {
         if (ray_is_atom(x)) return make_i64(1);
         return ray_error("type", NULL);
     }
-    /* Dict: count = number of key-value pairs */
-    if (x->attrs & RAY_ATTR_DICT)
-        return make_i64(ray_len(x) / 2);
     return make_i64(ray_len(x));
 }
 

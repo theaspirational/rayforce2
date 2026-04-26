@@ -42,8 +42,8 @@ size_t ray_block_size(ray_t* v) {
     if (ray_is_atom(v)) return 32;
     /* LIST (type=0) stores child pointers */
     if (v->type == RAY_LIST) return 32 + (size_t)ray_len(v) * sizeof(ray_t*);
-    /* TABLE stores schema slot + ncols column pointers */
-    if (v->type == RAY_TABLE) return 32 + (size_t)(ray_len(v) + 1) * sizeof(ray_t*);
+    /* TABLE / DICT: 2-pointer block [keys, vals] */
+    if (v->type == RAY_TABLE || v->type == RAY_DICT) return 32 + 2 * sizeof(ray_t*);
     /* RAY_SEL: variable layout — meta + seg_flags + seg_popcnt + bits */
     if (v->type == RAY_SEL) {
         int64_t nrows = ray_len(v);

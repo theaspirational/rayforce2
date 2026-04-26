@@ -239,7 +239,7 @@
       </table>
 
       <div class="info-box">
-        <strong>Null handling:</strong> Nulls are tracked via a per-element bitmap, not sentinel values in the data array. Typed null literals (<code>0Nl</code>, <code>0Ni</code>, <code>0Nf</code>, <code>0Nd</code>, <code>0Nt</code>, <code>0Np</code>, <code>0Ns</code>) create atoms of the correct type with the null bit set &mdash; the value field is zeroed. Use <code>nil?</code> to test for null. Types without a dedicated null literal (BOOL, U8, I16, F32, GUID) use the null bitmap directly.
+        <strong>Null handling:</strong> Nulls are tracked via a per-element bitmap, not sentinel values in the data array. Typed null literals parseable in source (<code>0Nh</code>, <code>0Ni</code>, <code>0Nl</code>, <code>0Nf</code>, <code>0Nd</code>, <code>0Nt</code>, <code>0Np</code>, <code>0Ns</code>) create atoms of the correct type with the null bit set &mdash; the value field is zeroed.  Types without a parseable literal (BOOL/U8/F32/STR/GUID) still render as their canonical null form (<code>0Nb</code>/<code>0Nu</code>/<code>0Ne</code>/<code>0Nc</code>/<code>0Ng</code>) when the bitmap flags them.  Use <code>nil?</code> to test for null.
       </div>
 
       <div class="info-box">
@@ -309,11 +309,6 @@
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td><code>RAY_ATTR_DICT</code></td>
-            <td><code>0x02</code></td>
-            <td>List is a dictionary (key-value pairs)</td>
-          </tr>
           <tr>
             <td><code>RAY_ATTR_SLICE</code></td>
             <td><code>0x10</code></td>
@@ -405,7 +400,7 @@
 09:31:00.000</code></pre>
 
       <h3>RAY_TIMESTAMP</h3>
-      <p>Stored as a 64-bit signed integer counting <strong>nanoseconds since 2000-01-01</strong> (the kdb+ convention — matches the CSV loader's parser and the runtime's arithmetic lifts). Nanosecond precision covers roughly the range 1707 &ndash; 2292.</p>
+      <p>Stored as a 64-bit signed integer counting <strong>nanoseconds since 2000-01-01</strong> (the Rayforce epoch — matches the CSV loader.s parser and the runtime.s arithmetic lifts). Nanosecond precision covers roughly the range 1707 &ndash; 2292.</p>
       <pre><code><span class="hl-comment">ray&gt;</span> <span class="hl-num">2024.01.15D09:30:00.000000000</span>
 2024.01.15D09:30:00.000000000</code></pre>
 
