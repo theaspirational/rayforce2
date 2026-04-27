@@ -19,6 +19,21 @@
 (alter 'tv2i set "bad" 100) !- type
 (.idx.has? tv2i)        -- true
 
+;; alter set on a vec shared between multiple env bindings must NOT
+;; mutate or under-retain the other holders.  Pre-fix, ray_cow's
+;; release would over-decrement the borrowed env ref and either
+;; leak (rc>1 path, copy not released on error) or UAF (env's other
+;; binding stale-pointer).  Pin the visible-state contract: the
+;; non-mutated binding sees the original values, the mutated one
+;; sees the new values.
+(set sv [5 1 9 3 7])
+(set sa sv)
+(set sb sv)
+(alter 'sa set 0 100)
+sa                       -- [100 1 9 3 7]
+sb                       -- [5 1 9 3 7]
+sv                       -- [5 1 9 3 7]
+
 (set custs (table [id age name] (list [100 200 300] [18 25 42] (list 'alice 'bob 'carol))))
 
 ;; Build the link from raw row ids.

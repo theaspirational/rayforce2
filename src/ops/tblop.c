@@ -605,14 +605,23 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
             return new_list;
         }
 
-        /* COW if shared (typed vectors only).  Track whether cow
-         * actually allocated a copy — if so, every error path below
-         * must release `var` before returning, otherwise the copy
-         * (which only this scope owns) leaks. */
-        ray_t* original_var = var;
+        /* `var` came from ray_env_get as a BORROWED ref.  ray_cow's
+         * contract is "I take your owning ref; I give you back a ref"
+         * — so calling it on a borrow over-decrements the env's
+         * binding when the rc>1 copy path fires (releasing v drops
+         * env's count from N to N-1; if some other env binding also
+         * pointed at v, that binding now sees an extra under-retain
+         * and risks UAF when later replaced).
+         *
+         * Retain up-front so the ref we hand to ray_cow is genuinely
+         * ours.  ray_cow's release on the copy path then balances
+         * our retain; the rc==1 path leaves rc bumped by 1, which we
+         * release symmetrically below.  Every error path also
+         * releases `var` so neither the original nor a fresh copy
+         * leaks. */
+        ray_retain(var);
         var = ray_cow(var);
         if (RAY_IS_ERR(var)) { ray_release(idx); ray_release(val); ray_release(name_sym); return var; }
-        bool var_is_owned_copy = (var != original_var);
 
         /* Validate idx shape + (for the atom case) bounds BEFORE we
          * touch any state.  The accelerator-index drop below would
@@ -620,14 +629,14 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         bool idx_is_atom_num = ray_is_atom(idx) && is_numeric(idx);
         bool idx_is_vec      = ray_is_vec(idx);
         if (!idx_is_atom_num && !idx_is_vec) {
-            if (var_is_owned_copy) ray_release(var);
+            ray_release(var);
             ray_release(idx); ray_release(val); ray_release(name_sym);
             return ray_error("type", NULL);
         }
         if (idx_is_atom_num) {
             int64_t i_check = as_i64(idx);
             if (i_check < 0 || i_check >= var->len) {
-                if (var_is_owned_copy) ray_release(var);
+                ray_release(var);
                 ray_release(idx); ray_release(val); ray_release(name_sym);
                 return ray_error("index", NULL);
             }
@@ -640,7 +649,7 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         if (var->attrs & RAY_ATTR_HAS_INDEX) {
             ray_t* drop_r = ray_index_drop(&var);
             if (RAY_IS_ERR(drop_r)) {
-                if (var_is_owned_copy) ray_release(var);
+                ray_release(var);
                 ray_release(idx); ray_release(val); ray_release(name_sym);
                 return drop_r;
             }
@@ -677,7 +686,10 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         ray_release(val);
         ray_env_set(name_sym->i64, var);
         ray_release(name_sym);
-        ray_retain(var);
+        /* The retain-first at the top of the set path gave us an owning
+         * ref to var.  ray_env_set already retained for the env binding;
+         * transferring our existing ref to the caller via return is
+         * correct.  No additional ray_retain here. */
         return var;
     }
     if (olen == 6 && memcmp(oname, "concat", 6) == 0) {
