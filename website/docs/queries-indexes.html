@@ -208,7 +208,13 @@
       </table>
 
       <h3>Mutation Drops the Index</h3>
-      <p>Any in-place write to the column &mdash; <code>(set v i x)</code>, <code>(insert v i)</code>, mutating <code>(set-null v i)</code> &mdash; invalidates the attached index.  The mutator paths drop the index transparently, restore the original nullmap bytes, and proceed with the write.  Subsequent queries see the column as un-indexed; rebuild explicitly if you still want acceleration.</p>
+      <p>The Rayfall in-place mutators &mdash; <code>(insert 'v val)</code> for append and <code>(alter 'v set i val)</code> / <code>(alter 'v concat val)</code> for set / append &mdash; invalidate the attached index.  The mutator paths drop the index transparently, restore the original nullmap bytes, and proceed with the write.  Subsequent queries see the column as un-indexed; rebuild explicitly if you still want acceleration.</p>
+
+      <pre><code>(<span class="hl-kw">set</span> v [<span class="hl-num">5</span> <span class="hl-num">1</span> <span class="hl-num">9</span> <span class="hl-num">3</span> <span class="hl-num">7</span>])
+(<span class="hl-kw">set</span> vz (<span class="hl-fn">.idx.zone</span> v))
+(<span class="hl-fn">.idx.has?</span> vz)              <span class="hl-comment">; ⇒ true</span>
+(<span class="hl-fn">alter</span> <span class="hl-sym">'vz</span> <span class="hl-sym">set</span> <span class="hl-num">0</span> <span class="hl-num">100</span>)
+(<span class="hl-fn">.idx.has?</span> vz)              <span class="hl-comment">; ⇒ false</span></code></pre>
 
       <h3>Coexistence with Linked Columns</h3>
       <p>An accelerator index uses bytes 0&ndash;7 of the column's <a href="https://github.com/RayforceDB/rayforce2/blob/master/include/rayforce.h">nullmap union</a>; a <a href="queries-links.html">linked column</a> uses bytes 8&ndash;15.  The two flags &mdash; <code>RAY_ATTR_HAS_INDEX = 0x08</code> and <code>RAY_ATTR_HAS_LINK = 0x04</code> &mdash; are independent and a column can carry both.  Dereferencing through a link still works on an indexed column; dropping the index leaves the link intact and vice versa.</p>

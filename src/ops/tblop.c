@@ -28,6 +28,7 @@
 #include "ops/ops.h"
 #include "ops/internal.h"
 #include "ops/hash.h"
+#include "ops/idxop.h"
 #include "table/sym.h"
 #include "mem/heap.h"
 #include <stdio.h>
@@ -607,6 +608,17 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         /* COW if shared (typed vectors only) */
         var = ray_cow(var);
         if (RAY_IS_ERR(var)) { ray_release(idx); ray_release(val); ray_release(name_sym); return var; }
+
+        /* alter's set path writes via store_typed_elem, which bypasses
+         * ray_vec_set's mutation guard.  Drop any attached accelerator
+         * index explicitly so a stale index doesn't outlive the write. */
+        if (var->attrs & RAY_ATTR_HAS_INDEX) {
+            ray_t* drop_r = ray_index_drop(&var);
+            if (RAY_IS_ERR(drop_r)) {
+                ray_release(idx); ray_release(val); ray_release(name_sym);
+                return drop_r;
+            }
+        }
 
         if (ray_is_atom(idx) && is_numeric(idx)) {
             /* Single index */

@@ -1,5 +1,14 @@
 ;; Linked columns — (.col.link target int-vec) + dotted deref.
 
+;; alter set on an indexed column must drop the attached index
+;; (the alter set path bypasses ray_vec_set's mutation guard, so the
+;; idxop layer needs an explicit drop).
+(set tv [5 1 9 3 7])
+(set tvi (.idx.zone tv))
+(.idx.has? tvi)         -- true
+(alter 'tvi set 0 100)
+(.idx.has? tvi)         -- false
+
 (set custs (table [id age name] (list [100 200 300] [18 25 42] (list 'alice 'bob 'carol))))
 
 ;; Build the link from raw row ids.
