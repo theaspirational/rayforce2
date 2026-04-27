@@ -153,30 +153,45 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     int64_t target_n = target_col->len;
     int8_t  out_type = target_col->type;
 
-    /* Allocate result.  RAY_SYM needs the target's width attrs so
-     * element copying below stays width-correct. */
+    /* Resolve through slices: SYM-width and (later) sym_dict / str_pool
+     * all live on the slice_parent's attrs/union, never on the slice
+     * itself.  The slice contributes only its [slice_offset, len) view.
+     * Compute the canonical width and base-pointer once here so the
+     * gather loop stays correct for narrow-width sliced sym columns. */
+    ray_t* col_owner = (target_col->attrs & RAY_ATTR_SLICE)
+                       ? target_col->slice_parent : target_col;
+    int64_t col_off  = (target_col->attrs & RAY_ATTR_SLICE)
+                       ? target_col->slice_offset : 0;
+    uint8_t target_width = col_owner->attrs & RAY_SYM_W_MASK;
+    uint8_t target_esz   = (out_type == RAY_SYM)
+                           ? (uint8_t)(1u << target_width)
+                           : ray_sym_elem_size(out_type, col_owner->attrs);
+
+    /* Allocate result.  For RAY_SYM mirror the parent's width so the
+     * subsequent memcpy is byte-correct; otherwise the canonical size
+     * for the type. */
     ray_t* result;
     if (out_type == RAY_SYM) {
-        result = ray_sym_vec_new(target_col->attrs & RAY_SYM_W_MASK, n);
+        result = ray_sym_vec_new(target_width, n);
     } else {
         result = ray_vec_new(out_type, n);
     }
     if (!result || RAY_IS_ERR(result)) return result;
     result->len = n;
 
-    /* Element size for the result and the target match by construction:
-     * for RAY_SYM we mirrored the width above; for everything else
-     * ray_vec_new gives the canonical size for the type. */
     uint8_t out_esz = ray_sym_elem_size(out_type, result->attrs);
     if (out_esz > 0) memset(ray_data(result), 0, (size_t)n * out_esz);
+    /* By construction, out_esz == target_esz: SYM widths match,
+     * STR is always 16, numeric types match because out_type == target. */
 
     const uint8_t* link_base = (const uint8_t*)ray_data(v);
     uint8_t link_esz = ray_sym_elem_size(v->type, v->attrs);
     char* out_base = (char*)ray_data(result);
-    /* target_esz must equal out_esz for memcpy correctness — see SYM
-     * width matching above; STR is always 16 bytes; numeric types match
-     * by definition since out_type == target_col->type. */
-    uint8_t target_esz = ray_sym_elem_size(out_type, target_col->attrs);
+    /* Compute the source-data base by hand (not via ray_data on the
+     * slice) because ray_data_fn assumes ray_type_sizes[RAY_SYM] = 8
+     * (W64), which mis-offsets narrow-width sliced sym columns. */
+    const char* col_data_base = (const char*)ray_data(col_owner);
+    const char* tgt_base      = col_data_base + (size_t)col_off * target_esz;
 
     for (int64_t i = 0; i < n; i++) {
         if (ray_vec_is_null(v, i)) {
@@ -199,9 +214,9 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
             ray_vec_set_null(result, i, true);
             continue;
         }
-        if (target_esz > 0 && out_esz > 0 && target_esz == out_esz) {
+        if (target_esz > 0 && out_esz == target_esz) {
             memcpy(out_base + i * out_esz,
-                   (const char*)ray_data(target_col) + rid * target_esz,
+                   tgt_base + rid * target_esz,
                    target_esz);
         }
     }
@@ -217,14 +232,12 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     if (out_type == RAY_STR) {
         col_propagate_str_pool(result, target_col);
     } else if (out_type == RAY_SYM) {
-        const ray_t* dict_owner = (target_col->attrs & RAY_ATTR_SLICE)
-                                  ? target_col->slice_parent : target_col;
-        if (dict_owner && !(dict_owner->attrs & RAY_ATTR_SLICE) &&
-            (!(dict_owner->attrs & RAY_ATTR_HAS_NULLS) ||
-             (dict_owner->attrs & RAY_ATTR_NULLMAP_EXT)) &&
-            dict_owner->sym_dict) {
-            ray_retain(dict_owner->sym_dict);
-            result->sym_dict = dict_owner->sym_dict;
+        if (col_owner && !(col_owner->attrs & RAY_ATTR_SLICE) &&
+            (!(col_owner->attrs & RAY_ATTR_HAS_NULLS) ||
+             (col_owner->attrs & RAY_ATTR_NULLMAP_EXT)) &&
+            col_owner->sym_dict) {
+            ray_retain(col_owner->sym_dict);
+            result->sym_dict = col_owner->sym_dict;
         }
     }
     return result;

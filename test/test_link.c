@@ -483,6 +483,73 @@ static test_result_t test_link_deref_str_target(void) {
     PASS();
 }
 
+/* ─── Slice + narrow-width sym target ────────────────────────────── */
+
+static test_result_t test_link_deref_sym_slice_w8(void) {
+    /* Build a narrow W8 sym column with 4 rows, then place a slice of
+     * the last 3 rows into the table.  Without slice-aware width
+     * resolution, the deref reads slice attrs (which carry W_MASK = 0
+     * = W8) AND ray_data() multiplies slice_offset by 8 (W64 default
+     * in ray_type_sizes), giving a misaligned base.  This test catches
+     * both errors. */
+    int64_t s_a = ray_sym_intern("aa", 2);
+    int64_t s_b = ray_sym_intern("bb", 2);
+    int64_t s_c = ray_sym_intern("cc", 2);
+    int64_t s_d = ray_sym_intern("dd", 2);
+
+    /* W8 sym vec: ['aa, 'bb, 'cc, 'dd] but stored as 1-byte indices.
+     * ray_sym_vec_new + ray_vec_append handles the width-narrow path. */
+    ray_t* full = ray_sym_vec_new(RAY_SYM_W8, 4);
+    full = ray_vec_append(full, &s_a);
+    full = ray_vec_append(full, &s_b);
+    full = ray_vec_append(full, &s_c);
+    full = ray_vec_append(full, &s_d);
+    TEST_ASSERT_EQ_U((unsigned)(full->attrs & RAY_SYM_W_MASK), RAY_SYM_W8);
+
+    /* Slice to rows [1..4): ['bb, 'cc, 'dd]. */
+    ray_t* slice = ray_vec_slice(full, 1, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(slice));
+    TEST_ASSERT_TRUE(slice->attrs & RAY_ATTR_SLICE);
+
+    /* Build target table with the SLICE as the 'name' column. */
+    int64_t ids[]  = { 100, 200, 300 };
+    ray_t* idcol = make_i64_vec(ids, 3);
+    ray_t* tab = ray_table_new(2);
+    tab = ray_table_add_col(tab, ray_sym_intern("id",   2), idcol);
+    tab = ray_table_add_col(tab, ray_sym_intern("name", 4), slice);
+    ray_release(idcol);
+    ray_release(slice);
+    ray_release(full);
+
+    int64_t custs_sym = ray_sym_intern("custs", 5);
+    ray_env_set(custs_sym, tab);
+    ray_release(tab);
+
+    /* Link: rids point at the slice (not the full vec). */
+    int64_t rids[] = { 0, 2, 1 };
+    ray_t* v = make_i64_vec(rids, 3);
+    ray_t* w = v;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_link_attach(&w, custs_sym)));
+
+    int64_t name_sym = ray_sym_intern("name", 4);
+    ray_t* result = ray_link_deref(w, name_sym);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_SYM);
+    /* Result width must mirror the slice's parent width. */
+    TEST_ASSERT_EQ_U((unsigned)(result->attrs & RAY_SYM_W_MASK), RAY_SYM_W8);
+
+    /* Read elements back through ray_vec_get, which is width-aware,
+     * and intern-compare with the expected names. */
+    uint8_t* d = (uint8_t*)ray_data(result);
+    TEST_ASSERT_EQ_U(d[0], (uint8_t)s_b);  /* slice[0] = parent[1] = 'bb */
+    TEST_ASSERT_EQ_U(d[1], (uint8_t)s_d);  /* slice[2] = parent[3] = 'dd */
+    TEST_ASSERT_EQ_U(d[2], (uint8_t)s_c);  /* slice[1] = parent[2] = 'cc */
+
+    ray_release(result);
+    ray_release(w);
+    PASS();
+}
+
 /* ─── Phase 4: coexistence with HAS_INDEX ─────────────────────────── */
 
 static test_result_t test_link_coexists_with_index(void) {
@@ -541,5 +608,6 @@ const test_entry_t link_entries[] = {
     { "link/deref_no_target_leak",           test_link_deref_no_target_leak,          link_setup, link_teardown },
     { "link/deref_sym_target",               test_link_deref_sym_target,              link_setup, link_teardown },
     { "link/deref_str_target",               test_link_deref_str_target,              link_setup, link_teardown },
+    { "link/deref_sym_slice_w8",             test_link_deref_sym_slice_w8,            link_setup, link_teardown },
     { NULL, NULL, NULL, NULL },
 };
