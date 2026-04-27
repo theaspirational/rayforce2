@@ -31,6 +31,7 @@
 #include "ops/temporal.h"
 #include "ops/datalog.h"
 #include "ops/idxop.h"
+#include "ops/linkop.h"
 #include "table/sym.h"
 #include "core/profile.h"
 #include "table/sym.h"
@@ -2286,6 +2287,12 @@ static void ray_register_builtins(void) {
     register_unary (".idx.drop",   RAY_FN_NONE, ray_idx_drop_fn);
     register_unary (".idx.has?",   RAY_FN_NONE, ray_idx_has_fn);
     register_unary (".idx.info",   RAY_FN_NONE, ray_idx_info_fn);
+
+    /* Linked columns (see src/ops/linkop.h) */
+    register_binary(".col.link",   RAY_FN_NONE, ray_col_link_fn);
+    register_unary (".col.unlink", RAY_FN_NONE, ray_col_unlink_fn);
+    register_unary (".col.link?",  RAY_FN_NONE, ray_col_link_p_fn);
+    register_unary (".col.target", RAY_FN_NONE, ray_col_target_fn);
 }
 
 /* ══════════════════════════════════════════

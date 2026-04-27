@@ -123,6 +123,12 @@ typedef union ray_t {
              * carrying both the accelerator payload and the saved nullmap
              * bytes.  _idx_pad is reserved (must be NULL).  See ops/idxop.h. */
             struct { union ray_t* index;        union ray_t* _idx_pad; };
+            /* RAY_ATTR_HAS_LINK (vectors, RAY_I32/RAY_I64 only): bytes 8-15
+             * hold an int64 sym ID naming the target table.  link_lo[8]
+             * aliases bytes 0-7 (inline nullmap bits OR ext_nullmap pointer
+             * OR HAS_INDEX index pointer, depending on the other arm in use).
+             * See ops/linkop.h. */
+            struct { uint8_t link_lo[8];        int64_t link_target; };
         };
         /* Bytes 16-31: metadata + value */
         uint8_t  mmod;       /* 0=heap, 1=file-mmap */

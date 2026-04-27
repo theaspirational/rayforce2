@@ -75,6 +75,23 @@
  * Checked by HNSW builtins before dereferencing.  User must (hnsw-free h). */
 #define RAY_ATTR_HNSW         0x04
 
+/* Vector is a linked column.  The 8 bytes of the nullmap union at offset
+ * 8 (i.e. parent->_idx_pad / parent->slice_offset / parent->sym_dict /
+ * parent->str_pool slot, depending on which arm is in use) hold an int64
+ * sym ID naming the target table.  Resolved against the global env at
+ * deref time.  Restricted to RAY_I32 / RAY_I64 vectors — STR/SYM/SLICE
+ * already use bytes 8-15 for their own pointers/data so HAS_LINK on
+ * those types would alias.
+ *
+ * Coexists with HAS_INDEX: bytes 0-7 carry the index pointer (or saved
+ * nullmap), bytes 8-15 carry the link sym; both bits can be set on the
+ * same column.  A linked vec with nulls is forced to RAY_ATTR_NULLMAP_EXT
+ * because the inline 128-bit bitmap would alias the link-target slot.
+ *
+ * Same numeric value as RAY_ATTR_HNSW (HNSW handles are -RAY_I64 atoms,
+ * the type tag disambiguates). */
+#define RAY_ATTR_HAS_LINK     0x04
+
 /* Vector carries an attached accelerator index in nullmap[0..7] (a ray_t*
  * of type RAY_INDEX).  The original 16-byte nullmap union content (inline
  * bitmap, ext_nullmap, str_ext_null/str_pool, sym_dict) is preserved inside

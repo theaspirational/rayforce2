@@ -494,6 +494,16 @@ ray_err_t ray_col_save(ray_t* vec, const char* path) {
             memcpy(header.nullmap, ix->saved_nullmap, 16);
         }
 
+        /* HAS_LINK rebase: target sym ID lives at header.nullmap[8..15],
+         * but sym IDs are process-local — the on-disk file would be
+         * useless across runs.  Strip the bit and zero the slot; the
+         * sidecar `.link` file (written below after rename) carries the
+         * target table name in text form for portable restoration. */
+        if (vec->attrs & RAY_ATTR_HAS_LINK) {
+            header.attrs &= (uint8_t)~RAY_ATTR_HAS_LINK;
+            memset(header.nullmap + 8, 0, 8);
+        }
+
         /* Clear slice field; preserve ext_nullmap flag for bitmap append */
         header.attrs &= ~RAY_ATTR_SLICE;
         if (!(header.attrs & RAY_ATTR_HAS_NULLS)) {
@@ -564,6 +574,44 @@ fsync_and_rename:;
     /* Atomic rename: tmp -> final path */
     err = ray_file_rename(tmp_path, path);
     if (err != RAY_OK) { remove(tmp_path); return err; }
+
+    /* Linked-column sidecar: write `<path>.link` containing the target
+     * table's sym name (text form) so it survives the per-process
+     * sym-ID re-assignment.  Remove any stale `.link` from a previous
+     * save when the current vec is unlinked. */
+    {
+        char link_path[1024];
+        size_t plen = strlen(path);
+        if (plen + 6 < sizeof(link_path)) {
+            memcpy(link_path, path, plen);
+            memcpy(link_path + plen, ".link", 6);
+            if (vec->attrs & RAY_ATTR_HAS_LINK) {
+                ray_t* sym_str = ray_sym_str(vec->link_target);
+                const char* sp = sym_str ? ray_str_ptr(sym_str) : NULL;
+                size_t slen = sym_str ? ray_str_len(sym_str) : 0;
+                if (sp && slen > 0) {
+                    char tmp_link[1024];
+                    memcpy(tmp_link, link_path, plen + 6);
+                    if (plen + 10 < sizeof(tmp_link)) {
+                        memcpy(tmp_link + plen + 5, ".tmp", 5);
+                        FILE* lf = fopen(tmp_link, "wb");
+                        if (lf) {
+                            size_t wrote = fwrite(sp, 1, slen, lf);
+                            fclose(lf);
+                            if (wrote == slen) {
+                                ray_file_rename(tmp_link, link_path);
+                            } else {
+                                remove(tmp_link);
+                            }
+                        }
+                    }
+                }
+            } else {
+                /* No link on this column — clean stale sidecar if any. */
+                remove(link_path);
+            }
+        }
+    }
 
     return RAY_OK;
 }
@@ -746,6 +794,36 @@ ray_t* ray_col_load(const char* path) {
         if (sym_err != RAY_OK) {
             ray_release(vec);
             return ray_error(ray_err_code_str(sym_err), NULL);
+        }
+    }
+
+    /* Linked-column sidecar: if `<path>.link` exists and the column is
+     * RAY_I32/RAY_I64, intern the target name into the local sym table
+     * and reattach HAS_LINK + link_target.  Failure to read the sidecar
+     * is non-fatal — the column loads as a plain int vec. */
+    if ((vec->type == RAY_I32 || vec->type == RAY_I64)) {
+        char link_path[1024];
+        size_t plen = strlen(path);
+        if (plen + 6 < sizeof(link_path)) {
+            memcpy(link_path, path, plen);
+            memcpy(link_path + plen, ".link", 6);
+            FILE* lf = fopen(link_path, "rb");
+            if (lf) {
+                char buf[256];
+                size_t n = fread(buf, 1, sizeof(buf) - 1, lf);
+                fclose(lf);
+                /* Trim trailing whitespace / NUL. */
+                while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r'
+                              || buf[n-1] == ' '  || buf[n-1] == '\t'
+                              || buf[n-1] == '\0')) n--;
+                if (n > 0) {
+                    int64_t target_sym = ray_sym_intern(buf, n);
+                    if (target_sym >= 0) {
+                        vec->link_target = target_sym;
+                        vec->attrs |= RAY_ATTR_HAS_LINK;
+                    }
+                }
+            }
         }
     }
 

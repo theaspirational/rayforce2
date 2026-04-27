@@ -326,9 +326,11 @@ static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
     memcpy(ix->saved_nullmap, parent->nullmap, 16);
     ix->saved_attrs = parent->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_NULLMAP_EXT);
 
-    /* Install the index pointer — overwrites the same 16 bytes we just copied. */
+    /* Install the index pointer — overwrites bytes 0-7 with the index ptr.
+     * Bytes 8-15 carry link_target when HAS_LINK is set; preserve them.
+     * Otherwise zero _idx_pad as a tidy default. */
     parent->index    = idx;
-    parent->_idx_pad = NULL;
+    if (!(parent->attrs & RAY_ATTR_HAS_LINK)) parent->_idx_pad = NULL;
     parent->attrs   |= RAY_ATTR_HAS_INDEX;
     /* Clear NULLMAP_EXT on the parent: vec->ext_nullmap is now the index
      * pointer, not a U8 nullmap vec, so naive readers that gate on

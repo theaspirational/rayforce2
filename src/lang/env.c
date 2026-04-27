@@ -25,6 +25,7 @@
 #include "table/sym.h"
 #include "table/dict.h"
 #include "ops/temporal.h"
+#include "ops/linkop.h"
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -197,11 +198,23 @@ ray_t* ray_env_resolve(int64_t sym_id) {
     bool   fresh = false;
 
     for (int i = 1; v && i < n; i++) {
-        ray_t* next = ray_container_probe_sym(v, segs[i]);
+        ray_t* next = NULL;
+        bool   next_fresh = false;
+        /* Linked column: deref segs[i] as a target field name (returns
+         * a fresh owning result, columns the same length as v). */
+        if (ray_link_has(v)) {
+            next = ray_link_deref(v, segs[i]);
+            if (next && RAY_IS_ERR(next)) {
+                if (fresh) ray_release(v);
+                return NULL;
+            }
+            next_fresh = (next != NULL);
+        }
+        if (!next) next = ray_container_probe_sym(v, segs[i]);
         if (next) {
             if (fresh) ray_release(v);
             v = next;
-            fresh = false;
+            fresh = next_fresh;
             continue;
         }
 

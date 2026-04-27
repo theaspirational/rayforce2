@@ -860,10 +860,13 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
     if (is_null && vec->type != RAY_STR) vec->attrs |= RAY_ATTR_HAS_NULLS;
 
     if (!(vec->attrs & RAY_ATTR_NULLMAP_EXT)) {
-        /* RAY_STR uses bytes 8-15 for str_pool — must skip inline nullmap
-         * and promote to external immediately to avoid aliasing corruption */
-        if (vec->type != RAY_STR && idx < 128) {
-            /* Inline nullmap path (<=128 elements, non-STR types) */
+        /* RAY_STR uses bytes 8-15 for str_pool, HAS_LINK uses bytes 8-15 for
+         * link_target — both must skip the inline-128 path to avoid
+         * aliasing corruption.  Otherwise <=128 elements go inline. */
+        bool can_inline = (vec->type != RAY_STR) && idx < 128 &&
+                          !(vec->attrs & RAY_ATTR_HAS_LINK);
+        if (can_inline) {
+            /* Inline nullmap path (<=128 elements, non-STR, non-linked) */
             int byte_idx = (int)(idx / 8);
             int bit_idx = (int)(idx % 8);
             if (is_null)
@@ -877,8 +880,11 @@ ray_err_t ray_vec_set_null_checked(ray_t* vec, int64_t idx, bool is_null) {
         ray_t* ext = ray_vec_new(RAY_U8, bitmap_len);
         if (!ext || RAY_IS_ERR(ext)) return RAY_ERR_OOM;
         ext->len = bitmap_len;
-        if (vec->type == RAY_STR) {
-            /* RAY_STR: nullmap bytes contain str_ext_null/str_pool, not bits */
+        if (vec->type == RAY_STR || (vec->attrs & RAY_ATTR_HAS_LINK)) {
+            /* Bytes 0-15 contain pointers/sym, not bits — start ext zeroed.
+             * (Linked vecs reach here only when adding their first null,
+             *  since promote_inline_to_ext in linkop.c covers the
+             *  pre-existing-nulls case at attach time.) */
             memset(ray_data(ext), 0, (size_t)bitmap_len);
         } else {
             /* Copy existing inline bits */
