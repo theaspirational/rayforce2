@@ -44,6 +44,15 @@ extern void      ray_lang_destroy(void);
 ray_runtime_t *__RUNTIME = NULL;
 _Thread_local ray_vm_t *__VM = NULL;
 
+/* Persistent error message buffer.
+ *
+ * `__VM->err.msg` lives inside the VM struct, which is freed at the end of
+ * every eval (eval.c sets __VM = NULL right after `ray_free(vm_block)`). By
+ * the time the FFI caller reaches `ray_error_msg()`, the VM is gone. Stash a
+ * copy in a thread-local buffer that outlives the VM so callers can still
+ * read what went wrong. */
+static _Thread_local char ray_last_err_msg[256] = {0};
+
 /* Static null singleton — type RAY_NULL, ARENA flag makes retain/release no-ops */
 ray_t __ray_null = { .type = RAY_NULL, .attrs = RAY_ATTR_ARENA, .rc = 0, .len = 0 };
 
@@ -107,10 +116,14 @@ static ray_t* ray_verror(const char* code, const char* fmt, va_list ap) {
         memcpy(err->sdata, code, len);
         err->slen = (uint8_t)len;
     }
-    if (__VM && fmt) {
-        vsnprintf(__VM->err.msg, sizeof(__VM->err.msg), fmt, ap);
-    } else if (__VM) {
-        __VM->err.msg[0] = '\0';
+    if (fmt) {
+        vsnprintf(ray_last_err_msg, sizeof(ray_last_err_msg), fmt, ap);
+        if (__VM) {
+            memcpy(__VM->err.msg, ray_last_err_msg, sizeof(__VM->err.msg));
+        }
+    } else {
+        ray_last_err_msg[0] = '\0';
+        if (__VM) __VM->err.msg[0] = '\0';
     }
     return err;
 }
@@ -135,6 +148,7 @@ ray_t* ray_error(const char* code, const char* fmt, ...) {
         memcpy(err->sdata, code, len);
         err->slen = (uint8_t)len;
     }
+    ray_last_err_msg[0] = '\0';
     if (__VM) __VM->err.msg[0] = '\0';
     return err;
 }
@@ -164,11 +178,12 @@ const char* ray_err_code(ray_t* err) {
 }
 
 const char* ray_error_msg(void) {
-    if (!__VM || !__VM->err.msg[0]) return NULL;
-    return __VM->err.msg;
+    if (!ray_last_err_msg[0]) return NULL;
+    return ray_last_err_msg;
 }
 
 void ray_error_clear(void) {
+    ray_last_err_msg[0] = '\0';
     if (__VM) __VM->err.msg[0] = '\0';
 }
 
