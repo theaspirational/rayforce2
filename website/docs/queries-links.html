@@ -184,7 +184,7 @@ orders.cust.id         <span class="hl-comment">; ⇒ [100 300 200 100]</span></
       <p>Each dotted-field deref allocates one fresh column and gathers values once.  The cost is one allocation + <em>n</em> indirect reads, regardless of target field type &mdash; no hash probe, no string comparison.  Compared to expressing the same query as an <code>inner-join</code> on the customer ID, the linked-column form skips the hash-table build entirely.</p>
 
       <div class="info-box">
-        <strong>Direct dotted access inside <code>select</code> / <code>where</code> clauses is not yet wired.</strong>  Today, you resolve the linked column at the top level (<code>orders.cust.name</code>) or with <code>(at orders 'cust)</code> + <code>.field</code> on the result, and pass that bound name into the query.  Wiring dotted-deref through the select compiler is a follow-up.
+        <strong>Dotted access inside <code>select</code> / <code>where</code> clauses is not yet wired.</strong>  The select compiler resolves column expressions against the table's schema, not the global env, so <code>cust.name</code> as a projection or predicate clause does not lower to a link deref &mdash; the query errors with <em>"WHERE predicate not supported by DAG compiler"</em>.  Today's workflow is to resolve the linked column at the top level (<code>orders.cust.name</code> or <code>(set c (at orders 'cust))</code> then <code>c.name</code>), <code>(set names …)</code> the result, and pass the bound name into the query.  Wiring dotted-deref through the select compiler is a follow-up.
       </div>
 
       <h3>Null Propagation</h3>
