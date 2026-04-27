@@ -143,7 +143,13 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     if (!ray_link_has(v)) return NULL;
     if (v->type != RAY_I32 && v->type != RAY_I64) return NULL;
 
-    ray_t* target_tab = ray_env_get(v->link_target);
+    /* Slice-through: a slice over a linked parent inherits the link.
+     * link_target lives on the parent; the slice's own bytes 8-15 are
+     * slice_offset, which would be garbage if we read it as a sym ID. */
+    int64_t target_sym = (v->attrs & RAY_ATTR_SLICE)
+                         ? v->slice_parent->link_target
+                         : v->link_target;
+    ray_t* target_tab = ray_env_get(target_sym);
     if (!target_tab || target_tab->type != RAY_TABLE) return NULL;
 
     ray_t* target_col = ray_table_get_col(target_tab, sym_id);

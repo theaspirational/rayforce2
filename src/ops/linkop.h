@@ -63,13 +63,26 @@ ray_t* ray_link_detach(ray_t** vp);
 
 /* ===== Introspection ===== */
 
+/* True iff `v` is a linked column or a slice of one.  Slices over a
+ * linked parent inherit the link transparently — the slice's own attrs
+ * carry RAY_ATTR_SLICE without HAS_LINK, but `link_target` lives on the
+ * parent and reading it through the slice is safe via slice_parent. */
 static inline bool ray_link_has(const ray_t* v) {
-    return v && !RAY_IS_ERR((ray_t*)v) && (v->attrs & RAY_ATTR_HAS_LINK);
+    if (!v || RAY_IS_ERR((ray_t*)v)) return false;
+    if (v->attrs & RAY_ATTR_HAS_LINK) return true;
+    if (v->attrs & RAY_ATTR_SLICE) {
+        const ray_t* p = v->slice_parent;
+        return p && (p->attrs & RAY_ATTR_HAS_LINK);
+    }
+    return false;
 }
 
-/* Returns the target sym ID (int64) or -1 if no link is attached. */
+/* Returns the target sym ID (int64) or -1 if no link is attached.
+ * Slice-aware: looks through to slice_parent->link_target. */
 static inline int64_t ray_link_target_id(const ray_t* v) {
-    return ray_link_has(v) ? v->link_target : (int64_t)-1;
+    if (!ray_link_has(v)) return (int64_t)-1;
+    if (v->attrs & RAY_ATTR_SLICE) return v->slice_parent->link_target;
+    return v->link_target;
 }
 
 /* ===== Resolution ===== */

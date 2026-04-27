@@ -483,6 +483,51 @@ static test_result_t test_link_deref_str_target(void) {
     PASS();
 }
 
+/* ─── Slice over a linked parent must inherit the link ───────────── */
+
+static test_result_t test_link_slice_inherits(void) {
+    /* Parent: 5 row-IDs into custs.  Slice rows [1..4) -> 3 rows. */
+    int64_t rids[] = { 0, 2, 1, 0, 2 };
+    ray_t* parent = make_i64_vec(rids, 5);
+
+    ray_t* target = build_target_table("custs");
+    int64_t custs_sym = ray_sym_intern("custs", 5);
+    ray_env_set(custs_sym, target);
+    ray_release(target);
+
+    ray_t* w = parent;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_link_attach(&w, custs_sym)));
+    TEST_ASSERT_TRUE(w->attrs & RAY_ATTR_HAS_LINK);
+
+    /* Slice rows 1..4 (rids 2, 1, 0). */
+    ray_t* slice = ray_vec_slice(w, 1, 3);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(slice));
+    TEST_ASSERT_TRUE(slice->attrs & RAY_ATTR_SLICE);
+    /* Slice's own attrs do NOT carry HAS_LINK — the bit is inherited
+     * transparently via slice_parent at deref time. */
+    TEST_ASSERT_FALSE(slice->attrs & RAY_ATTR_HAS_LINK);
+
+    /* But ray_link_has reaches through. */
+    TEST_ASSERT_TRUE(ray_link_has(slice));
+    TEST_ASSERT_EQ_I(ray_link_target_id(slice), custs_sym);
+
+    /* Deref must work and produce the right values for rids [2,1,0]. */
+    int64_t age_sym = ray_sym_intern("age", 3);
+    ray_t* result = ray_link_deref(slice, age_sym);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->len, 3);
+    int64_t* d = (int64_t*)ray_data(result);
+    /* target.age = [18, 25, 42]; rids[1..4] = [2, 1, 0]. */
+    TEST_ASSERT_EQ_I(d[0], 42);
+    TEST_ASSERT_EQ_I(d[1], 25);
+    TEST_ASSERT_EQ_I(d[2], 18);
+
+    ray_release(result);
+    ray_release(slice);
+    ray_release(w);
+    PASS();
+}
+
 /* ─── Empty link column ──────────────────────────────────────────── */
 
 static test_result_t test_link_deref_empty_link(void) {
@@ -692,5 +737,6 @@ const test_entry_t link_entries[] = {
     { "link/deref_empty_link",               test_link_deref_empty_link,              link_setup, link_teardown },
     { "link/deref_unknown_field",            test_link_deref_unknown_field,           link_setup, link_teardown },
     { "link/save_no_link_no_sidecar",        test_link_save_no_link_no_sidecar,       link_setup, link_teardown },
+    { "link/slice_inherits",                 test_link_slice_inherits,                link_setup, link_teardown },
     { NULL, NULL, NULL, NULL },
 };
