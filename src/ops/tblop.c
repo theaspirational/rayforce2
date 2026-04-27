@@ -621,10 +621,16 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         ray_t* original_var = var;
         ray_retain(var);
         ray_t* cow_result = ray_cow(var);
-        if (RAY_IS_ERR(cow_result)) {
+        /* ray_cow returns NULL when ray_alloc_copy returns NULL (heap
+         * exhaustion past RAY_HEAP_MAX_ORDER) and an error pointer
+         * when alloc_copy itself returned a RAY_ERROR.  Both leave
+         * the input ref untouched, so we must release `original_var`
+         * either way.  RAY_IS_ERR(NULL) is false — explicit NULL check
+         * required. */
+        if (!cow_result || RAY_IS_ERR(cow_result)) {
             ray_release(original_var);
             ray_release(idx); ray_release(val); ray_release(name_sym);
-            return cow_result;
+            return cow_result ? cow_result : ray_error("oom", NULL);
         }
         var = cow_result;
 
