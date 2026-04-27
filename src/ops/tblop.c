@@ -614,14 +614,19 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
          * and risks UAF when later replaced).
          *
          * Retain up-front so the ref we hand to ray_cow is genuinely
-         * ours.  ray_cow's release on the copy path then balances
-         * our retain; the rc==1 path leaves rc bumped by 1, which we
-         * release symmetrically below.  Every error path also
-         * releases `var` so neither the original nor a fresh copy
-         * leaks. */
+         * ours.  Track the original pointer so the cow-OOM path
+         * (alloc_copy fails before ray_cow's release would have run)
+         * can still release the retain — without that, OOM leaks the
+         * extra ref. */
+        ray_t* original_var = var;
         ray_retain(var);
-        var = ray_cow(var);
-        if (RAY_IS_ERR(var)) { ray_release(idx); ray_release(val); ray_release(name_sym); return var; }
+        ray_t* cow_result = ray_cow(var);
+        if (RAY_IS_ERR(cow_result)) {
+            ray_release(original_var);
+            ray_release(idx); ray_release(val); ray_release(name_sym);
+            return cow_result;
+        }
+        var = cow_result;
 
         /* Validate idx shape + (for the atom case) bounds BEFORE we
          * touch any state.  The accelerator-index drop below would
