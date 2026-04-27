@@ -159,8 +159,10 @@
           [<span class="hl-num">5</span>  <span class="hl-num">2</span>  <span class="hl-num">7</span>  <span class="hl-num">3</span>]
           [<span class="hl-num">0</span>  <span class="hl-num">2</span>  <span class="hl-num">1</span>  <span class="hl-num">0</span>])))
 
-<span class="hl-comment">; Tag the cust column as a link into customers, and write it back.</span>
-(<span class="hl-kw">set</span> orders (<span class="hl-fn">update</span> orders [(<span class="hl-fn">.col.link</span> <span class="hl-sym">'customers</span> (<span class="hl-fn">at</span> orders <span class="hl-sym">'cust</span>))] <span class="hl-sym">cust</span>))</code></pre>
+<span class="hl-comment">; Tag the cust column as a link.  In-place update via the dict form;</span>
+<span class="hl-comment">; from: 'orders means "modify the table bound to this symbol", and the</span>
+<span class="hl-comment">; right-hand side `cust` resolves to the existing column inside update.</span>
+(<span class="hl-fn">update</span> {<span class="hl-sym">from:</span> <span class="hl-sym">'orders</span> <span class="hl-sym">cust:</span> (<span class="hl-fn">.col.link</span> <span class="hl-sym">'customers</span> <span class="hl-sym">cust</span>)})</code></pre>
 
       <p><code>orders.cust</code> still reads as a column of integers <code>[0 2 1 0]</code> &mdash; the link is invisible to anything that doesn't ask for it.  But field-walks across the link now work transparently.</p>
 
@@ -168,19 +170,22 @@
       <h2 id="deref">Querying Through the Link</h2>
       <p>Dotted-field access on a linked column resolves through the link automatically.  No special syntax: <code>orders.cust.name</code> walks the existing dotted-name resolver, produces a column the same length as <code>orders.cust</code>, with values gathered from <code>customers.name</code> at the row indices.</p>
 
-      <pre><code>orders.cust.name       <span class="hl-comment">; ⇒ (list 'alice 'carol 'bob 'alice)</span>
+      <pre><code>orders.cust.name       <span class="hl-comment">; ⇒ [alice carol bob alice]</span>
 orders.cust.city       <span class="hl-comment">; ⇒ ["NYC" "SF" "LA" "NYC"]</span>
 orders.cust.id         <span class="hl-comment">; ⇒ [100 300 200 100]</span></code></pre>
 
-      <p>The same access pattern works inside <code>select</code>, joins, filters, and any place a column expression is allowed:</p>
+      <p>You can pre-compute the dereferenced values and pipe them through the rest of the query:</p>
 
-      <pre><code><span class="hl-comment">; Project order id + customer name as a flat table.</span>
-(<span class="hl-fn">select</span> [<span class="hl-sym">oid</span> (<span class="hl-fn">at</span> orders <span class="hl-sym">'cust.name</span>)] <span class="hl-sym">orders</span>)
-
-<span class="hl-comment">; Filter orders by customer city without a join.</span>
-(<span class="hl-fn">select</span> orders (<span class="hl-fn">=</span> <span class="hl-sym">cust.city</span> <span class="hl-str">"SF"</span>))</code></pre>
+      <pre><code><span class="hl-comment">; Pre-resolve customer names per order, then use as a regular column.</span>
+(<span class="hl-kw">set</span> names <span class="hl-sym">orders.cust.name</span>)
+(<span class="hl-fn">count</span> names)              <span class="hl-comment">; ⇒ 4</span>
+(<span class="hl-fn">distinct</span> names)           <span class="hl-comment">; ⇒ [alice carol bob]</span></code></pre>
 
       <p>Each dotted-field deref allocates one fresh column and gathers values once.  The cost is one allocation + <em>n</em> indirect reads, regardless of target field type &mdash; no hash probe, no string comparison.  Compared to expressing the same query as an <code>inner-join</code> on the customer ID, the linked-column form skips the hash-table build entirely.</p>
+
+      <div class="info-box">
+        <strong>Direct dotted access inside <code>select</code> / <code>where</code> clauses is not yet wired.</strong>  Today, you resolve the linked column at the top level (<code>orders.cust.name</code>) or with <code>(at orders 'cust)</code> + <code>.field</code> on the result, and pass that bound name into the query.  Wiring dotted-deref through the select compiler is a follow-up.
+      </div>
 
       <h3>Null Propagation</h3>
       <p>Two sources of nulls in the result:</p>
@@ -190,35 +195,14 @@ orders.cust.id         <span class="hl-comment">; ⇒ [100 300 200 100]</span></
         <li>Out-of-range row IDs (<code>rid &lt; 0</code> or <code>rid &gt;= target.len</code>) silently become null in the result.  This matches the prior column-store convention &mdash; safer than erroring out mid-query.</li>
       </ul>
 
-      <h3>Analytical Query Through a Link</h3>
-      <p>Putting it together: a typical "show me sales totals by customer city" query.  Without a link this is a join + group-by; with the link it's a single <code>select</code>.</p>
+      <h3>Bind to a Local Then Aggregate</h3>
+      <p>To run aggregations against a derived field, resolve the dotted access at the top level, bind the result, and pass it to ordinary collection / aggregate operators:</p>
 
-      <pre><code><span class="hl-comment">; Plain group-by — orders.cust.city is just another column expression.</span>
-(<span class="hl-fn">select</span> [<span class="hl-fn">sum</span> <span class="hl-sym">qty</span>] <span class="hl-sym">orders</span> [<span class="hl-sym">cust.city</span>])
-<span class="hl-comment">; cust.city qty</span>
-<span class="hl-comment">; --------- ---</span>
-<span class="hl-comment">; NYC         8</span>  <span class="hl-comment">; rows 0 + 3 (qty 5 + 3)</span>
-<span class="hl-comment">; LA          2</span>  <span class="hl-comment">; row 1   (qty 2)</span>
-<span class="hl-comment">; SF          7</span>  <span class="hl-comment">; row 2   (qty 7)</span></code></pre>
+      <pre><code>(<span class="hl-kw">set</span> cities <span class="hl-sym">orders.cust.city</span>)   <span class="hl-comment">; ⇒ ["NYC" "SF" "LA" "NYC"]</span>
+(<span class="hl-fn">distinct</span> cities)              <span class="hl-comment">; ⇒ ["NYC" "SF" "LA"]</span>
+(<span class="hl-fn">count</span> cities)                 <span class="hl-comment">; ⇒ 4</span></code></pre>
 
-      <p>The grouping key <code>cust.city</code> is resolved per row: the executor reads <code>orders.cust[i]</code>, indexes <code>customers.city</code>, and uses that string as the group key.  No table materialization, no hash-join build, no key column copy.  Compared to expressing the same query as an explicit <code>(inner-join [id] orders customers)</code> followed by <code>select sum qty</code>, the linked form is faster (skips the hash table build) and more concise (no key columns to enumerate).</p>
-
-      <p>Filters work the same way:</p>
-      <pre><code><span class="hl-comment">; All orders from California customers (treating SF and LA as CA).</span>
-(<span class="hl-fn">select</span> orders (<span class="hl-fn">in</span> <span class="hl-sym">cust.city</span> [<span class="hl-str">"SF"</span> <span class="hl-str">"LA"</span>]))</code></pre>
-
-      <h3>Loading from CSV</h3>
-      <p>The CSV loader produces plain int columns &mdash; you attach the link in code after the load:</p>
-
-      <pre><code>(<span class="hl-kw">set</span> customers (<span class="hl-fn">.csv.read</span> <span class="hl-str">"customers.csv"</span>))
-(<span class="hl-kw">set</span> orders   (<span class="hl-fn">.csv.read</span> <span class="hl-str">"orders.csv"</span>))
-
-<span class="hl-comment">; Convert orders.cust from a sym foreign-key column to a row-id link.</span>
-<span class="hl-comment">; (The translation step — sym lookup → row-id — is one-time setup.)</span>
-(<span class="hl-kw">set</span> rids (<span class="hl-fn">find</span> (<span class="hl-fn">at</span> customers <span class="hl-sym">'id</span>) (<span class="hl-fn">at</span> orders <span class="hl-sym">'cust_id</span>)))
-(<span class="hl-kw">set</span> orders (<span class="hl-fn">update</span> orders [(<span class="hl-fn">.col.link</span> <span class="hl-sym">'customers</span> rids)] <span class="hl-sym">cust</span>))</code></pre>
-
-      <p>From this point on, every query against <code>orders</code> can use <code>cust.field</code> dotted access without a hash probe.</p>
+      <p>The group-by-via-<code>select</code> form (<code>(select {from: orders qty: (sum qty) by: cust.city})</code>) is not yet supported &mdash; the select compiler doesn't currently recognise dotted-path column expressions inside <code>where</code> / <code>by</code> / projection clauses.  Until that lands, materialise through a temp.</p>
 
       <!-- ============================================================ -->
       <h2 id="introspection">Introspection</h2>
