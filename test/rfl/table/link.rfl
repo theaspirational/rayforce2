@@ -1,0 +1,40 @@
+;; Linked columns — (.col.link target int-vec) + dotted deref.
+
+(set custs (table [id age name] (list [100 200 300] [18 25 42] (list 'alice 'bob 'carol))))
+
+;; Build the link from raw row ids.
+(set rids [2 0 1 2])
+(set linked (.col.link 'custs rids))
+
+;; Introspection round-trips.
+(.col.link? linked)        -- true
+(.col.target linked)       -- 'custs
+(.col.link? rids)          -- false
+
+;; Deref through each column type — int, sym.
+linked.id                  -- [300 100 200 300]
+linked.age                 -- [42 18 25 42]
+linked.name                -- (list 'carol 'alice 'bob 'carol)
+
+;; Detach restores a plain int column.
+(set unlinked (.col.unlink linked))
+(.col.link? unlinked)      -- false
+
+;; Reject a target that doesn't name a table.
+(.col.link 'no_such_table rids) !- name
+
+;; Reject non-int link columns.
+(.col.link 'custs [1.5 2.5]) !- type
+
+;; Coexistence with an accelerator index — the index hangs off the
+;; linked column; deref still resolves correctly.
+(set both (.idx.zone linked))
+(.idx.has? both)           -- true
+(.col.link? both)          -- true
+both.age                   -- [42 18 25 42]
+
+;; Drop the index — link survives.
+(set link_only (.idx.drop both))
+(.idx.has? link_only)      -- false
+(.col.link? link_only)     -- true
+link_only.age              -- [42 18 25 42]

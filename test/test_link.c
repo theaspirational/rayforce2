@@ -483,6 +483,86 @@ static test_result_t test_link_deref_str_target(void) {
     PASS();
 }
 
+/* ─── Empty link column ──────────────────────────────────────────── */
+
+static test_result_t test_link_deref_empty_link(void) {
+    ray_t* v = ray_vec_new(RAY_I64, 0);  /* zero-length link */
+    v->len = 0;
+
+    ray_t* target = build_target_table("custs");
+    int64_t custs_sym = ray_sym_intern("custs", 5);
+    ray_env_set(custs_sym, target);
+    ray_release(target);
+
+    ray_t* w = v;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_link_attach(&w, custs_sym)));
+    TEST_ASSERT_EQ_I(w->len, 0);
+
+    int64_t age_sym = ray_sym_intern("age", 3);
+    ray_t* result = ray_link_deref(w, age_sym);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->len, 0);
+
+    ray_release(result);
+    ray_release(w);
+    PASS();
+}
+
+/* ─── Probe miss (field not on target) returns NULL, not error ─────── */
+
+static test_result_t test_link_deref_unknown_field(void) {
+    int64_t rids[] = { 0, 1, 2 };
+    ray_t* v = make_i64_vec(rids, 3);
+
+    ray_t* target = build_target_table("custs");
+    int64_t custs_sym = ray_sym_intern("custs", 5);
+    ray_env_set(custs_sym, target);
+    ray_release(target);
+
+    ray_t* w = v;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_link_attach(&w, custs_sym)));
+
+    /* Field 'phone' doesn't exist on the target; deref must return NULL,
+     * not a hard error.  Letting the dotted-walk's method-dispatch
+     * fallback (env.c:208-247) try other resolutions. */
+    int64_t phone_sym = ray_sym_intern("phone", 5);
+    ray_t* result = ray_link_deref(w, phone_sym);
+    TEST_ASSERT_NULL(result);
+
+    ray_release(w);
+    PASS();
+}
+
+/* ─── Save→load with no link must NOT spuriously attach one ───────── */
+
+static test_result_t test_link_save_no_link_no_sidecar(void) {
+    int64_t xs[] = { 1, 2, 3 };
+    ray_t* v = make_i64_vec(xs, 3);
+    /* Plain int column — no link attached. */
+    TEST_ASSERT_FALSE(v->attrs & RAY_ATTR_HAS_LINK);
+
+    char path[] = "/tmp/link_no_sidecar_XXXXXX";
+    int fd = mkstemp(path);
+    TEST_ASSERT_TRUE(fd >= 0);
+    close(fd);
+    TEST_ASSERT_EQ_I(ray_col_save(v, path), RAY_OK);
+
+    /* No `.link` sidecar should exist. */
+    char link_path[256];
+    snprintf(link_path, sizeof link_path, "%s.link", path);
+    FILE* lf = fopen(link_path, "rb");
+    if (lf) { fclose(lf); FAILF("unexpected sidecar at %s", link_path); }
+
+    ray_t* loaded = ray_col_load(path);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(loaded));
+    TEST_ASSERT_FALSE(loaded->attrs & RAY_ATTR_HAS_LINK);
+
+    unlink(path);
+    ray_release(loaded);
+    ray_release(v);
+    PASS();
+}
+
 /* ─── Slice + narrow-width sym target ────────────────────────────── */
 
 static test_result_t test_link_deref_sym_slice_w8(void) {
@@ -609,5 +689,8 @@ const test_entry_t link_entries[] = {
     { "link/deref_sym_target",               test_link_deref_sym_target,              link_setup, link_teardown },
     { "link/deref_str_target",               test_link_deref_str_target,              link_setup, link_teardown },
     { "link/deref_sym_slice_w8",             test_link_deref_sym_slice_w8,            link_setup, link_teardown },
+    { "link/deref_empty_link",               test_link_deref_empty_link,              link_setup, link_teardown },
+    { "link/deref_unknown_field",            test_link_deref_unknown_field,           link_setup, link_teardown },
+    { "link/save_no_link_no_sidecar",        test_link_save_no_link_no_sidecar,       link_setup, link_teardown },
     { NULL, NULL, NULL, NULL },
 };
