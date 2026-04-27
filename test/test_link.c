@@ -483,6 +483,58 @@ static test_result_t test_link_deref_str_target(void) {
     PASS();
 }
 
+/* ─── alter set: shared COW + failed validation must not leak ─────── */
+
+extern ray_t* ray_eval_str(const char* src);
+extern ray_err_t ray_env_set(int64_t sym_id, ray_t* val);
+
+static test_result_t test_link_alter_set_failed_no_leak(void) {
+    /* Build an indexed column and bind it to TWO env names so the
+     * shared rc forces ray_cow to allocate a copy inside alter set.
+     * Trigger a failed write — index out of range — and verify both
+     * the column data and the attached index survive untouched.
+     *
+     * The fix this test pins: alter set's COW path now releases its
+     * cow'd copy before returning the validation error.  Without that
+     * release the copy leaks (rc=1, no holder) — the heap-destroy
+     * backstop hides this from ASan's leak detector at process exit,
+     * so the visible-state assertions below are what we can robustly
+     * pin in CI.  Code review verifies the release itself. */
+    ray_t* setup = ray_eval_str(
+        "(set v [5 1 9 3 7])"
+        "(set vi (.idx.zone v))"
+        "(set alpha vi)"
+        "(set beta vi)");
+    if (setup && !RAY_IS_ERR(setup)) ray_release(setup);
+
+    /* Failed write — out-of-range. */
+    ray_t* err_r = ray_eval_str("(alter 'alpha set 99 100)");
+    TEST_ASSERT_TRUE(RAY_IS_ERR(err_r));
+    if (RAY_IS_ERR(err_r)) ray_error_free(err_r);
+
+    /* Both holders still see the indexed column. */
+    ray_t* a_has = ray_eval_str("(.idx.has? alpha)");
+    TEST_ASSERT_FALSE(RAY_IS_ERR(a_has));
+    TEST_ASSERT_EQ_I(a_has->u8, 1);
+    ray_release(a_has);
+    ray_t* b_has = ray_eval_str("(.idx.has? beta)");
+    TEST_ASSERT_FALSE(RAY_IS_ERR(b_has));
+    TEST_ASSERT_EQ_I(b_has->u8, 1);
+    ray_release(b_has);
+
+    /* Failed write — wrong type. */
+    ray_t* err2 = ray_eval_str("(alter 'alpha set \"junk\" 100)");
+    TEST_ASSERT_TRUE(RAY_IS_ERR(err2));
+    if (RAY_IS_ERR(err2)) ray_error_free(err2);
+
+    ray_t* a_has2 = ray_eval_str("(.idx.has? alpha)");
+    TEST_ASSERT_FALSE(RAY_IS_ERR(a_has2));
+    TEST_ASSERT_EQ_I(a_has2->u8, 1);
+    ray_release(a_has2);
+
+    PASS();
+}
+
 /* ─── Slice over a linked parent must inherit the link ───────────── */
 
 static test_result_t test_link_slice_inherits(void) {
@@ -746,6 +798,7 @@ const test_entry_t link_entries[] = {
     { "link/deref_empty_link",               test_link_deref_empty_link,              link_setup, link_teardown },
     { "link/deref_unknown_field",            test_link_deref_unknown_field,           link_setup, link_teardown },
     { "link/save_no_link_no_sidecar",        test_link_save_no_link_no_sidecar,       link_setup, link_teardown },
+    { "link/alter_set_failed_no_leak",       test_link_alter_set_failed_no_leak,      link_setup, link_teardown },
     { "link/slice_inherits",                 test_link_slice_inherits,                link_setup, link_teardown },
     { NULL, NULL, NULL, NULL },
 };
