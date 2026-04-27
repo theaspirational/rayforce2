@@ -132,36 +132,55 @@
       <p>This is the same trade made by enumerated columns in column-store databases that support them: lose the flexibility of carrying user-visible keys, gain O(1) deref on the hot path.</p>
 
       <!-- ============================================================ -->
-      <h2 id="construct">Constructing a Link</h2>
-      <p>Use <code>(.col.link target int-vec)</code> to attach a link.  The first argument is a sym naming the target table; the second is an integer vector (<code>RAY_I32</code> or <code>RAY_I64</code>) of row indices.</p>
+      <h2 id="construct">Linking a Column in a Table</h2>
+      <p>The realistic shape: you have two tables and want a foreign-key-style relationship between them.  Build a row-id column on the dependent side, attach the link, and stash it back into the table.  All subsequent queries through that table automatically dereference through the link.</p>
 
       <h3>Signature</h3>
       <div class="fn-card">
         <div class="fn-card-header">
           <span class="fn-name">(.col.link target int-vec)</span>
         </div>
-        <div class="fn-desc">Attach the column as a link to the target table.  Validates that <code>target</code> resolves to a <code>RAY_TABLE</code> in the current environment and that the input is a numeric int column.  Returns a new column with <code>HAS_LINK</code> set; the underlying values are unchanged.</div>
+        <div class="fn-desc">Attach the column as a link to the table named by <code>target</code> (a sym).  Validates that <code>target</code> resolves to a <code>RAY_TABLE</code> in the current environment and that the input is a numeric int column.  Returns a new column with <code>HAS_LINK</code> set; the underlying integer values are unchanged.</div>
       </div>
 
-      <h3>Example</h3>
-      <pre><code>(<span class="hl-kw">set</span> custs (<span class="hl-fn">table</span> [<span class="hl-sym">id</span> <span class="hl-sym">name</span> <span class="hl-sym">city</span>]
-    (<span class="hl-fn">list</span> [<span class="hl-num">100</span> <span class="hl-num">200</span> <span class="hl-num">300</span>] (<span class="hl-fn">list</span> <span class="hl-sym">'alice</span> <span class="hl-sym">'bob</span> <span class="hl-sym">'carol</span>) [<span class="hl-str">"NYC"</span> <span class="hl-str">"LA"</span> <span class="hl-str">"SF"</span>])))
+      <h3>Worked Example: orders → customers</h3>
+      <p>Two tables: <code>customers</code> with <code>id</code>, <code>name</code>, <code>city</code>; <code>orders</code> with <code>oid</code>, <code>qty</code>, and a <code>cust</code> column holding row indices into <code>customers</code>.</p>
 
-<span class="hl-comment">; Order rows pointing at customer rows by their position in 'custs'</span>
-(<span class="hl-kw">set</span> rids [<span class="hl-num">2</span> <span class="hl-num">0</span> <span class="hl-num">1</span> <span class="hl-num">2</span>])
-(<span class="hl-kw">set</span> linked (<span class="hl-fn">.col.link</span> <span class="hl-sym">'custs</span> rids))</code></pre>
+      <pre><code><span class="hl-comment">; Set up the target ('customers' must be bound in env before linking).</span>
+(<span class="hl-kw">set</span> customers (<span class="hl-fn">table</span> [<span class="hl-sym">id</span> <span class="hl-sym">name</span> <span class="hl-sym">city</span>]
+    (<span class="hl-fn">list</span> [<span class="hl-num">100</span> <span class="hl-num">200</span> <span class="hl-num">300</span>]
+          (<span class="hl-fn">list</span> <span class="hl-sym">'alice</span> <span class="hl-sym">'bob</span> <span class="hl-sym">'carol</span>)
+          (<span class="hl-fn">list</span> <span class="hl-str">"NYC"</span> <span class="hl-str">"LA"</span> <span class="hl-str">"SF"</span>))))
 
-      <p><code>linked</code> is functionally identical to <code>rids</code> &mdash; same length, same int values &mdash; but carries a hidden tag pointing at the <code>'custs</code> table.</p>
+<span class="hl-comment">; Build orders with a 'cust' column that holds row indices into customers.</span>
+<span class="hl-comment">; Each row says "this order belongs to customers[cust]".</span>
+(<span class="hl-kw">set</span> orders (<span class="hl-fn">table</span> [<span class="hl-sym">oid</span> <span class="hl-sym">qty</span> <span class="hl-sym">cust</span>]
+    (<span class="hl-fn">list</span> [<span class="hl-num">10</span> <span class="hl-num">11</span> <span class="hl-num">12</span> <span class="hl-num">13</span>]
+          [<span class="hl-num">5</span>  <span class="hl-num">2</span>  <span class="hl-num">7</span>  <span class="hl-num">3</span>]
+          [<span class="hl-num">0</span>  <span class="hl-num">2</span>  <span class="hl-num">1</span>  <span class="hl-num">0</span>])))
+
+<span class="hl-comment">; Tag the cust column as a link into customers, and write it back.</span>
+(<span class="hl-kw">set</span> orders (<span class="hl-fn">update</span> orders [(<span class="hl-fn">.col.link</span> <span class="hl-sym">'customers</span> (<span class="hl-fn">at</span> orders <span class="hl-sym">'cust</span>))] <span class="hl-sym">cust</span>))</code></pre>
+
+      <p><code>orders.cust</code> still reads as a column of integers <code>[0 2 1 0]</code> &mdash; the link is invisible to anything that doesn't ask for it.  But field-walks across the link now work transparently.</p>
 
       <!-- ============================================================ -->
-      <h2 id="deref">Dereferencing a Link</h2>
-      <p>Once attached, dotted-field access on the linked column resolves through the link automatically.  No special syntax: <code>linked.field-name</code> walks the existing dotted-name resolver and produces a column the same length as <code>linked</code>, with values gathered from the target's <code>field-name</code> column at the row indices.</p>
+      <h2 id="deref">Querying Through the Link</h2>
+      <p>Dotted-field access on a linked column resolves through the link automatically.  No special syntax: <code>orders.cust.name</code> walks the existing dotted-name resolver, produces a column the same length as <code>orders.cust</code>, with values gathered from <code>customers.name</code> at the row indices.</p>
 
-      <pre><code>linked.id            <span class="hl-comment">; ⇒ [300 100 200 300]   (RAY_I64)</span>
-linked.name          <span class="hl-comment">; ⇒ (list 'carol 'alice 'bob 'carol)   (RAY_SYM)</span>
-linked.city          <span class="hl-comment">; ⇒ ["SF" "NYC" "LA" "SF"]   (RAY_STR)</span></code></pre>
+      <pre><code>orders.cust.name       <span class="hl-comment">; ⇒ (list 'alice 'carol 'bob 'alice)</span>
+orders.cust.city       <span class="hl-comment">; ⇒ ["NYC" "SF" "LA" "NYC"]</span>
+orders.cust.id         <span class="hl-comment">; ⇒ [100 300 200 100]</span></code></pre>
 
-      <p>Each dotted-field deref allocates a fresh column and gathers the values once.  The cost is one allocation + <code>n</code> indirect reads, regardless of target field type.</p>
+      <p>The same access pattern works inside <code>select</code>, joins, filters, and any place a column expression is allowed:</p>
+
+      <pre><code><span class="hl-comment">; Project order id + customer name as a flat table.</span>
+(<span class="hl-fn">select</span> [<span class="hl-sym">oid</span> (<span class="hl-fn">at</span> orders <span class="hl-sym">'cust.name</span>)] <span class="hl-sym">orders</span>)
+
+<span class="hl-comment">; Filter orders by customer city without a join.</span>
+(<span class="hl-fn">select</span> orders (<span class="hl-fn">=</span> <span class="hl-sym">cust.city</span> <span class="hl-str">"SF"</span>))</code></pre>
+
+      <p>Each dotted-field deref allocates one fresh column and gathers values once.  The cost is one allocation + <em>n</em> indirect reads, regardless of target field type &mdash; no hash probe, no string comparison.  Compared to expressing the same query as an <code>inner-join</code> on the customer ID, the linked-column form skips the hash-table build entirely.</p>
 
       <h3>Null Propagation</h3>
       <p>Two sources of nulls in the result:</p>
@@ -170,6 +189,36 @@ linked.city          <span class="hl-comment">; ⇒ ["SF" "NYC" "LA" "SF"]   (RA
         <li>If <code>linked[i]</code> is in range but the target's row at that index is null, the result row is null.</li>
         <li>Out-of-range row IDs (<code>rid &lt; 0</code> or <code>rid &gt;= target.len</code>) silently become null in the result.  This matches the prior column-store convention &mdash; safer than erroring out mid-query.</li>
       </ul>
+
+      <h3>Analytical Query Through a Link</h3>
+      <p>Putting it together: a typical "show me sales totals by customer city" query.  Without a link this is a join + group-by; with the link it's a single <code>select</code>.</p>
+
+      <pre><code><span class="hl-comment">; Plain group-by — orders.cust.city is just another column expression.</span>
+(<span class="hl-fn">select</span> [<span class="hl-fn">sum</span> <span class="hl-sym">qty</span>] <span class="hl-sym">orders</span> [<span class="hl-sym">cust.city</span>])
+<span class="hl-comment">; cust.city qty</span>
+<span class="hl-comment">; --------- ---</span>
+<span class="hl-comment">; NYC         8</span>  <span class="hl-comment">; rows 0 + 3 (qty 5 + 3)</span>
+<span class="hl-comment">; LA          2</span>  <span class="hl-comment">; row 1   (qty 2)</span>
+<span class="hl-comment">; SF          7</span>  <span class="hl-comment">; row 2   (qty 7)</span></code></pre>
+
+      <p>The grouping key <code>cust.city</code> is resolved per row: the executor reads <code>orders.cust[i]</code>, indexes <code>customers.city</code>, and uses that string as the group key.  No table materialization, no hash-join build, no key column copy.  Compared to expressing the same query as an explicit <code>(inner-join [id] orders customers)</code> followed by <code>select sum qty</code>, the linked form is faster (skips the hash table build) and more concise (no key columns to enumerate).</p>
+
+      <p>Filters work the same way:</p>
+      <pre><code><span class="hl-comment">; All orders from California customers (treating SF and LA as CA).</span>
+(<span class="hl-fn">select</span> orders (<span class="hl-fn">in</span> <span class="hl-sym">cust.city</span> [<span class="hl-str">"SF"</span> <span class="hl-str">"LA"</span>]))</code></pre>
+
+      <h3>Loading from CSV</h3>
+      <p>The CSV loader produces plain int columns &mdash; you attach the link in code after the load:</p>
+
+      <pre><code>(<span class="hl-kw">set</span> customers (<span class="hl-fn">.csv.read</span> <span class="hl-str">"customers.csv"</span>))
+(<span class="hl-kw">set</span> orders   (<span class="hl-fn">.csv.read</span> <span class="hl-str">"orders.csv"</span>))
+
+<span class="hl-comment">; Convert orders.cust from a sym foreign-key column to a row-id link.</span>
+<span class="hl-comment">; (The translation step — sym lookup → row-id — is one-time setup.)</span>
+(<span class="hl-kw">set</span> rids (<span class="hl-fn">find</span> (<span class="hl-fn">at</span> customers <span class="hl-sym">'id</span>) (<span class="hl-fn">at</span> orders <span class="hl-sym">'cust_id</span>)))
+(<span class="hl-kw">set</span> orders (<span class="hl-fn">update</span> orders [(<span class="hl-fn">.col.link</span> <span class="hl-sym">'customers</span> rids)] <span class="hl-sym">cust</span>))</code></pre>
+
+      <p>From this point on, every query against <code>orders</code> can use <code>cust.field</code> dotted access without a hash probe.</p>
 
       <!-- ============================================================ -->
       <h2 id="introspection">Introspection</h2>
@@ -259,7 +308,7 @@ linked.city          <span class="hl-comment">; ⇒ ["SF" "NYC" "LA" "SF"]   (RA
       <!-- Prev/Next -->
       <div class="docs-nav-footer">
         <a href="queries-joins.html" class="docs-nav-link prev"><span class="docs-nav-dir">← Previous</span><span class="docs-nav-title">Joins</span></a>
-        <a href="queries-pivot.html" class="docs-nav-link next"><span class="docs-nav-dir">Next →</span><span class="docs-nav-title">Pivot Tables &amp; Window Functions</span></a>
+        <a href="queries-indexes.html" class="docs-nav-link next"><span class="docs-nav-dir">Next →</span><span class="docs-nav-title">Accelerator Indexes</span></a>
       </div>
     </main>
   </div>
