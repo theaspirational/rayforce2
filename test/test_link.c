@@ -59,19 +59,37 @@ static ray_t* make_i64_vec(const int64_t* xs, int64_t n) {
     return v;
 }
 
-/* Build a tiny target table {id, age} and bind it to `name_sym` in env. */
+/* Build a tiny target table {id, age, name(SYM), city(STR)} for tests. */
 static ray_t* build_target_table(const char* name) {
     int64_t ids[]  = { 100, 200, 300 };
     int64_t ages[] = {  18,  25,  42 };
     ray_t* idcol  = make_i64_vec(ids,  3);
     ray_t* agecol = make_i64_vec(ages, 3);
-    ray_t* tab = ray_table_new(2);
-    int64_t id_sym  = ray_sym_intern("id",  2);
-    int64_t age_sym = ray_sym_intern("age", 3);
-    tab = ray_table_add_col(tab, id_sym,  idcol);
-    tab = ray_table_add_col(tab, age_sym, agecol);
+
+    /* SYM column: alice, bob, carol. */
+    ray_t* namecol = ray_sym_vec_new(RAY_SYM_W64, 3);
+    int64_t s_alice = ray_sym_intern("alice", 5);
+    int64_t s_bob   = ray_sym_intern("bob",   3);
+    int64_t s_carol = ray_sym_intern("carol", 5);
+    namecol = ray_vec_append(namecol, &s_alice);
+    namecol = ray_vec_append(namecol, &s_bob);
+    namecol = ray_vec_append(namecol, &s_carol);
+
+    /* STR column: NYC, LA, SF — short enough to be inline (<=12 chars). */
+    ray_t* citycol = ray_vec_new(RAY_STR, 3);
+    citycol = ray_str_vec_append(citycol, "NYC", 3);
+    citycol = ray_str_vec_append(citycol, "LA",  2);
+    citycol = ray_str_vec_append(citycol, "SF",  2);
+
+    ray_t* tab = ray_table_new(4);
+    tab = ray_table_add_col(tab, ray_sym_intern("id",   2), idcol);
+    tab = ray_table_add_col(tab, ray_sym_intern("age",  3), agecol);
+    tab = ray_table_add_col(tab, ray_sym_intern("name", 4), namecol);
+    tab = ray_table_add_col(tab, ray_sym_intern("city", 4), citycol);
     ray_release(idcol);
     ray_release(agecol);
+    ray_release(namecol);
+    ray_release(citycol);
     (void)name;
     return tab;
 }
@@ -391,6 +409,80 @@ static test_result_t test_link_deref_no_target_leak(void) {
     PASS();
 }
 
+/* ─── Deref through SYM and STR target columns ────────────────────── */
+
+static test_result_t test_link_deref_sym_target(void) {
+    int64_t rids[] = { 2, 0, 1, 2 };
+    ray_t* v = make_i64_vec(rids, 4);
+
+    ray_t* target = build_target_table("custs");
+    int64_t custs_sym = ray_sym_intern("custs", 5);
+    ray_env_set(custs_sym, target);
+    ray_release(target);
+
+    ray_t* w = v;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_link_attach(&w, custs_sym)));
+
+    int64_t name_sym = ray_sym_intern("name", 4);
+    ray_t* result = ray_link_deref(w, name_sym);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_SYM);
+    TEST_ASSERT_EQ_I(result->len, 4);
+    /* Width must match the target's. */
+    TEST_ASSERT_EQ_U((unsigned)(result->attrs & RAY_SYM_W_MASK), RAY_SYM_W64);
+
+    /* Element values are global sym IDs since the target uses the global
+     * sym table (sym_dict NULL) — directly comparable. */
+    int64_t s_alice = ray_sym_intern("alice", 5);
+    int64_t s_bob   = ray_sym_intern("bob",   3);
+    int64_t s_carol = ray_sym_intern("carol", 5);
+    int64_t* sd = (int64_t*)ray_data(result);
+    TEST_ASSERT_EQ_I(sd[0], s_carol);   /* rid 2 */
+    TEST_ASSERT_EQ_I(sd[1], s_alice);   /* rid 0 */
+    TEST_ASSERT_EQ_I(sd[2], s_bob);     /* rid 1 */
+    TEST_ASSERT_EQ_I(sd[3], s_carol);   /* rid 2 */
+
+    ray_release(result);
+    ray_release(w);
+    PASS();
+}
+
+static test_result_t test_link_deref_str_target(void) {
+    int64_t rids[] = { 0, 2, 1 };
+    ray_t* v = make_i64_vec(rids, 3);
+
+    ray_t* target = build_target_table("custs");
+    int64_t custs_sym = ray_sym_intern("custs", 5);
+    ray_env_set(custs_sym, target);
+    ray_release(target);
+
+    ray_t* w = v;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_link_attach(&w, custs_sym)));
+
+    int64_t city_sym = ray_sym_intern("city", 4);
+    ray_t* result = ray_link_deref(w, city_sym);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(result));
+    TEST_ASSERT_EQ_I(result->type, RAY_STR);
+    TEST_ASSERT_EQ_I(result->len, 3);
+
+    /* Verify each row reads back as the expected string via ray_str_vec_get,
+     * which resolves inline + pool storage transparently. */
+    size_t L = 0;
+    const char* s0 = ray_str_vec_get(result, 0, &L);
+    TEST_ASSERT_EQ_U(L, 3);
+    TEST_ASSERT_MEM_EQ(3, s0, "NYC");
+    const char* s1 = ray_str_vec_get(result, 1, &L);
+    TEST_ASSERT_EQ_U(L, 2);
+    TEST_ASSERT_MEM_EQ(2, s1, "SF");
+    const char* s2 = ray_str_vec_get(result, 2, &L);
+    TEST_ASSERT_EQ_U(L, 2);
+    TEST_ASSERT_MEM_EQ(2, s2, "LA");
+
+    ray_release(result);
+    ray_release(w);
+    PASS();
+}
+
 /* ─── Phase 4: coexistence with HAS_INDEX ─────────────────────────── */
 
 static test_result_t test_link_coexists_with_index(void) {
@@ -447,5 +539,7 @@ const test_entry_t link_entries[] = {
     { "link/coexists_with_index",            test_link_coexists_with_index,           link_setup, link_teardown },
     { "link/mmap_loads_sidecar",             test_link_mmap_loads_sidecar,            link_setup, link_teardown },
     { "link/deref_no_target_leak",           test_link_deref_no_target_leak,          link_setup, link_teardown },
+    { "link/deref_sym_target",               test_link_deref_sym_target,              link_setup, link_teardown },
+    { "link/deref_str_target",               test_link_deref_str_target,              link_setup, link_teardown },
     { NULL, NULL, NULL, NULL },
 };

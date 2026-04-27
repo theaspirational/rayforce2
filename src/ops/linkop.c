@@ -23,6 +23,7 @@
 
 #include "linkop.h"
 #include "idxop.h"
+#include "ops/internal.h"   /* col_propagate_str_pool */
 #include "mem/cow.h"
 #include "vec/vec.h"
 #include "table/table.h"
@@ -152,21 +153,30 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     int64_t target_n = target_col->len;
     int8_t  out_type = target_col->type;
 
-    ray_t* result = ray_vec_new(out_type, n);
+    /* Allocate result.  RAY_SYM needs the target's width attrs so
+     * element copying below stays width-correct. */
+    ray_t* result;
+    if (out_type == RAY_SYM) {
+        result = ray_sym_vec_new(target_col->attrs & RAY_SYM_W_MASK, n);
+    } else {
+        result = ray_vec_new(out_type, n);
+    }
     if (!result || RAY_IS_ERR(result)) return result;
     result->len = n;
-    /* Pre-zero element data so out-of-range / null rows have a defined
-     * value before nullmap bits mark them invalid. */
-    uint8_t out_esz = ray_sym_elem_size(out_type, target_col->attrs);
+
+    /* Element size for the result and the target match by construction:
+     * for RAY_SYM we mirrored the width above; for everything else
+     * ray_vec_new gives the canonical size for the type. */
+    uint8_t out_esz = ray_sym_elem_size(out_type, result->attrs);
     if (out_esz > 0) memset(ray_data(result), 0, (size_t)n * out_esz);
 
-    /* Walk row-by-row using ray_vec_is_null (HAS_INDEX-aware) and
-     * element-level read/write helpers.  For perf-critical workloads
-     * this would be specialised per-type; v1 keeps it simple. */
     const uint8_t* link_base = (const uint8_t*)ray_data(v);
     uint8_t link_esz = ray_sym_elem_size(v->type, v->attrs);
     char* out_base = (char*)ray_data(result);
-    uint8_t target_esz = ray_sym_elem_size(target_col->type, target_col->attrs);
+    /* target_esz must equal out_esz for memcpy correctness — see SYM
+     * width matching above; STR is always 16 bytes; numeric types match
+     * by definition since out_type == target_col->type. */
+    uint8_t target_esz = ray_sym_elem_size(out_type, target_col->attrs);
 
     for (int64_t i = 0; i < n; i++) {
         if (ray_vec_is_null(v, i)) {
@@ -189,23 +199,33 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
             ray_vec_set_null(result, i, true);
             continue;
         }
-        if (target_esz > 0) {
-            memcpy(out_base + i * target_esz,
+        if (target_esz > 0 && out_esz > 0 && target_esz == out_esz) {
+            memcpy(out_base + i * out_esz,
                    (const char*)ray_data(target_col) + rid * target_esz,
                    target_esz);
         }
     }
 
-    /* Propagate target column metadata where applicable.  RAY_SYM result
-     * needs the target's sym width and dict; RAY_STR result needs the
-     * pool.  For v1 we restrict deref output handling to the simple
-     * cases — RAY_SYM/RAY_STR target columns are NYI for the deref
-     * payload.  Detect and reject. */
-    if (target_col->type == RAY_SYM || target_col->type == RAY_STR) {
-        ray_release(result);
-        return ray_error("nyi",
-                         "link deref: target field type %d not yet supported",
-                         (int)target_col->type);
+    /* Type-specific metadata propagation.
+     *   RAY_STR: share the source pool so ray_str_t pool_offs are valid.
+     *   RAY_SYM: if the source column carries a local sym_dict, share it.
+     *
+     * sym_dict aliases bytes 8-15 of the nullmap union.  It is only a
+     * real pointer when the column doesn't have inline nulls clobbering
+     * those bytes, i.e. either no nulls or NULLMAP_EXT.  Mirrors the
+     * guard pattern in src/ops/sort.c:3307 and src/ops/rerank.c:182. */
+    if (out_type == RAY_STR) {
+        col_propagate_str_pool(result, target_col);
+    } else if (out_type == RAY_SYM) {
+        const ray_t* dict_owner = (target_col->attrs & RAY_ATTR_SLICE)
+                                  ? target_col->slice_parent : target_col;
+        if (dict_owner && !(dict_owner->attrs & RAY_ATTR_SLICE) &&
+            (!(dict_owner->attrs & RAY_ATTR_HAS_NULLS) ||
+             (dict_owner->attrs & RAY_ATTR_NULLMAP_EXT)) &&
+            dict_owner->sym_dict) {
+            ray_retain(dict_owner->sym_dict);
+            result->sym_dict = dict_owner->sym_dict;
+        }
     }
     return result;
 }
