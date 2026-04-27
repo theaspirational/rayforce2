@@ -511,6 +511,15 @@ static test_result_t test_link_slice_inherits(void) {
     TEST_ASSERT_TRUE(ray_link_has(slice));
     TEST_ASSERT_EQ_I(ray_link_target_id(slice), custs_sym);
 
+    /* (.col.target slice) builtin must also report the parent's target,
+     * not garbage from reading the slice's bytes 8-15 as a sym ID. */
+    ray_t* tgt_sym = ray_col_target_fn(slice);
+    TEST_ASSERT_NOT_NULL(tgt_sym);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(tgt_sym));
+    TEST_ASSERT_EQ_I(tgt_sym->type, -RAY_SYM);
+    TEST_ASSERT_EQ_I(tgt_sym->i64, custs_sym);
+    ray_release(tgt_sym);
+
     /* Deref must work and produce the right values for rids [2,1,0]. */
     int64_t age_sym = ray_sym_intern("age", 3);
     ray_t* result = ray_link_deref(slice, age_sym);

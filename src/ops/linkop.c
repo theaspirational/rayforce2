@@ -282,5 +282,8 @@ ray_t* ray_col_link_p_fn(ray_t* v) {
 
 ray_t* ray_col_target_fn(ray_t* v) {
     if (!ray_link_has(v)) return RAY_NULL_OBJ;
-    return ray_sym(v->link_target);
+    /* Slice-aware: ray_link_target_id reads from slice_parent for slices,
+     * because v->link_target on a slice aliases slice_offset and would
+     * surface as a garbage sym ID. */
+    return ray_sym(ray_link_target_id(v));
 }
