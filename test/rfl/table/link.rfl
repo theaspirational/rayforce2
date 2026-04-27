@@ -9,6 +9,16 @@
 (alter 'tvi set 0 100)
 (.idx.has? tvi)         -- false
 
+;; A FAILED alter set (out-of-range / wrong-type idx) must NOT drop
+;; the index — the column data is unchanged, so the index stays valid.
+(set tv2 [5 1 9 3 7])
+(set tv2i (.idx.zone tv2))
+(.idx.has? tv2i)        -- true
+(alter 'tv2i set 99 100) !- index
+(.idx.has? tv2i)        -- true
+(alter 'tv2i set "bad" 100) !- type
+(.idx.has? tv2i)        -- true
+
 (set custs (table [id age name] (list [100 200 300] [18 25 42] (list 'alice 'bob 'carol))))
 
 ;; Build the link from raw row ids.

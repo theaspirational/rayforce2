@@ -609,9 +609,27 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
         var = ray_cow(var);
         if (RAY_IS_ERR(var)) { ray_release(idx); ray_release(val); ray_release(name_sym); return var; }
 
+        /* Validate idx shape + (for the atom case) bounds BEFORE we
+         * touch any state.  The accelerator-index drop below would
+         * otherwise outlive a failed write. */
+        bool idx_is_atom_num = ray_is_atom(idx) && is_numeric(idx);
+        bool idx_is_vec      = ray_is_vec(idx);
+        if (!idx_is_atom_num && !idx_is_vec) {
+            ray_release(idx); ray_release(val); ray_release(name_sym);
+            return ray_error("type", NULL);
+        }
+        if (idx_is_atom_num) {
+            int64_t i_check = as_i64(idx);
+            if (i_check < 0 || i_check >= var->len) {
+                ray_release(idx); ray_release(val); ray_release(name_sym);
+                return ray_error("index", NULL);
+            }
+        }
+
         /* alter's set path writes via store_typed_elem, which bypasses
-         * ray_vec_set's mutation guard.  Drop any attached accelerator
-         * index explicitly so a stale index doesn't outlive the write. */
+         * ray_vec_set's mutation guard.  Now that we know the write
+         * will reach the data array, drop any attached accelerator
+         * index so it can't outlive the mutation. */
         if (var->attrs & RAY_ATTR_HAS_INDEX) {
             ray_t* drop_r = ray_index_drop(&var);
             if (RAY_IS_ERR(drop_r)) {
@@ -620,13 +638,12 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
             }
         }
 
-        if (ray_is_atom(idx) && is_numeric(idx)) {
-            /* Single index */
+        if (idx_is_atom_num) {
+            /* Single index — bounds already validated above. */
             int64_t i = as_i64(idx);
             ray_release(idx);
-            if (i < 0 || i >= var->len) { ray_release(val); ray_release(name_sym); return ray_error("index", NULL); }
             store_typed_elem(var, i, val);
-        } else if (ray_is_vec(idx)) {
+        } else {
             /* Vector of indices — set each to val.
              * If val is a vector of same length, set pairwise.
              * If val is scalar or shorter, broadcast. */
@@ -648,9 +665,6 @@ ray_t* ray_alter_fn(ray_t** args, int64_t n) {
                 }
             }
             ray_release(idx);
-        } else {
-            ray_release(idx); ray_release(val); ray_release(name_sym);
-            return ray_error("type", NULL);
         }
         ray_release(val);
         ray_env_set(name_sym->i64, var);
