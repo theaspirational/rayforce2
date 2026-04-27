@@ -412,6 +412,38 @@ static ray_err_t col_save_table(ray_t* tbl, FILE* f) {
 }
 
 /* --------------------------------------------------------------------------
+ * try_load_link_sidecar -- attach HAS_LINK to vec from `<path>.link`
+ *
+ * Best-effort: missing sidecar, unreadable file, or empty contents leave
+ * vec as a plain int column.  Only RAY_I32 / RAY_I64 columns are eligible.
+ * The sidecar holds the target table sym name in plain text; we intern it
+ * into the local sym table and write the resulting sym ID + HAS_LINK bit.
+ * Used by both ray_col_load (buddy-copy path) and ray_col_mmap (zero-copy
+ * path) so linked columns survive both load styles.
+ * -------------------------------------------------------------------------- */
+static void try_load_link_sidecar(ray_t* vec, const char* path) {
+    if (!vec || (vec->type != RAY_I32 && vec->type != RAY_I64)) return;
+    char link_path[1024];
+    size_t plen = strlen(path);
+    if (plen + 6 >= sizeof(link_path)) return;
+    memcpy(link_path, path, plen);
+    memcpy(link_path + plen, ".link", 6);
+    FILE* lf = fopen(link_path, "rb");
+    if (!lf) return;
+    char buf[256];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, lf);
+    fclose(lf);
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r'
+                  || buf[n-1] == ' '  || buf[n-1] == '\t'
+                  || buf[n-1] == '\0')) n--;
+    if (n == 0) return;
+    int64_t target_sym = ray_sym_intern(buf, n);
+    if (target_sym < 0) return;
+    vec->link_target = target_sym;
+    vec->attrs |= RAY_ATTR_HAS_LINK;
+}
+
+/* --------------------------------------------------------------------------
  * ray_col_save -- write a vector to a column file
  * -------------------------------------------------------------------------- */
 
@@ -797,35 +829,7 @@ ray_t* ray_col_load(const char* path) {
         }
     }
 
-    /* Linked-column sidecar: if `<path>.link` exists and the column is
-     * RAY_I32/RAY_I64, intern the target name into the local sym table
-     * and reattach HAS_LINK + link_target.  Failure to read the sidecar
-     * is non-fatal — the column loads as a plain int vec. */
-    if ((vec->type == RAY_I32 || vec->type == RAY_I64)) {
-        char link_path[1024];
-        size_t plen = strlen(path);
-        if (plen + 6 < sizeof(link_path)) {
-            memcpy(link_path, path, plen);
-            memcpy(link_path + plen, ".link", 6);
-            FILE* lf = fopen(link_path, "rb");
-            if (lf) {
-                char buf[256];
-                size_t n = fread(buf, 1, sizeof(buf) - 1, lf);
-                fclose(lf);
-                /* Trim trailing whitespace / NUL. */
-                while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r'
-                              || buf[n-1] == ' '  || buf[n-1] == '\t'
-                              || buf[n-1] == '\0')) n--;
-                if (n > 0) {
-                    int64_t target_sym = ray_sym_intern(buf, n);
-                    if (target_sym >= 0) {
-                        vec->link_target = target_sym;
-                        vec->attrs |= RAY_ATTR_HAS_LINK;
-                    }
-                }
-            }
-        }
-    }
+    try_load_link_sidecar(vec, path);
 
     return vec;
 }
@@ -883,6 +887,11 @@ ray_t* ray_col_mmap(const char* path) {
     if (!cm.has_ext_nullmap)
         vec->attrs &= ~RAY_ATTR_NULLMAP_EXT;
     ray_atomic_store(&vec->rc, 1);
+
+    /* Reattach link sidecar if present.  Without this, linked columns
+     * round-tripped through splay-mmap (splay.c:184) lose HAS_LINK
+     * even though ray_col_load restores it. */
+    try_load_link_sidecar(vec, path);
 
     return vec;
 }

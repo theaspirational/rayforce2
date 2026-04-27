@@ -326,6 +326,71 @@ static test_result_t test_link_persistence_roundtrip(void) {
     PASS();
 }
 
+/* ─── Sidecar must be picked up by ray_col_mmap too (splay-mmap path) ── */
+
+static test_result_t test_link_mmap_loads_sidecar(void) {
+    int64_t rids[] = { 0, 1, 2 };
+    ray_t* v = make_i64_vec(rids, 3);
+
+    ray_t* target = build_target_table("custs");
+    int64_t custs_sym = ray_sym_intern("custs", 5);
+    ray_env_set(custs_sym, target);
+    ray_release(target);
+
+    ray_t* w = v;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_link_attach(&w, custs_sym)));
+
+    char path[] = "/tmp/link_mmap_test_XXXXXX";
+    int fd = mkstemp(path);
+    TEST_ASSERT_TRUE(fd >= 0);
+    close(fd);
+    TEST_ASSERT_EQ_I(ray_col_save(w, path), RAY_OK);
+
+    /* Load via mmap path (splayed-table mmap mode uses this). */
+    ray_t* mapped = ray_col_mmap(path);
+    TEST_ASSERT_FALSE(RAY_IS_ERR(mapped));
+    TEST_ASSERT_TRUE(mapped->attrs & RAY_ATTR_HAS_LINK);
+    TEST_ASSERT_EQ_I(mapped->link_target, custs_sym);
+
+    char link_path[256];
+    snprintf(link_path, sizeof link_path, "%s.link", path);
+    unlink(path);
+    unlink(link_path);
+    ray_release(mapped);
+    ray_release(w);
+    PASS();
+}
+
+/* ─── Deref must NOT leak the target table ref ────────────────────── */
+
+static test_result_t test_link_deref_no_target_leak(void) {
+    int64_t rids[] = { 2, 0, 1, 2 };
+    ray_t* v = make_i64_vec(rids, 4);
+
+    ray_t* target = build_target_table("custs");
+    int64_t custs_sym = ray_sym_intern("custs", 5);
+    ray_env_set(custs_sym, target);
+    /* Snapshot target rc after env-set + our local hold. */
+    uint32_t rc_before = ray_atomic_load(&target->rc);
+
+    ray_t* w = v;
+    TEST_ASSERT_FALSE(RAY_IS_ERR(ray_link_attach(&w, custs_sym)));
+    int64_t age_sym = ray_sym_intern("age", 3);
+
+    /* Run many derefs; rc on target must not grow. */
+    for (int i = 0; i < 100; i++) {
+        ray_t* r = ray_link_deref(w, age_sym);
+        TEST_ASSERT_FALSE(RAY_IS_ERR(r));
+        ray_release(r);
+    }
+    uint32_t rc_after = ray_atomic_load(&target->rc);
+    TEST_ASSERT_EQ_U(rc_before, rc_after);
+
+    ray_release(target);
+    ray_release(w);
+    PASS();
+}
+
 /* ─── Phase 4: coexistence with HAS_INDEX ─────────────────────────── */
 
 static test_result_t test_link_coexists_with_index(void) {
@@ -380,5 +445,7 @@ const test_entry_t link_entries[] = {
     { "link/deref_oob_yields_null",          test_link_deref_oob_yields_null,         link_setup, link_teardown },
     { "link/persistence_roundtrip",          test_link_persistence_roundtrip,         link_setup, link_teardown },
     { "link/coexists_with_index",            test_link_coexists_with_index,           link_setup, link_teardown },
+    { "link/mmap_loads_sidecar",             test_link_mmap_loads_sidecar,            link_setup, link_teardown },
+    { "link/deref_no_target_leak",           test_link_deref_no_target_leak,          link_setup, link_teardown },
     { NULL, NULL, NULL, NULL },
 };

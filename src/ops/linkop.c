@@ -79,7 +79,7 @@ ray_t* ray_link_attach(ray_t** vp, int64_t target_sym_id) {
         return ray_error("type", "link: invalid target sym ID");
 
     /* Validate that target_sym_id resolves to a RAY_TABLE in the env. */
-    ray_t* target = ray_env_resolve(target_sym_id);
+    ray_t* target = ray_env_get(target_sym_id);
     if (!target || target->type != RAY_TABLE)
         return ray_error("name", "link: target sym does not name a table");
 
@@ -142,7 +142,7 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
     if (!ray_link_has(v)) return NULL;
     if (v->type != RAY_I32 && v->type != RAY_I64) return NULL;
 
-    ray_t* target_tab = ray_env_resolve(v->link_target);
+    ray_t* target_tab = ray_env_get(v->link_target);
     if (!target_tab || target_tab->type != RAY_TABLE) return NULL;
 
     ray_t* target_col = ray_table_get_col(target_tab, sym_id);
